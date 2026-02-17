@@ -1,0 +1,47 @@
+{
+  "name": "bare-agent",
+  "version": "0.1.0",
+  "description": "Lightweight, composable agent orchestration. ~800 lines, 0 required deps.",
+  "license": "MIT",
+  "author": "hamr0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamr0/bareagent.git"
+  },
+  "main": "index.js",
+  "bin": {
+    "bare-agent": "./bin/cli.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./providers": "./src/providers.js",
+    "./stores": "./src/stores.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "orchestration",
+    "ai",
+    "tool-calling",
+    "planner",
+    "lightweight"
+  ],
+  "dependencies": {},
+  "optionalDependencies": {
+    "cron-parser": "^4.9.0"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=9.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/**/*.test.js"
+  }
+}
