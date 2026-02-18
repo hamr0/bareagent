@@ -318,11 +318,20 @@ Time-triggered agent turns. The only way the agent acts without being messaged.
 
 ## What's stubbed (not yet implemented)
 
-All components implemented. POC 7 (multis integration) is next.
+All components implemented and validated end-to-end.
 
 ---
 
 ## Test results
+
+### E2E tests — 4/4 pass
+
+| Scenario | Components | What's proven |
+|----------|-----------|--------------|
+| Full Stack | Planner + StateMachine + Loop (Retry + Stream + Checkpoint) + Memory (SQLiteStore) + JsonlTransport | Plan → topo-sort → execute → state track → memory accumulate → checkpoint gate → stream events + JSONL valid |
+| Memory + Checkpoint | Memory (SQLiteStore) + Loop + Checkpoint + Stream | Policy injection from Memory doesn't break checkpoint, event ordering preserved, timestamps monotonic |
+| Scheduler + Memory | Scheduler + Loop (Stream) + Memory (SQLiteStore) | Scheduled jobs sequential via re-entry guard, shared SQLite under concurrent handlers, memory grows across jobs |
+| CLI Multi-Request | CLI (subprocess) + Loop + Stream + JsonlTransport | 2 JSONL requests → 2 results, valid JSON framing, no state leaking between requests |
 
 ### Unit tests — 104/104 pass
 
@@ -422,7 +431,7 @@ All components implemented. POC 7 (multis integration) is next.
 | **Implemented total** | **1017** | |
 | **Target was** | **~820** | over by ~200 lines (CLI arg parsing, scheduler re-entry guard, FTS triggers) |
 
-Test code: ~2100 lines across 14 files.
+Test code: ~2350 lines across 15 files.
 
 ---
 
@@ -578,7 +587,23 @@ Test code: ~2100 lines across 14 files.
 
 **Bug caught:** With short tick intervals (50ms in tests), the same job would fire repeatedly while the async handler was still running the LLM call (~800ms). Fixed with `_running` Set guard.
 
-### POC 7: multis integration — pending
+### POC 7: E2E Composition Tests ✅
+
+**Goal:** Prove all components compose correctly in realistic multi-step workflows (5+ components wired together).
+
+**Built:** `test/e2e.test.js` — 4 scenarios, ~250 lines
+
+**Validated:**
+- ✅ Full stack: Planner → StateMachine → Loop (Retry + Stream + Checkpoint) → Memory (SQLiteStore) → JsonlTransport — all tasks reach `done`, memory accumulates across steps, checkpoint gates `send_email`, stream events and JSONL buffer valid
+- ✅ Memory + Checkpoint in same Loop: policy injection from Memory doesn't break checkpoint flow, event ordering preserved, timestamps monotonically increasing
+- ✅ Scheduler + Memory accumulation: 2 scheduled jobs run sequentially (re-entry guard), shared SQLite store handles concurrent writes, memory grows from seed + job results, LLM uses memory context to answer correctly
+- ✅ CLI multi-request: 2 sequential JSONL requests via subprocess, both produce valid results, all events are valid JSON, no state leaking between requests
+
+**Key findings:**
+- CLI processes concurrent requests (async `rl.on('line')` handlers), not sequential — events from different requests can interleave
+- Scheduler's re-entry guard is per-job-id, but the tick loop `await`s each handler, making same-tick jobs sequential
+- Cross-component data flow works: Planner output → StateMachine tracking → Loop execution → Memory storage → Memory search → next step context injection
+- ~8 LLM calls total, ~25s wall time, <$0.02
 
 ---
 
@@ -588,5 +613,6 @@ Test code: ~2100 lines across 14 files.
 - **Test framework:** `node:test` (built-in)
 - **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js`
 - **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js`
+- **Test command (E2E):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) node --test test/e2e.test.js`
 - **Ollama:** podman container, port 11434, model `qwen2.5:0.5b`
 - **Dependencies:** 0 required, `cron-parser` optional, `better-sqlite3` peer

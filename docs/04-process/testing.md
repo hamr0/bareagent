@@ -8,20 +8,20 @@
 
 ```
           ╱╲
-         ╱  ╲          E2E (POC 7)
-        ╱ ?? ╲         Real consumer (multis) using bare-agent as engine
-       ╱──────╲        Proves: drop-in replacement, no regression
-      ╱        ╲
-     ╱Integration╲    Integration (per POC)
-    ╱   42 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
-   ╱───────────────╲   Proves: providers parse real responses, plans are sensible, memory search works, full pipeline works
-  ╱                  ╲
- ╱   Unit — 104 pass  ╲  Unit (per component)
-╱______________________╲  Mock provider, no network
-                          Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
+         ╱  ╲          E2E — 4 pass
+        ╱ E2E ╲        Multi-component composition (5+ wired together)
+       ╱───────╲       Proves: cross-component data flow, event ordering, shared state
+      ╱          ╲
+     ╱ Integration╲    Integration — 42 pass
+    ╱   42 pass    ╲   Real API calls — OpenAI, Anthropic, Ollama
+   ╱────────────────╲  Proves: providers parse real responses, plans are sensible, memory search works
+  ╱                   ╲
+ ╱   Unit — 104 pass   ╲  Unit (per component)
+╱________________________╲  Mock provider, no network
+                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
 ```
 
-**Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates the library works as a dependency. Never skip a layer.
+**Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates all components compose correctly. Never skip a layer.
 
 ---
 
@@ -35,6 +35,10 @@ node --test test/retry.test.js test/loop.test.js test/providers.test.js test/pla
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
 node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js
+
+# E2E tests (requires OPENAI_API_KEY)
+OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
+node --test test/e2e.test.js
 
 # All tests
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -353,13 +357,46 @@ These bugs would have been invisible with mock providers. The mocks would have a
 
 ---
 
-## E2E tests — not yet
+## E2E tests
 
-POC 7 will test bare-agent as a dependency in multis:
-- Import Loop + Anthropic provider into multis
-- Replace `runAgentLoop()` with `loop.run()`
-- Run existing multis test suite
-- Verify: same tools work, same response quality, no performance regression
+Multi-component composition tests. Each scenario wires 5+ components together in realistic workflows.
+
+### `test/e2e.test.js` — 4 tests
+
+**Scenario 1: Full Stack — "plan, execute, track, stream"**
+
+| Components | Planner + StateMachine + Loop (Retry + Stream + Checkpoint) + Memory (SQLiteStore) + JsonlTransport |
+|---|---|
+| Flow | Planner decomposes goal → topo-sort → for each step: StateMachine transition → Loop with tools → Memory store result → Memory search for next step context |
+| Tools | `search_flights` (stub returns 3 options), `send_email` (checkpoint-gated, auto-approved) |
+| Assertions | All tasks reach `done`, Memory contains flight results, stream has loop + checkpoint events, JSONL buffer valid, checkpoint asked array non-empty, state file matches in-memory |
+| Catches | Cross-component data flow breakage, stream event loss, checkpoint interfering with retry |
+
+**Scenario 2: Memory + Checkpoint in Same Loop**
+
+| Components | Memory (SQLiteStore) + Loop + Checkpoint + Stream |
+|---|---|
+| Flow | Pre-populate Memory with email policy → search → inject as system context → Loop with checkpoint-gated `send_email` |
+| Assertions | `send_email` called, checkpoint fired, `checkpoint:ask` precedes `loop:tool_result`, all timestamps monotonically increasing |
+| Catches | Memory injection breaking checkpoint flow, event ordering when checkpoint pauses mid-loop |
+
+**Scenario 3: Scheduler + Memory Accumulation**
+
+| Components | Scheduler + Loop (Stream) + Memory (SQLiteStore) |
+|---|---|
+| Flow | Seed Memory → schedule 2 immediate one-shot jobs → handler: search Memory → build context → Loop → store result |
+| Assertions | Both jobs `done`, Memory has 3+ entries, Job A mentions "March 15", 2+ `loop:start` events, timestamps monotonic |
+| Catches | Shared SQLite store under concurrent scheduler handlers, stream interleaving, re-entry guard interaction |
+
+**Scenario 4: CLI Multi-Request**
+
+| Components | CLI (subprocess) + Loop + Stream + JsonlTransport |
+|---|---|
+| Flow | Spawn CLI → send 2 JSONL requests on stdin → collect stdout events |
+| Assertions | Exit code 0, exactly 2 `result` events with correct answers, 2 `loop:start` + 2 `loop:done`, all events valid JSON |
+| Catches | Multi-request stdin handling, state leaking between requests, JSONL framing |
+
+**Key finding:** CLI `rl.on('line')` fires independent async handlers, so concurrent requests interleave rather than execute sequentially. Assertions validate both results arrive, not strict ordering.
 
 ---
 
@@ -369,7 +406,7 @@ POC 7 will test bare-agent as a dependency in multis:
 
 2. **Integration tests are for compatibility.** Does the OpenAI API actually return tool calls in the format we expect? Does Anthropic's `tool_use` block have the fields we parse? Does Ollama generate a tool call ID? Hit the real API, prove it works.
 
-3. **E2E tests are for adoption.** Can a real project use bare-agent as a drop-in? Does it break anything? Does performance regress? Run the consumer's test suite with bare-agent swapped in.
+3. **E2E tests are for composition.** Do all components wire together without breaking? Does data flow correctly across 5+ component boundaries? Do shared resources (SQLite, streams) work under realistic multi-step workflows?
 
 4. **Never mock what you haven't proven real.** Integration tests run first for each provider. Only after the real API shape is validated do we trust mock providers in unit tests.
 
