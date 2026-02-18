@@ -1,17 +1,18 @@
 'use strict';
 
 /**
- * JSONL transport: one JSON object per line to stdout.
- * Pipe-friendly, parseable by any language.
+ * JSONL transport: one JSON object per line to a writable stream.
+ * Default: process.stdout. Pipe-friendly, parseable by any language.
  *
- * Used by Stream for cross-process communication.
  * Debug output goes to stderr (never pollutes stdout).
- *
- * ~30 lines target.
  */
 class JsonlTransport {
+  constructor(options = {}) {
+    this._output = options.output || process.stdout;
+  }
+
   write(event) {
-    process.stdout.write(JSON.stringify(event) + '\n');
+    this._output.write(JSON.stringify(event) + '\n');
   }
 }
 

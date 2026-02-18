@@ -12,14 +12,14 @@ Lightweight, composable agent orchestration. Each component is standalone — us
 ORCHESTRATION          EXECUTION              ACTUATION
   Planner ✅             Loop ✅               User-provided:
   State ✅               Scheduler (stub)        REST APIs
-  Stream (stub)          Memory ✅               MCP servers
+  Stream ✅              Memory ✅               MCP servers
                          Checkpoint ✅             CLI commands
                          Retry ✅                 Browser automation
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅
 **Stores:** SQLite ✅ | JSONFile ✅
-**Transport:** JSONL (stub)
+**Transport:** JSONL ✅
 
 ---
 
@@ -246,20 +246,61 @@ Zero-dep JSON file store with case-insensitive substring search.
 
 ---
 
+### Stream (`src/stream.js` — 33 lines)
+
+Structured event emitter with transport support. The observability layer for Loop and all other components.
+
+**Interface:**
+- `emit(event)` → void — adds timestamp, notifies subscribers, writes to transport
+- `subscribe(callback)` → unsubscribe function
+
+**Behavior:**
+- Events get `ts` field auto-injected (ISO 8601) unless already present
+- Subscriber errors are caught silently (one bad subscriber doesn't break others)
+- Transport: any object with `write(event)` method (e.g. JsonlTransport)
+- No transport = subscribers only (in-process observability)
+
+### JsonlTransport (`src/transport-jsonl.js` — 14 lines)
+
+Writes one JSON object per line to a writable stream. The cross-language bridge.
+
+**Behavior:**
+- Default output: `process.stdout`
+- Custom output: any `Writable` stream (for testing, file output, etc.)
+- Each event is `JSON.stringify(event) + '\n'`
+
+### CLI (`bin/cli.js` — 65 lines)
+
+Subprocess entry point for cross-language consumption. Any language spawns this process, sends JSONL on stdin, reads JSONL events from stdout.
+
+**Usage:**
+```bash
+echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
+  node bin/cli.js --provider openai --model gpt-4o-mini
+```
+
+**Behavior:**
+- Reads one JSON request per line from stdin
+- Supports `params.goal` (string) or `params.messages` (array)
+- Creates provider from `--provider` flag (openai/anthropic/ollama)
+- API keys from env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`)
+- All Loop events streamed as JSONL to stdout
+- Final `result` event contains `{ text, toolCalls, usage }`
+- Waits for pending requests before exiting (no premature close)
+
+---
+
 ## What's stubbed (not yet implemented)
 
 | Component | File | Lines | POC |
 |-----------|------|-------|-----|
-| Stream | `src/stream.js` | stub | POC 5 |
-| Transport: JSONL | `src/transport-jsonl.js` | stub | POC 5 |
 | Scheduler | `src/scheduler.js` | stub | POC 6 |
-| CLI | `bin/cli.js` | stub | POC 5 |
 
 ---
 
 ## Test results
 
-### Unit tests — 77/77 pass
+### Unit tests — 88/88 pass
 
 | Suite | Tests | What's covered |
 |-------|-------|---------------|
@@ -273,8 +314,10 @@ Zero-dep JSON file store with case-insensitive substring search.
 | Memory | 2 | requires store, delegates all methods to store |
 | JsonFileStore | 8 | requires path, store+get roundtrip, substring search (case-insensitive), empty query, limit, delete, persistence across instances, null for missing id |
 | SQLiteStore | 10 | requires path, store+get roundtrip, FTS5 search relevance, BM25 ranking, empty query, limit, delete removes FTS index, persistence, null for missing id, special characters |
+| Stream | 9 | emit to subscribers, auto-timestamp, preserve existing timestamp, multiple subscribers, unsubscribe, subscriber error isolation, transport write, no-transport mode, Loop compatibility |
+| JsonlTransport | 2 | JSON + newline format, multiple writes |
 
-### Integration tests — 33/33 pass (real APIs)
+### Integration tests — 38/38 pass (real APIs)
 
 **POC 1 — Loop + Providers (11 tests):**
 
@@ -308,6 +351,14 @@ Zero-dep JSON file store with case-insensitive substring search.
 | Memory + Loop + OpenAI | 1 | LLM uses memory search results to answer about hotel (real API, gpt-4o-mini) |
 | Memory + Loop + Anthropic | 1 | LLM uses memory search results to answer about budget+flights (real API, claude-haiku-4-5) |
 
+**POC 5 — Stream + CLI (5 tests):**
+
+| Suite | Tests | What's proven |
+|-------|-------|--------------|
+| Stream + Loop + OpenAI | 2 | real stream events emitted (loop:start/text/done), JSONL transport writes valid JSON lines |
+| Stream + Loop + Anthropic | 1 | real stream events with Anthropic provider |
+| CLI subprocess | 2 | JSONL roundtrip (spawn → send goal → receive events → result), messages format support |
+
 ### Bugs caught by integration tests
 
 1. **API key formatting:** `pass` returns multi-line entries. Keys from env vars can have trailing whitespace/newlines. Fixed: `.trim()` in provider constructors.
@@ -330,14 +381,14 @@ Zero-dep JSON file store with case-insensitive substring search.
 | `src/memory.js` | 22 | ✅ implemented |
 | `src/store-sqlite.js` | 95 | ✅ implemented |
 | `src/store-jsonfile.js` | 47 | ✅ implemented |
-| **Implemented total** | **798** | |
-| `src/stream.js` | stub | pending |
+| `src/stream.js` | 33 | ✅ implemented |
+| `src/transport-jsonl.js` | 14 | ✅ implemented |
+| `bin/cli.js` | 65 | ✅ implemented |
+| **Implemented total** | **910** | |
 | `src/scheduler.js` | stub | pending |
-| `src/transport-jsonl.js` | stub | pending |
-| `bin/cli.js` | stub | pending |
-| **Target total** | **~820** | |
+| **Target total** | **~820** | slightly over due to CLI arg parsing |
 
-Test code: ~1600 lines across 10 files.
+Test code: ~1850 lines across 12 files.
 
 ---
 
@@ -440,7 +491,32 @@ Test code: ~1600 lines across 10 files.
 - JsonFileStore score is always 1 (no ranking capability — documented as persistence, not search).
 - `better-sqlite3` peer dep — clear error message if missing.
 
-### POC 5: Stream + cross-language — pending
+### POC 5: Stream + Cross-Language ✅
+
+**Goal:** Prove JSONL streaming works as observability layer and cross-language bridge.
+
+**Built:** stream.js, transport-jsonl.js, bin/cli.js
+
+**Validated:**
+- ✅ Stream emits events with auto-injected timestamps
+- ✅ Multiple subscribers receive same events independently
+- ✅ Subscriber errors don't crash other subscribers
+- ✅ Unsubscribe correctly removes listener
+- ✅ Transport receives all events (JsonlTransport writes valid JSONL)
+- ✅ Loop + Stream + OpenAI: real events flow (loop:start, loop:text, loop:done)
+- ✅ Loop + Stream + Anthropic: real events flow
+- ✅ JSONL transport writes parseable JSON lines to buffer
+- ✅ CLI subprocess: spawn process, send JSONL goal on stdin, receive JSONL events on stdout
+- ✅ CLI handles both `params.goal` (string) and `params.messages` (array) formats
+- ✅ CLI waits for pending async requests before exiting
+
+**Key design decisions:**
+- Stream is 33 lines — EventEmitter pattern, not Node EventEmitter (simpler, no inheritance).
+- JsonlTransport is 14 lines — accepts any Writable (testable without stdout).
+- CLI uses pending counter to avoid premature exit on stdin close.
+- CLI requires no configuration file — provider and model via CLI flags, keys via env vars.
+
+**Bug caught:** CLI exited before async `loop.run()` completed. readline `close` event fires immediately when stdin ends, not after async line handlers finish. Fixed with pending request counter.
 
 ### POC 6: Scheduler — pending
 
@@ -452,7 +528,7 @@ Test code: ~1600 lines across 10 files.
 
 - **Runtime:** Node.js >= 18
 - **Test framework:** `node:test` (built-in)
-- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js`
-- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js`
+- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js`
+- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js`
 - **Ollama:** podman container, port 11434, model `qwen2.5:0.5b`
 - **Dependencies:** 0 required, `cron-parser` optional, `better-sqlite3` peer

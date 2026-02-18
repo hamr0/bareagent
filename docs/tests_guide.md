@@ -13,10 +13,10 @@
        ╱──────╲        Proves: drop-in replacement, no regression
       ╱        ╲
      ╱Integration╲    Integration (per POC)
-    ╱   33 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
+    ╱   38 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱───────────────╲   Proves: providers parse real responses, plans are sensible, memory search works, full pipeline works
   ╱                  ╲
- ╱    Unit — 77 pass  ╲  Unit (per component)
+ ╱    Unit — 88 pass  ╲  Unit (per component)
 ╱______________________╲  Mock provider, no network
                           Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
 ```
@@ -29,12 +29,12 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js
+node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
-node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js
+node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js
 
 # All tests
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -159,6 +159,29 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | get returns null for non-existent id | No crash on missing ID |
 | handles special characters in search query | Parentheses, colons don't crash FTS5 |
 
+### `test/stream.test.js` — 11 tests
+
+**Stream — 9 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| emits events to subscribers | Basic emit → subscribe flow |
+| adds timestamp to events | Auto-injected ISO 8601 ts field |
+| preserves existing timestamp | User-provided ts not overwritten |
+| supports multiple subscribers | Both receive same event |
+| unsubscribe removes listener | Returned function stops delivery |
+| subscriber errors do not crash emit | Bad subscriber isolated, others continue |
+| writes to transport when provided | Transport.write() called with full event |
+| works without transport | No transport = subscribers only, no crash |
+| works with Loop mock pattern | Compatible with `stream?.emit()` pattern in Loop |
+
+**JsonlTransport — 2 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| writes JSON + newline to output | Valid JSON terminated by \n |
+| handles multiple writes | Sequential writes produce separate lines |
+
 ---
 
 ## Integration tests
@@ -251,6 +274,28 @@ Validates: plan → sort → state tracking → loop execution → persistence. 
 |------|---------------|
 | LLM uses memory search results to answer | Search "budget flight" → context → LLM answers about cheapest flight vs budget |
 
+### `test/integration-poc5.test.js` — 5 tests
+
+**Stream + Loop + OpenAI (gpt-4o-mini) — 2 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| Loop emits real stream events with Stream instance | loop:start, loop:text, loop:done all emitted with timestamps |
+| Stream + JsonlTransport writes JSONL to buffer | Each event is valid JSON line, at least 3 events per run |
+
+**Stream + Loop + Anthropic (claude-haiku-4-5) — 1 test:**
+
+| Test | What it proves |
+|------|---------------|
+| Loop emits real stream events with Anthropic provider | loop:start and loop:done emitted |
+
+**CLI subprocess — 2 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| responds to JSONL request with stream events | Full roundtrip: spawn → send goal on stdin → receive JSONL events on stdout → loop:start + result present |
+| handles messages format | `params.messages` array works (not just `params.goal` string) |
+
 ### Skipping behavior
 
 - OpenAI/Anthropic tests skip if their API key env var is not set
@@ -264,6 +309,7 @@ Validates: plan → sort → state tracking → loop execution → persistence. 
 |-----|-------------------|-----------|
 | API key formatting | `ERR_INVALID_CHAR` in HTTP header | `pass` returns key + metadata on multiple lines; env var had newline |
 | Anthropic message format | `messages.1.content: Input should be a valid list` | Loop builds assistant messages in OpenAI format (`tool_calls` array). Anthropic needs `content: [{ type: 'tool_use' }]` blocks. Provider wasn't normalizing. |
+| CLI premature exit | CLI subprocess returned only 1 event instead of 3+ | readline `close` event fires when stdin ends, before async `line` handlers complete. `process.exit(0)` killed the process mid-request. Fixed with pending request counter. |
 
 These bugs would have been invisible with mock providers. The mocks would have accepted any message format and returned scripted responses.
 

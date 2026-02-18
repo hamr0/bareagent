@@ -10,32 +10,31 @@
  * Event shape:
  *   { type, taskId, data, ts }
  *
- * Event types:
- *   loop:start, loop:tool_call, loop:tool_result, loop:text, loop:done, loop:error
- *   plan:created, plan:step_start, plan:step_done
- *   task:transition
- *   schedule:job_run, schedule:job_done
- *   checkpoint:ask, checkpoint:reply
- *
  * Transport:
- *   'jsonl'   — one JSON object per line to stdout (default)
- *   'memory'  — in-memory EventEmitter
- *   null      — disabled
- *
- * ~50 lines target.
+ *   Object with write(event) method — e.g. JsonlTransport
+ *   null — disabled (subscribers only)
  */
 class Stream {
   constructor(options = {}) {
-    // TODO: POC 5
-    throw new Error('Not implemented — see POC 5');
+    this._transport = options.transport || null;
+    this._subscribers = [];
   }
 
   emit(event) {
-    throw new Error('Not implemented');
+    const full = { ...event, ts: event.ts || new Date().toISOString() };
+    for (const fn of this._subscribers) {
+      try { fn(full); } catch {}
+    }
+    if (this._transport) {
+      this._transport.write(full);
+    }
   }
 
   subscribe(callback) {
-    throw new Error('Not implemented');
+    this._subscribers.push(callback);
+    return () => {
+      this._subscribers = this._subscribers.filter(fn => fn !== callback);
+    };
   }
 }
 
