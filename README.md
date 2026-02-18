@@ -1,8 +1,19 @@
+
+```
+     _                                            _
+    | |__   __ _ _ __ ___        __ _  __ _  ___ | |_
+    | '_ \ / _` | '__/ _ \_____ / _` |/ _` |/ _ \| __|
+    | |_) | (_| | | |  __/_____| (_| | (_| |  __/| |_
+    |_.__/ \__,_|_|  \___|      \__,_|\__, |\___| \__|
+                                      |___/
+          the brain, without the bloat.
+```
+
 # bare-agent
 
-Lightweight, composable agent orchestration. ~800 lines, 0 required deps, MIT license.
+**Agent orchestration in ~800 lines. Zero required deps. MIT license.**
 
-Use what you need, ignore the rest. Works as npm import or cross-language subprocess.
+Everything between "call the LLM" and "ship the agent" — loop, plan, remember, schedule, checkpoint. Each works alone. All compose together.
 
 ```
 npm install bare-agent
@@ -10,108 +21,134 @@ npm install bare-agent
 
 ---
 
-## What this is
+## Why this exists
 
-The complete agent orchestration stack as independent, composable primitives. Each component is 30-100 lines, has a 2-4 method interface, and works standalone or composed with others.
+You want to build an agent. You have two choices:
 
-**Not a framework.** No middleware chains, no plugin systems, no lifecycle hooks. Just classes with methods you compose yourself.
+1. **Write it from scratch** — 250+ lines of boilerplate. Tool calling loop, retries, provider normalization, memory, state tracking. Everyone reinvents this.
+2. **Adopt a framework** — 50,000 lines, 200 deps, middleware chains, lifecycle hooks, plugin systems. 95% of it is irrelevant to your use case.
 
-## The problem
+**bare-agent is the middle ground.** Small enough to read in an afternoon. Complete enough that you stop reimplementing the same patterns. Each piece works alone — take what you need, ignore the rest.
 
-There's no middle ground between writing 250 lines from scratch (everyone reinvents the wheel) and adopting a 50k-line framework (95% irrelevant). bare-agent is that middle ground.
+Not a framework. Not an SDK. Just composable building blocks for agents.
+
+---
 
 ## Architecture
 
-```
-ORCHESTRATION — who does what, in what order
-  Planner     goal -> step DAG via LLM          ~60 lines
-  State       task lifecycle tracking            ~50 lines
-  Stream      JSONL event streaming              ~50 lines
+Three layers. You use the first two. You bring the third.
 
-EXECUTION — how the agent thinks and acts
-  Loop        think -> act -> observe cycle      ~90 lines
-  Scheduler   time-triggered agent turns         ~80 lines
-  Memory      persistence + search               ~30 lines + store
-  Checkpoint  human-in-the-loop approval         ~40 lines
-  Retry       backoff wrapper for tool calls     ~30 lines
+### Layer 1: ORCHESTRATION — who does what? in what order? what when things go wrong?
 
-ACTUATION — user-provided
-  Your tools: REST APIs, MCP servers, CLI, browser automation, etc.
-  bare-agent provides the brain. You provide the hands.
 ```
+Planner     goal -> step DAG via LLM
+State       task lifecycle tracking
+Stream      JSONL event streaming
+```
+
+Planner asks the LLM to decompose a goal into a JSON step DAG with dependencies, using structured output prompting. State tracks each step through `pending -> running -> done | failed`, persisted to a JSON file. Stream emits one JSON object per line to stdout — pipe-friendly, parseable by any language, ready for dashboards or cross-process monitoring.
+
+### Layer 2: EXECUTION — how the agent thinks, remembers, acts, and persist?
+
+```
+Loop        think -> act -> observe cycle
+Scheduler   time-triggered agent turns
+Memory      persistence + search
+Checkpoint  human-in-the-loop approval
+Retry       backoff wrapper for tool calls
+```
+
+Loop is the core engine — the only component most users need. It calls any OpenAI/Anthropic/Ollama provider, executes tool calls, appends results, and loops until the LLM responds with text. Scheduler triggers Loop runs on cron expressions (`0 7 * * 1-5`) or relative times (`2h`, `30m`). Memory persists information across sessions — SQLite FTS5 with BM25 ranking by default, JSON file fallback for zero deps. Checkpoint pauses before irreversible actions and waits for human approval — you provide the transport (readline, Telegram, WebSocket, whatever). Retry wraps any async function with exponential or linear backoff, retrying on 429/5xx/network errors.
+
+### Layer 3: ACTUATION — you provide this
+
+```
+bare-agent provides the brain. You provide the hands.
+Your tools plug into the Loop as functions:
+
+REST APIs       Gmail, Spotify, Calendar, any HTTP endpoint
+MCP servers     any MCP-compatible tool server
+CLI commands    termux-api, ffmpeg, git, shell scripts
+Browser         Playwright, Puppeteer
+UI automation   ADB, accessibility APIs
+```
+
+bare-agent does not ship tools. Your tools plug into the Loop as functions — `{ name, description, parameters, execute }`. The library handles orchestration. You handle action.
+
+### What bare-agent does NOT do
+
+| Not included | Why | Use instead |
+|---|---|---|
+| Tool implementations | Actuation is your domain | Your APIs, MCP servers, CLI commands |
+| Web UI / dashboard | AG-UI protocol exists | CopilotKit, or build your own |
+| Authentication | Every app has different auth | Wrap Checkpoint with your auth |
+| Browser automation | Separate concern, too heavy | Playwright, Puppeteer (as a tool) |
+| Multi-tenant isolation | Platform problem, not agent problem | Build on top with scope filtering |
+| Agent-to-agent protocol | A2A exists for this | Use A2A SDK when needed |
+
+---
 
 ## Quick start
 
-### Minimal — CLI chatbot (10 lines)
+### Minimal — 10 lines, one LLM call with tools
 
 ```javascript
 const { Loop } = require('bare-agent');
-const { OpenAI } = require('bare-agent/providers');
+const { OpenAIProvider } = require('bare-agent/providers');
 
 const loop = new Loop({
-  provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+  provider: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }),
 });
 
 const result = await loop.run([
-  { role: 'user', content: 'Hello, what can you do?' }
-], []);
+  { role: 'user', content: 'What is the weather in Berlin?' }
+], [weatherTool]);
+
 console.log(result.text);
 ```
 
-### With tools + human approval (30 lines)
+### With human approval — 30 lines
 
 ```javascript
 const { Loop, Checkpoint } = require('bare-agent');
-const { Anthropic } = require('bare-agent/providers');
+const { AnthropicProvider } = require('bare-agent/providers');
 
-const tools = [
-  {
-    name: 'send_email',
-    description: 'Send an email',
-    parameters: {
-      type: 'object',
-      properties: {
-        to: { type: 'string' },
-        subject: { type: 'string' },
-        body: { type: 'string' },
-      },
-      required: ['to', 'subject', 'body'],
-    },
-    execute: async ({ to, subject, body }) => {
-      // your email sending code
-      return `Email sent to ${to}`;
-    },
-  },
-];
+const checkpoint = new Checkpoint({
+  tools: ['send_email'],
+  send: (q) => console.log(`[APPROVE?] ${q}`),
+  waitForReply: () => new Promise(resolve =>
+    process.stdin.once('data', d => resolve(d.toString().trim()))
+  ),
+});
 
 const loop = new Loop({
-  provider: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
-  checkpoint: new Checkpoint({
-    tools: ['send_email'],
-    send: (q) => console.log(`[APPROVE?] ${q}`),
-    waitForReply: () => new Promise(r => process.stdin.once('data', d => r(d.toString().trim()))),
-  }),
+  provider: new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY }),
+  checkpoint,
 });
 
 const result = await loop.run([
-  { role: 'user', content: 'Email mom that I will be late tonight' }
-], tools);
+  { role: 'user', content: 'Email mom that I will be late' }
+], [emailTool]);
 ```
 
-### Full autonomous agent (40 lines)
+### Full autonomous agent — 40 lines
 
 ```javascript
 const { Loop, Planner, StateMachine, Scheduler,
         Memory, Checkpoint, Stream, Retry } = require('bare-agent');
-const { Anthropic } = require('bare-agent/providers');
-const { SQLite } = require('bare-agent/stores');
+const { AnthropicProvider } = require('bare-agent/providers');
+const { SQLiteStore } = require('bare-agent/stores');
+
+const provider = new AnthropicProvider({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  model: 'claude-haiku-4-5-20251001',
+});
 
 const loop = new Loop({
-  provider: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
+  provider,
   planner: new Planner({ provider }),
   state: new StateMachine({ file: './tasks.json' }),
-  memory: new Memory({ store: new SQLite('./agent.db') }),
-  scheduler: new Scheduler({ file: './jobs.json' }),
+  memory: new Memory({ store: new SQLiteStore('./agent.db') }),
   checkpoint: new Checkpoint({
     tools: ['purchase', 'send_email'],
     send: (q) => telegram.send(chatId, q),
@@ -121,50 +158,50 @@ const loop = new Loop({
   retry: new Retry({ maxAttempts: 3, backoff: 'exponential' }),
 });
 
-// Execute a multi-step goal with planning
 await loop.runGoal('Book my Berlin trip for next Tuesday');
-
-// Start scheduled jobs
-scheduler.start((job) => loop.run([{ role: 'user', content: job.action }], tools));
 ```
+
+---
 
 ## Components
 
 Every component is independent. Use one, use all, or bring your own.
 
-| Component | What it does | Interface |
-|-----------|-------------|-----------|
-| **Loop** | Think -> act -> observe cycle | `run(messages, tools)`, `chat(text, tools)`, `stop()` |
-| **Planner** | Break goal into steps with dependencies | `plan(goal, context)` |
-| **StateMachine** | Track task lifecycle | `transition(id, event)`, `getStatus(id)` |
-| **Scheduler** | Time-triggered agent turns | `add(job)`, `remove(id)`, `start()` |
-| **Memory** | Persist and search across sessions | `store(content, meta)`, `search(query)`, `get(id)` |
-| **Checkpoint** | Pause for human approval | `shouldAsk(tool, args)`, `ask(question)` |
-| **Stream** | Emit structured events (JSONL) | `emit(event)`, `subscribe(callback)` |
-| **Retry** | Backoff on transient failures | `call(fn, options)` |
+| Component | What it does | Lines |
+|---|---|---|
+| **Loop** | Think, act, observe cycle. The core engine. | ~90 |
+| **Planner** | Break a goal into a step DAG via LLM | ~60 |
+| **StateMachine** | Track task lifecycle (pending, running, done, failed) | ~50 |
+| **Scheduler** | Run agent turns at scheduled times | ~80 |
+| **Memory** | Store and search across sessions | ~30 + store |
+| **Checkpoint** | Pause for human approval before irreversible actions | ~40 |
+| **Stream** | Emit structured events as JSONL | ~50 |
+| **Retry** | Wrap async functions with backoff | ~30 |
 
 ## LLM Providers
 
-Three built-in, or bring your own. All implement one interface: `generate(messages, tools, options) -> { text, toolCalls, usage }`.
+Three built-in. All implement one method: `generate(messages, tools, options) -> { text, toolCalls, usage }`.
 
 | Provider | Covers |
-|----------|--------|
-| **OpenAI** | OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio, any OpenAI-compatible |
-| **Anthropic** | Claude models (native API, no OpenRouter tax) |
-| **Ollama** | Local models, no API key |
-| **Bring your own** | Implement `generate()` for any provider |
+|---|---|
+| **OpenAI** | OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio — any OpenAI-compatible endpoint |
+| **Anthropic** | Claude models via native API |
+| **Ollama** | Local models, no API key needed |
+| **Bring your own** | Implement `generate()` — one method, full control |
 
 ## Storage
 
 | Store | Deps | Search |
-|-------|------|--------|
-| **SQLite FTS5** (default) | `better-sqlite3` (peer dep) | Full-text search with BM25 ranking |
+|---|---|---|
+| **SQLite FTS5** | `better-sqlite3` (peer dep) | Full-text search with BM25 ranking |
 | **JSON file** | None | Substring matching |
-| **Bring your own** | None | Implement 4 methods |
+| **Bring your own** | None | Implement 4 methods for Postgres, Redis, etc. |
+
+---
 
 ## Cross-language usage
 
-Run bare-agent as a subprocess. Communicate via JSONL on stdin/stdout.
+bare-agent runs as a subprocess. Communicate via JSONL on stdin/stdout. Works from any language.
 
 ```python
 import subprocess, json
@@ -174,7 +211,10 @@ proc = subprocess.Popen(
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
 )
 
-proc.stdin.write(json.dumps({"method": "run", "params": {"goal": "What is 2+2?"}}) + '\n')
+proc.stdin.write(json.dumps({
+    "method": "run",
+    "params": {"goal": "What is 2+2?"}
+}) + '\n')
 proc.stdin.flush()
 
 for line in proc.stdout:
@@ -184,7 +224,9 @@ for line in proc.stdout:
         break
 ```
 
-Works from Python, Go, Rust, Java, Ruby — any language that can spawn a process and read lines.
+Same pattern works from Go, Rust, Java, Ruby — any language that can spawn a process and read lines.
+
+---
 
 ## Dependencies
 
@@ -192,13 +234,12 @@ Works from Python, Go, Rust, Java, Ruby — any language that can spawn a proces
 required:     0
 optional:     cron-parser (for cron expressions in scheduler)
 peer:         better-sqlite3 (for SQLite memory store)
+total lines:  ~820
 ```
 
 ## Status
 
-Early development. Components being built and validated via POCs.
-
-See [docs/agent-orchestration-plan.md](docs/agent-orchestration-plan.md) for the full project plan.
+Early development. Core components built and validated through POCs. See [project plan](docs/agent-orchestration-plan.md) for the full design.
 
 ## License
 
