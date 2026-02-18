@@ -10,8 +10,8 @@ Lightweight, composable agent orchestration. Each component is standalone — us
 
 ```
 ORCHESTRATION          EXECUTION              ACTUATION
-  Planner (stub)         Loop ✅               User-provided:
-  State (stub)           Scheduler (stub)        REST APIs
+  Planner ✅             Loop ✅               User-provided:
+  State ✅               Scheduler (stub)        REST APIs
   Stream (stub)          Memory (stub)            MCP servers
                          Checkpoint (stub)        CLI commands
                          Retry ✅                 Browser automation
@@ -116,14 +116,66 @@ Local models via Ollama. No API key, no auth.
 - Tool arguments: handles both string and object formats from Ollama
 - Usage: `prompt_eval_count` / `eval_count`
 
+### Planner (`src/planner.js` — 66 lines)
+
+Goal decomposition via LLM structured output. The LLM does the planning — this component is the prompt + JSON parsing.
+
+**Interface:**
+- `plan(goal, context)` → `[{ id, action, dependsOn: [], status: 'pending' }]`
+
+**Behavior:**
+- Sends goal to LLM with structured output prompt requesting JSON array
+- Temperature 0 for deterministic plans
+- Parses clean JSON, markdown-wrapped JSON, or JSON embedded in prose
+- Validates: unique IDs, every step has id + action, dependsOn references valid IDs
+- Filters out invalid dependency references (defensive)
+- Context object: optional `info` field injected as additional user message
+- Custom prompt override via constructor
+
+**Plan format:**
+```json
+[
+  { "id": "s1", "action": "Search flights to Berlin", "dependsOn": [], "status": "pending" },
+  { "id": "s2", "action": "Search hotels", "dependsOn": [], "status": "pending" },
+  { "id": "s3", "action": "Book flight", "dependsOn": ["s1"], "status": "pending" }
+]
+```
+
+Steps with no dependencies can run in parallel. Steps with `dependsOn` wait. User controls execution strategy.
+
+### StateMachine (`src/state.js` — 78 lines)
+
+Task lifecycle tracking with file persistence and event emission.
+
+**Interface:**
+- `transition(taskId, event, data)` → newStatus
+- `getStatus(taskId)` → `{ status, data, error, updatedAt }` or null
+- `onTransition(callback)` → unsubscribe function
+- `getAll()` → `{ id: { status, data, error, updatedAt }, ... }`
+
+**State transitions:**
+```
+pending → running → done
+                  → failed → running (retry)
+                  → waiting_for_input → running (resume)
+                  → cancelled
+```
+
+**Behavior:**
+- Auto-creates task in `pending` state on first transition
+- Invalid transitions throw (e.g. `done + start`)
+- `fail` event stores error in task, `complete` clears it
+- Extends EventEmitter — emits `transition` events with `{ taskId, from, to, event, data }`
+- File persistence: JSON written on every transition, loaded on construction
+- File is human-readable (pretty-printed JSON)
+- No file = in-memory only (for tests, ephemeral use)
+
 ---
 
 ## What's stubbed (not yet implemented)
 
 | Component | File | Lines | POC |
 |-----------|------|-------|-----|
-| Planner | `src/planner.js` | stub | POC 2 |
-| StateMachine | `src/state.js` | stub | POC 2 |
 | Checkpoint | `src/checkpoint.js` | stub | POC 3 |
 | Memory | `src/memory.js` | stub | POC 4 |
 | Store: SQLite | `src/store-sqlite.js` | stub | POC 4 |
@@ -137,21 +189,33 @@ Local models via Ollama. No API key, no auth.
 
 ## Test results
 
-### Unit tests — 24/24 pass
+### Unit tests — 47/47 pass
 
 | Suite | Tests | What's covered |
 |-------|-------|---------------|
 | Loop | 12 | constructor validation, text response, single tool call, multi-tool, unknown tool, tool error, maxRounds, stop(), chat() history, system prompt, stream events, provider error |
 | Retry | 6 | first success, retry+succeed, exhaustion, non-retryable skip, custom retryOn, per-attempt timeout |
 | Providers | 6 | constructor defaults, custom config, apiKey requirement |
+| Planner | 10 | constructor, clean JSON, markdown code block, embedded JSON, invalid dep filtering, unparseable response, missing fields, context passing, temperature 0, custom prompt |
+| StateMachine | 13 | create on transition, happy path, failure path, pause path, cancel, invalid transition, multi-task, getAll, unknown task, events, unsubscribe, file persistence, human-readable JSON |
 
-### Integration tests — 11/11 pass (real APIs)
+### Integration tests — 18/18 pass (real APIs)
+
+**POC 1 — Loop + Providers (11 tests):**
 
 | Provider | Tests | What's proven |
 |----------|-------|--------------|
 | OpenAI (gpt-4o-mini) | 4 | text response, single tool call, full loop with tool exec, multi-tool loop |
 | Anthropic (claude-haiku-4-5) | 5 | text response, system prompt via message, single tool call, full loop with tool exec, multi-tool loop |
 | Ollama (qwen2.5:0.5b) | 2 | text response, tool call format roundtrip |
+
+**POC 2 — Planner + State (7 tests):**
+
+| Suite | Tests | What's proven |
+|-------|-------|--------------|
+| Planner + OpenAI | 3 | trip plan, flowers plan, simple goal (no over-decomposition) |
+| Planner + Anthropic | 3 | trip plan, plan with context, simple goal |
+| Planner + State + Loop | 1 | full pipeline: plan → topological sort → state tracking → loop execution per step → file persistence |
 
 ### Bugs caught by integration tests
 
@@ -169,9 +233,9 @@ Local models via Ollama. No API key, no auth.
 | `src/provider-openai.js` | 83 | ✅ implemented |
 | `src/provider-anthropic.js` | 130 | ✅ implemented |
 | `src/provider-ollama.js` | 79 | ✅ implemented |
-| **Implemented total** | **464** | |
-| `src/planner.js` | stub | pending |
-| `src/state.js` | stub | pending |
+| `src/planner.js` | 66 | ✅ implemented |
+| `src/state.js` | 78 | ✅ implemented |
+| **Implemented total** | **608** | |
 | `src/checkpoint.js` | stub | pending |
 | `src/memory.js` | stub | pending |
 | `src/stream.js` | stub | pending |
@@ -182,7 +246,7 @@ Local models via Ollama. No API key, no auth.
 | `bin/cli.js` | stub | pending |
 | **Target total** | **~820** | |
 
-Test code: 605 lines across 4 files.
+Test code: 1005 lines across 6 files.
 
 ---
 
@@ -213,20 +277,29 @@ Test code: 605 lines across 4 files.
 - Loop never throws — errors returned in `result.error`.
 - Retry wraps both `provider.generate()` and `tool.execute()`.
 
-### POC 2: Planner + State — NEXT
+### POC 2: Planner + State ✅
 
 **Goal:** Prove goal decomposition produces usable step DAGs and state tracking works.
 
-**Build:**
-- `planner.js` — structured output prompt, returns `[{ id, action, dependsOn, status }]`
-- `state.js` — task lifecycle: `pending → running → done/failed`, transition table + EventEmitter
+**Built:** planner.js, state.js
 
-**Success criteria:**
-- 3 different goals produce sensible plans
-- Dependencies are reasonable (not circular, not over-decomposed)
-- State file is human-readable JSON
-- Topological sort works on the dependency graph
-- Plan persists and survives restart
+**Validated:**
+- ✅ 3 different goals produce sensible plans (trip, flowers, simple email) — both OpenAI and Anthropic
+- ✅ Dependencies are reasonable (parallel roots, sequential dependents, no circular)
+- ✅ Plans are 2-7 steps (not over-decomposed)
+- ✅ State file is human-readable JSON (pretty-printed)
+- ✅ Topological sort works on the dependency graph
+- ✅ State persists to file and survives restart
+- ✅ Context injection works (user preferences influence plan)
+- ✅ Full pipeline: Planner → topological sort → StateMachine → Loop execution per step
+- ✅ Planner handles messy LLM output (markdown code blocks, surrounding text, invalid dep refs)
+
+**Key design decisions:**
+- Planner is just a prompt + JSON parser. The LLM does the actual planning.
+- Temperature 0 for deterministic plans.
+- StateMachine extends EventEmitter natively — no wrapper.
+- State auto-creates tasks on first transition (no separate "create" step).
+- File written on every transition (no batching — simplicity over performance at this scale).
 
 ### POC 3: Checkpoint — pending
 
@@ -244,7 +317,7 @@ Test code: 605 lines across 4 files.
 
 - **Runtime:** Node.js >= 18
 - **Test framework:** `node:test` (built-in)
-- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js`
-- **Test command (integration):** `OPENAI_API_KEY=... ANTHROPIC_API_KEY=... node --test test/integration.test.js`
+- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js`
+- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js`
 - **Ollama:** podman container, port 11434, model `qwen2.5:0.5b`
 - **Dependencies:** 0 required, `cron-parser` optional, `better-sqlite3` peer

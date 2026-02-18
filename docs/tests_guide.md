@@ -13,12 +13,12 @@
        ╱──────╲        Proves: drop-in replacement, no regression
       ╱        ╲
      ╱Integration╲    Integration (per POC)
-    ╱   11 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
-   ╱───────────────╲   Proves: providers parse real responses, tools execute end-to-end
+    ╱   18 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
+   ╱───────────────╲   Proves: providers parse real responses, plans are sensible, full pipeline works
   ╱                  ╲
- ╱    Unit — 24 pass  ╲  Unit (per component)
+ ╱    Unit — 47 pass  ╲  Unit (per component)
 ╱______________________╲  Mock provider, no network
-                          Proves: loop wiring, retry logic, error handling, state transitions
+                          Proves: loop wiring, retry logic, error handling, state transitions, plan parsing
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates the library works as a dependency. Never skip a layer.
@@ -29,12 +29,12 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js
+node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
-node --test test/integration.test.js
+node --test test/integration.test.js test/integration-poc2.test.js
 
 # All tests
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -89,6 +89,39 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | Ollama: constructs with defaults | Default model and url set correctly |
 | Ollama: constructs with custom model and url | Custom config accepted |
 
+### `test/planner.test.js` — 10 tests
+
+| Test | What it proves |
+|------|---------------|
+| requires a provider | Constructor throws without provider |
+| parses clean JSON array | Happy path — LLM returns clean JSON |
+| parses JSON wrapped in markdown code block | Handles ` ```json ``` ` wrapping |
+| extracts JSON array from surrounding text | Finds `[...]` in prose output |
+| filters out invalid dependency references | Deps pointing to nonexistent IDs removed |
+| throws on unparseable response | LLM returns no JSON → clear error |
+| throws on missing id or action | Validates step shape |
+| passes context to provider | Context.info injected into messages |
+| uses temperature 0 | Deterministic planning |
+| accepts custom prompt override | User can replace planning prompt |
+
+### `test/state.test.js` — 13 tests
+
+| Test | What it proves |
+|------|---------------|
+| creates task on first transition | Auto-creates in pending state |
+| follows happy path | pending → running → done with data |
+| handles failure path | running → failed (with error) → retry → running → done (error cleared) |
+| handles pause path | running → waiting_for_input → resume → running |
+| handles cancel from any non-terminal state | Cancel works from pending/running/failed/waiting |
+| throws on invalid transition | done + start → throws |
+| tracks multiple tasks independently | Two tasks, different states |
+| getAll returns all tasks | Returns copy of all task states |
+| returns null for unknown task | No crash on nonexistent ID |
+| emits transition events | EventEmitter fires with { taskId, from, to, event, data } |
+| unsubscribe works | Returned function removes listener |
+| persists to file and reloads | Write → new instance → same state |
+| file is human-readable JSON | Pretty-printed, parseable by hand |
+
 ---
 
 ## Integration tests
@@ -122,6 +155,32 @@ Real API calls. Slow, non-deterministic (LLM output varies), but prove the provi
 |------|---------------|
 | simple text response | Local model responds, usage parsed from Ollama format |
 | tool call attempt | Tool call format roundtrip works (small model may not reliably use tools) |
+
+### `test/integration-poc2.test.js` — 7 tests
+
+**Planner + OpenAI (gpt-4o-mini) — 3 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| plans a trip | Multi-step plan with parallel roots (flight + hotel search) |
+| plans ordering flowers | Different domain, reasonable decomposition |
+| plans a simple goal | Single email → ≤5 steps, no over-decomposition |
+
+**Planner + Anthropic (claude-haiku-4-5) — 3 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| plans a trip | Anthropic produces valid JSON plan |
+| plans with context | User preferences (airline, price) influence plan content |
+| plans a simple goal | Weather check → ≤5 steps |
+
+**Planner + State + Loop (OpenAI) — 1 test:**
+
+| Test | What it proves |
+|------|---------------|
+| plans, tracks state, and executes steps | Full pipeline: plan goal → topological sort → execute each step with Loop → state transitions → file persistence |
+
+Validates: plan → sort → state tracking → loop execution → persistence. All wired together, all with real API calls.
 
 ### Skipping behavior
 
