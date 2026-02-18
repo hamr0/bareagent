@@ -13,7 +13,7 @@ ORCHESTRATION          EXECUTION              ACTUATION
   Planner ✅             Loop ✅               User-provided:
   State ✅               Scheduler (stub)        REST APIs
   Stream (stub)          Memory (stub)            MCP servers
-                         Checkpoint (stub)        CLI commands
+                         Checkpoint ✅             CLI commands
                          Retry ✅                 Browser automation
 ```
 
@@ -172,11 +172,36 @@ pending → running → done
 
 ---
 
+### Checkpoint (`src/checkpoint.js` — 26 lines)
+
+Human-in-the-loop approval before irreversible actions.
+
+**Interface:**
+- `shouldAsk(toolName, args)` → boolean
+- `ask(question, context)` → user's reply string, or null (abort)
+
+**Behavior:**
+- `tools` array: list of tool names that require approval
+- Custom predicate: `shouldAsk: (name, args) => boolean` overrides the tool list
+- `send(question, context)` callback: how to ask the human (Telegram, Slack, CLI, etc.)
+- `waitForReply(context)` callback: how to get their answer
+- Returns `null` if reply is undefined (treated as abort by Loop)
+- Context object passed through to both callbacks (tool name, args, etc.)
+- Transport is user-provided — Checkpoint is just the gate, not the wire
+
+**Integration with Loop:**
+- Loop checks `checkpoint.shouldAsk()` before each tool execution
+- If true: pauses, calls `checkpoint.ask()`, waits for reply
+- Reply "no"/"n"/null → tool skipped, "User denied this action." sent to LLM
+- Any other reply → tool executes normally
+- Non-checkpoint tools execute without approval
+
+---
+
 ## What's stubbed (not yet implemented)
 
 | Component | File | Lines | POC |
 |-----------|------|-------|-----|
-| Checkpoint | `src/checkpoint.js` | stub | POC 3 |
 | Memory | `src/memory.js` | stub | POC 4 |
 | Store: SQLite | `src/store-sqlite.js` | stub | POC 4 |
 | Store: JSONFile | `src/store-jsonfile.js` | stub | POC 4 |
@@ -189,7 +214,7 @@ pending → running → done
 
 ## Test results
 
-### Unit tests — 47/47 pass
+### Unit tests — 57/57 pass
 
 | Suite | Tests | What's covered |
 |-------|-------|---------------|
@@ -198,8 +223,10 @@ pending → running → done
 | Providers | 6 | constructor defaults, custom config, apiKey requirement |
 | Planner | 10 | constructor, clean JSON, markdown code block, embedded JSON, invalid dep filtering, unparseable response, missing fields, context passing, temperature 0, custom prompt |
 | StateMachine | 13 | create on transition, happy path, failure path, pause path, cancel, invalid transition, multi-task, getAll, unknown task, events, unsubscribe, file persistence, human-readable JSON |
+| Checkpoint | 6 | shouldAsk tool list, custom predicate, ask send+wait, null reply, missing callbacks, context passing |
+| Checkpoint + Loop | 4 | approve → execute, deny → skip + LLM adapts, non-checkpoint bypass, stream checkpoint events |
 
-### Integration tests — 18/18 pass (real APIs)
+### Integration tests — 23/23 pass (real APIs)
 
 **POC 1 — Loop + Providers (11 tests):**
 
@@ -216,6 +243,13 @@ pending → running → done
 | Planner + OpenAI | 3 | trip plan, flowers plan, simple goal (no over-decomposition) |
 | Planner + Anthropic | 3 | trip plan, plan with context, simple goal |
 | Planner + State + Loop | 1 | full pipeline: plan → topological sort → state tracking → loop execution per step → file persistence |
+
+**POC 3 — Checkpoint (5 tests):**
+
+| Suite | Tests | What's proven |
+|-------|-------|--------------|
+| Checkpoint + Loop + OpenAI | 3 | approve → tool executes, deny → LLM adapts, non-checkpoint tools bypass |
+| Checkpoint + Loop + Anthropic | 2 | approve → tool executes, deny → LLM adapts |
 
 ### Bugs caught by integration tests
 
@@ -235,8 +269,8 @@ pending → running → done
 | `src/provider-ollama.js` | 79 | ✅ implemented |
 | `src/planner.js` | 66 | ✅ implemented |
 | `src/state.js` | 78 | ✅ implemented |
-| **Implemented total** | **608** | |
-| `src/checkpoint.js` | stub | pending |
+| `src/checkpoint.js` | 26 | ✅ implemented |
+| **Implemented total** | **634** | |
 | `src/memory.js` | stub | pending |
 | `src/stream.js` | stub | pending |
 | `src/scheduler.js` | stub | pending |
@@ -246,7 +280,7 @@ pending → running → done
 | `bin/cli.js` | stub | pending |
 | **Target total** | **~820** | |
 
-Test code: 1005 lines across 6 files.
+Test code: ~1350 lines across 8 files.
 
 ---
 
@@ -301,7 +335,28 @@ Test code: 1005 lines across 6 files.
 - State auto-creates tasks on first transition (no separate "create" step).
 - File written on every transition (no batching — simplicity over performance at this scale).
 
-### POC 3: Checkpoint — pending
+### POC 3: Checkpoint ✅
+
+**Goal:** Prove pause/resume mechanism works with real LLMs and transport callbacks.
+
+**Built:** checkpoint.js
+
+**Validated:**
+- ✅ shouldAsk() correctly gates by tool name list
+- ✅ Custom predicate overrides tool list (e.g. gate by args.amount)
+- ✅ ask() sends question via callback, waits for reply via callback
+- ✅ Context object passed through to both callbacks
+- ✅ Loop pauses before checkpoint tool, proceeds on "yes"
+- ✅ Loop skips tool on "no", sends "User denied" to LLM, LLM adapts
+- ✅ Non-checkpoint tools execute without any approval prompt
+- ✅ Stream emits checkpoint:ask and checkpoint:reply events
+- ✅ Works with OpenAI (real API, gpt-4o-mini)
+- ✅ Works with Anthropic (real API, claude-haiku-4-5)
+
+**Key design decisions:**
+- Checkpoint is 26 lines — just a gate, not a transport. User provides send/waitForReply callbacks.
+- No opinon on how approval happens. Telegram, Slack, CLI readline, WebSocket — all just callbacks.
+- Null/undefined reply treated as abort.
 
 ### POC 4: Memory + stores — pending
 
