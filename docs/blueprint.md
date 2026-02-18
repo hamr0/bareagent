@@ -12,13 +12,13 @@ Lightweight, composable agent orchestration. Each component is standalone — us
 ORCHESTRATION          EXECUTION              ACTUATION
   Planner ✅             Loop ✅               User-provided:
   State ✅               Scheduler (stub)        REST APIs
-  Stream (stub)          Memory (stub)            MCP servers
+  Stream (stub)          Memory ✅               MCP servers
                          Checkpoint ✅             CLI commands
                          Retry ✅                 Browser automation
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅
-**Stores:** SQLite (stub) | JSONFile (stub)
+**Stores:** SQLite ✅ | JSONFile ✅
 **Transport:** JSONL (stub)
 
 ---
@@ -198,13 +198,58 @@ Human-in-the-loop approval before irreversible actions.
 
 ---
 
+### Memory (`src/memory.js` — 22 lines)
+
+Thin wrapper that delegates to a swappable store. Use SQLite for search, JSON file for zero-dep persistence, or bring your own.
+
+**Interface:**
+- `store(content, metadata)` → id
+- `search(query, options)` → `[{ id, content, metadata, score }]`
+- `get(id)` → `{ id, content, metadata }` or null
+- `delete(id)` → void
+
+**Behavior:**
+- Constructor requires `options.store` — any object implementing the 4-method interface
+- All calls delegate directly to the store — Memory is glue, not logic
+- Stores are swappable: SQLiteStore, JsonFileStore, or custom
+
+### SQLiteStore (`src/store-sqlite.js` — 95 lines)
+
+Full-text search with BM25 ranking via SQLite FTS5.
+
+**Interface:** Same 4 methods as Memory store contract.
+
+**Behavior:**
+- Requires peer dep `better-sqlite3` — clear error if missing
+- WAL journal mode for concurrent read performance
+- FTS5 virtual table with Porter stemmer tokenization
+- Triggers keep FTS index in sync on insert/delete/update
+- Search: each query word quoted and OR'd for phrase-safe matching
+- Scoring: FTS5 `rank` (negative BM25 — closer to 0 = better) → inverted to positive score
+- Empty query returns most recent entries
+- Special characters in query handled gracefully (catch block returns empty)
+- `close()` method for clean shutdown
+
+### JsonFileStore (`src/store-jsonfile.js` — 47 lines)
+
+Zero-dep JSON file store with case-insensitive substring search.
+
+**Interface:** Same 4 methods as Memory store contract.
+
+**Behavior:**
+- Stores data as JSON array in a single file (pretty-printed)
+- Search: case-insensitive substring matching, no ranking (score always 1)
+- Auto-incrementing integer IDs, survives restarts
+- File read on construction, written on every store/delete
+- Empty query returns all entries (up to limit)
+- Default limit: 10
+
+---
+
 ## What's stubbed (not yet implemented)
 
 | Component | File | Lines | POC |
 |-----------|------|-------|-----|
-| Memory | `src/memory.js` | stub | POC 4 |
-| Store: SQLite | `src/store-sqlite.js` | stub | POC 4 |
-| Store: JSONFile | `src/store-jsonfile.js` | stub | POC 4 |
 | Stream | `src/stream.js` | stub | POC 5 |
 | Transport: JSONL | `src/transport-jsonl.js` | stub | POC 5 |
 | Scheduler | `src/scheduler.js` | stub | POC 6 |
@@ -214,7 +259,7 @@ Human-in-the-loop approval before irreversible actions.
 
 ## Test results
 
-### Unit tests — 57/57 pass
+### Unit tests — 77/77 pass
 
 | Suite | Tests | What's covered |
 |-------|-------|---------------|
@@ -225,8 +270,11 @@ Human-in-the-loop approval before irreversible actions.
 | StateMachine | 13 | create on transition, happy path, failure path, pause path, cancel, invalid transition, multi-task, getAll, unknown task, events, unsubscribe, file persistence, human-readable JSON |
 | Checkpoint | 6 | shouldAsk tool list, custom predicate, ask send+wait, null reply, missing callbacks, context passing |
 | Checkpoint + Loop | 4 | approve → execute, deny → skip + LLM adapts, non-checkpoint bypass, stream checkpoint events |
+| Memory | 2 | requires store, delegates all methods to store |
+| JsonFileStore | 8 | requires path, store+get roundtrip, substring search (case-insensitive), empty query, limit, delete, persistence across instances, null for missing id |
+| SQLiteStore | 10 | requires path, store+get roundtrip, FTS5 search relevance, BM25 ranking, empty query, limit, delete removes FTS index, persistence, null for missing id, special characters |
 
-### Integration tests — 23/23 pass (real APIs)
+### Integration tests — 33/33 pass (real APIs)
 
 **POC 1 — Loop + Providers (11 tests):**
 
@@ -251,6 +299,15 @@ Human-in-the-loop approval before irreversible actions.
 | Checkpoint + Loop + OpenAI | 3 | approve → tool executes, deny → LLM adapts, non-checkpoint tools bypass |
 | Checkpoint + Loop + Anthropic | 2 | approve → tool executes, deny → LLM adapts |
 
+**POC 4 — Memory + Stores (10 tests):**
+
+| Suite | Tests | What's proven |
+|-------|-------|--------------|
+| Memory + SQLiteStore | 5 | FTS5 finds hotel/flight/preference/transport info, persistence across restart |
+| Memory + JsonFileStore | 3 | substring search finds hotel/budget info, persistence across restart |
+| Memory + Loop + OpenAI | 1 | LLM uses memory search results to answer about hotel (real API, gpt-4o-mini) |
+| Memory + Loop + Anthropic | 1 | LLM uses memory search results to answer about budget+flights (real API, claude-haiku-4-5) |
+
 ### Bugs caught by integration tests
 
 1. **API key formatting:** `pass` returns multi-line entries. Keys from env vars can have trailing whitespace/newlines. Fixed: `.trim()` in provider constructors.
@@ -270,17 +327,17 @@ Human-in-the-loop approval before irreversible actions.
 | `src/planner.js` | 66 | ✅ implemented |
 | `src/state.js` | 78 | ✅ implemented |
 | `src/checkpoint.js` | 26 | ✅ implemented |
-| **Implemented total** | **634** | |
-| `src/memory.js` | stub | pending |
+| `src/memory.js` | 22 | ✅ implemented |
+| `src/store-sqlite.js` | 95 | ✅ implemented |
+| `src/store-jsonfile.js` | 47 | ✅ implemented |
+| **Implemented total** | **798** | |
 | `src/stream.js` | stub | pending |
 | `src/scheduler.js` | stub | pending |
-| `src/store-sqlite.js` | stub | pending |
-| `src/store-jsonfile.js` | stub | pending |
 | `src/transport-jsonl.js` | stub | pending |
 | `bin/cli.js` | stub | pending |
 | **Target total** | **~820** | |
 
-Test code: ~1350 lines across 8 files.
+Test code: ~1600 lines across 10 files.
 
 ---
 
@@ -358,7 +415,30 @@ Test code: ~1350 lines across 8 files.
 - No opinon on how approval happens. Telegram, Slack, CLI readline, WebSocket — all just callbacks.
 - Null/undefined reply treated as abort.
 
-### POC 4: Memory + stores — pending
+### POC 4: Memory + Stores ✅
+
+**Goal:** Prove memory interface works with SQLite FTS5 and json-file fallback.
+
+**Built:** memory.js, store-sqlite.js, store-jsonfile.js
+
+**Validated:**
+- ✅ SQLite FTS5 ranking finds relevant results for hotel, flight, preference, transport queries
+- ✅ BM25 scoring orders results by relevance
+- ✅ Porter stemmer tokenization handles word variations
+- ✅ Special characters in queries handled gracefully
+- ✅ JsonFileStore substring search finds matches (case-insensitive)
+- ✅ Both stores persist across process restarts
+- ✅ Delete removes both data and FTS index
+- ✅ Memory wrapper delegates correctly to any store
+- ✅ LLM (OpenAI gpt-4o-mini) uses memory search results to answer questions
+- ✅ LLM (Anthropic claude-haiku-4-5) uses memory search results to answer questions
+
+**Key design decisions:**
+- Memory is 22 lines — pure delegation, no logic. Store does the work.
+- SQLiteStore uses FTS5 triggers to keep index in sync (no manual index management).
+- FTS5 query words are quoted and OR'd — safe against special characters.
+- JsonFileStore score is always 1 (no ranking capability — documented as persistence, not search).
+- `better-sqlite3` peer dep — clear error message if missing.
 
 ### POC 5: Stream + cross-language — pending
 
@@ -372,7 +452,7 @@ Test code: ~1350 lines across 8 files.
 
 - **Runtime:** Node.js >= 18
 - **Test framework:** `node:test` (built-in)
-- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js`
-- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js`
+- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js`
+- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js`
 - **Ollama:** podman container, port 11434, model `qwen2.5:0.5b`
 - **Dependencies:** 0 required, `cron-parser` optional, `better-sqlite3` peer

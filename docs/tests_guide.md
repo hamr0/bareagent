@@ -13,12 +13,12 @@
        ╱──────╲        Proves: drop-in replacement, no regression
       ╱        ╲
      ╱Integration╲    Integration (per POC)
-    ╱   18 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
-   ╱───────────────╲   Proves: providers parse real responses, plans are sensible, full pipeline works
+    ╱   33 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
+   ╱───────────────╲   Proves: providers parse real responses, plans are sensible, memory search works, full pipeline works
   ╱                  ╲
- ╱    Unit — 47 pass  ╲  Unit (per component)
+ ╱    Unit — 77 pass  ╲  Unit (per component)
 ╱______________________╲  Mock provider, no network
-                          Proves: loop wiring, retry logic, error handling, state transitions, plan parsing
+                          Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates the library works as a dependency. Never skip a layer.
@@ -29,12 +29,12 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js
+node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
-node --test test/integration.test.js test/integration-poc2.test.js
+node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js
 
 # All tests
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -122,6 +122,43 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | persists to file and reloads | Write → new instance → same state |
 | file is human-readable JSON | Pretty-printed, parseable by hand |
 
+### `test/memory.test.js` — 20 tests
+
+**Memory (wrapper) — 2 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| requires a store | Constructor throws without options.store |
+| delegates all methods to store | All 4 methods forward to store correctly |
+
+**JsonFileStore — 8 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| requires a path | Constructor throws without options.path |
+| store and get roundtrip | ID returned, content and metadata retrievable |
+| search finds substring matches (case-insensitive) | "berlin" matches "Berlin" in content |
+| search returns all when query is empty | Empty query returns everything |
+| search respects limit | Limit caps result count |
+| delete removes item | Deleted item returns null from get() |
+| persists across instances | New instance reads same file, data intact |
+| get returns null for non-existent id | No crash on missing ID |
+
+**SQLiteStore — 10 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| requires a path | Constructor throws without options.path |
+| store and get roundtrip | ID returned, content and metadata (JSON) retrievable |
+| FTS5 search finds relevant results | "Berlin" matches flight and train chunks, not Amsterdam |
+| FTS5 search ranks by relevance (BM25) | More term occurrences = higher score |
+| search returns all when query is empty | Empty query returns recent entries |
+| search respects limit | Limit caps result count |
+| delete removes item and FTS index | Deleted item gone from both table and FTS |
+| persists across instances | New DB connection reads same data |
+| get returns null for non-existent id | No crash on missing ID |
+| handles special characters in search query | Parentheses, colons don't crash FTS5 |
+
 ---
 
 ## Integration tests
@@ -181,6 +218,38 @@ Real API calls. Slow, non-deterministic (LLM output varies), but prove the provi
 | plans, tracks state, and executes steps | Full pipeline: plan goal → topological sort → execute each step with Loop → state transitions → file persistence |
 
 Validates: plan → sort → state tracking → loop execution → persistence. All wired together, all with real API calls.
+
+### `test/integration-poc4.test.js` — 10 tests
+
+**Memory + SQLiteStore — 5 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| FTS5 finds hotel info | "hotel venue" → Hotel Europa chunk |
+| FTS5 finds flight info | "flight Berlin" → Lufthansa chunk |
+| FTS5 finds user preferences | "vegetarian" → preference chunk |
+| FTS5 finds transport info | "train venue" → U-Bahn chunk |
+| survives process restart | Store, close, reopen, search — data intact |
+
+**Memory + JsonFileStore — 3 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| substring search finds hotel info | "hotel" → Hotel Europa |
+| substring search finds budget info | "budget" → €800 chunk |
+| survives process restart | Store, new instance, search — data intact |
+
+**Memory + Loop + OpenAI (gpt-4o-mini) — 1 test:**
+
+| Test | What it proves |
+|------|---------------|
+| LLM uses memory search results to answer | Search "hotel" → context → LLM answers about Hotel Europa €89/night |
+
+**Memory + Loop + Anthropic (claude-haiku-4-5) — 1 test:**
+
+| Test | What it proves |
+|------|---------------|
+| LLM uses memory search results to answer | Search "budget flight" → context → LLM answers about cheapest flight vs budget |
 
 ### Skipping behavior
 

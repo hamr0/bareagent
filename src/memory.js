@@ -2,6 +2,7 @@
 
 /**
  * Persistence + search across turns and sessions.
+ * Thin wrapper that delegates to a swappable store.
  *
  * Interface:
  *   store(content, metadata)   → id
@@ -9,36 +10,31 @@
  *   get(id)                    → { content, metadata }
  *   delete(id)                 → void
  *
- * Options for search:
- *   limit, types, minScore
- *
  * Stores (swappable):
  *   SQLite FTS5 — store-sqlite.js (peer dep: better-sqlite3)
  *   JSON file   — store-jsonfile.js (zero deps)
  *   Bring your own: implement { store, search, get, delete }
- *
- * ~30 lines target (interface + routing to store).
  */
 class Memory {
   constructor(options = {}) {
-    // TODO: POC 4
-    throw new Error('Not implemented — see POC 4');
+    if (!options.store) throw new Error('Memory requires options.store');
+    this._store = options.store;
   }
 
-  async store(content, metadata = {}) {
-    throw new Error('Not implemented');
+  store(content, metadata = {}) {
+    return this._store.store(content, metadata);
   }
 
-  async search(query, options = {}) {
-    throw new Error('Not implemented');
+  search(query, options = {}) {
+    return this._store.search(query, options);
   }
 
-  async get(id) {
-    throw new Error('Not implemented');
+  get(id) {
+    return this._store.get(id);
   }
 
-  async delete(id) {
-    throw new Error('Not implemented');
+  delete(id) {
+    return this._store.delete(id);
   }
 }
 
