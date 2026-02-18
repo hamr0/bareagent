@@ -220,7 +220,7 @@ total lines:  ~820
 
 ## Status
 
-Early development. Core components built and validated through POCs. See [project plan](docs/agent-orchestration-plan.md) for the full design.
+Early development. Core components built and validated through POCs. See [project plan](docs/01-product/prd.md) for the full design.
 
 ## License
 
