@@ -1,27 +1,78 @@
 'use strict';
 
-/**
- * Ollama provider for local models. No API key needed.
- *
- * Interface:
- *   generate(messages, tools, options) → { text, toolCalls, usage }
- *
- * Options:
- *   model  — model name (default: 'llama3.2')
- *   url    — Ollama URL (default: 'http://localhost:11434')
- *
- * Uses vanilla http module, no SDK.
- *
- * ~50 lines target.
- */
+const http = require('http');
+
 class OllamaProvider {
   constructor(options = {}) {
-    // TODO: POC 1
-    throw new Error('Not implemented — see POC 1');
+    this.model = options.model || 'llama3.2';
+    this.url = options.url || 'http://localhost:11434';
   }
 
   async generate(messages, tools = [], options = {}) {
-    throw new Error('Not implemented');
+    const body = {
+      model: this.model,
+      messages,
+      stream: false,
+      ...(options.temperature != null && { options: { temperature: options.temperature } }),
+    };
+    if (tools.length > 0) {
+      body.tools = tools.map(t => ({
+        type: 'function',
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+    }
+
+    const data = await this._request('/api/chat', body);
+    const msg = data.message || {};
+
+    return {
+      text: msg.content || '',
+      toolCalls: (msg.tool_calls || []).map(tc => ({
+        id: tc.id || `call_${Date.now()}`,
+        name: tc.function.name,
+        arguments: typeof tc.function.arguments === 'string'
+          ? JSON.parse(tc.function.arguments)
+          : tc.function.arguments,
+      })),
+      usage: {
+        inputTokens: data.prompt_eval_count || 0,
+        outputTokens: data.eval_count || 0,
+      },
+    };
+  }
+
+  _request(path, body) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.url + path);
+      const payload = JSON.stringify(body);
+
+      const req = http.request(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      }, (res) => {
+        let chunks = '';
+        res.on('data', d => chunks += d);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(chunks);
+            if (res.statusCode >= 400) {
+              const err = new Error(parsed.error || `HTTP ${res.statusCode}`);
+              err.status = res.statusCode;
+              return reject(err);
+            }
+            resolve(parsed);
+          } catch (e) {
+            reject(new Error(`Invalid JSON response: ${chunks.slice(0, 200)}`));
+          }
+        });
+      });
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
   }
 }
 
