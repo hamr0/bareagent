@@ -1,5 +1,7 @@
 'use strict';
 
+const { readFileSync, writeFileSync, existsSync } = require('node:fs');
+
 /**
  * Time-triggered agent turns. The only way the agent acts without being messaged.
  *
@@ -9,44 +11,97 @@
  *   list()          → [jobs]
  *   start(handler)  → begin tick loop (handler receives due jobs)
  *   stop()          → stop tick loop
- *
- * Job shape:
- *   { id, type: 'once'|'recurring', schedule, action, status, nextRun, createdAt }
- *
- * Schedule formats:
- *   Cron: '0 7 * * 1-5' (requires optional cron-parser dep)
- *   Relative: '2h', '30m', 'tomorrow 9am' (vanilla Date math)
- *
- * Persistence:
- *   Default: JSON file (jobs.json)
- *   Override: any object with load/save methods
- *
- * ~80 lines target.
  */
 class Scheduler {
   constructor(options = {}) {
-    // TODO: POC 6
-    throw new Error('Not implemented — see POC 6');
+    this._file = options.file || null;
+    this._interval = options.interval || 60000;
+    this._jobs = this._file && existsSync(this._file)
+      ? JSON.parse(readFileSync(this._file, 'utf8'))
+      : [];
+    this._timer = null;
+    this._nextId = this._jobs.length
+      ? Math.max(...this._jobs.map(j => j.id)) + 1
+      : 1;
+  }
+
+  _save() {
+    if (this._file) writeFileSync(this._file, JSON.stringify(this._jobs, null, 2));
   }
 
   add(job) {
-    throw new Error('Not implemented');
+    const id = this._nextId++;
+    const nextRun = this._parseSchedule(job.schedule);
+    this._jobs.push({
+      id,
+      type: job.type || 'once',
+      schedule: job.schedule,
+      action: job.action,
+      status: 'active',
+      nextRun: nextRun.toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    this._save();
+    return id;
   }
 
   remove(jobId) {
-    throw new Error('Not implemented');
+    this._jobs = this._jobs.filter(j => j.id !== jobId);
+    this._save();
   }
 
   list() {
-    throw new Error('Not implemented');
+    return this._jobs.map(j => ({ ...j }));
   }
 
   start(handler) {
-    throw new Error('Not implemented');
+    if (this._timer) return;
+    this._running = new Set();
+    const tick = async () => {
+      const now = new Date();
+      for (const job of this._jobs) {
+        if (job.status !== 'active') continue;
+        if (this._running.has(job.id)) continue;
+        if (new Date(job.nextRun) > now) continue;
+        this._running.add(job.id);
+        try {
+          await handler(job);
+        } catch {}
+        this._running.delete(job.id);
+        if (job.type === 'once') {
+          job.status = 'done';
+        } else {
+          job.nextRun = this._parseSchedule(job.schedule).toISOString();
+        }
+        this._save();
+      }
+    };
+    tick();
+    this._timer = setInterval(tick, this._interval);
   }
 
   stop() {
-    throw new Error('Not implemented');
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+  }
+
+  _parseSchedule(schedule) {
+    // Relative: '5s', '30m', '2h', '1d'
+    const rel = schedule.match(/^(\d+)(s|m|h|d)$/);
+    if (rel) {
+      const [, n, unit] = rel;
+      const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[unit];
+      return new Date(Date.now() + Number(n) * ms);
+    }
+    // Cron: try cron-parser
+    try {
+      const { parseExpression } = require('cron-parser');
+      return parseExpression(schedule).next().toDate();
+    } catch {
+      throw new Error(`Cannot parse schedule: "${schedule}". Use relative (5s/30m/2h/1d) or cron expression.`);
+    }
   }
 }
 

@@ -11,7 +11,7 @@ Lightweight, composable agent orchestration. Each component is standalone — us
 ```
 ORCHESTRATION          EXECUTION              ACTUATION
   Planner ✅             Loop ✅               User-provided:
-  State ✅               Scheduler (stub)        REST APIs
+  State ✅               Scheduler ✅             REST APIs
   Stream ✅              Memory ✅               MCP servers
                          Checkpoint ✅             CLI commands
                          Retry ✅                 Browser automation
@@ -290,17 +290,41 @@ echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
 
 ---
 
+### Scheduler (`src/scheduler.js` — 107 lines)
+
+Time-triggered agent turns. The only way the agent acts without being messaged.
+
+**Interface:**
+- `add(job)` → jobId
+- `remove(jobId)` → void
+- `list()` → `[jobs]` (copies, not references)
+- `start(handler)` → begin tick loop
+- `stop()` → stop tick loop
+
+**Job shape:** `{ id, type: 'once'|'recurring', schedule, action, status, nextRun, createdAt }`
+
+**Behavior:**
+- Schedule parsing: relative (`5s`, `30m`, `2h`, `1d`) via vanilla Date math, cron (`0 7 * * 1-5`) via optional `cron-parser`
+- Tick loop: configurable interval (default 60s), checks due jobs each tick
+- One-shot jobs: status set to `done` after handler completes
+- Recurring jobs: `nextRun` recomputed from schedule after each run
+- Re-entry guard: running jobs tracked in Set, prevents duplicate handler calls
+- Handler errors caught silently (one bad job doesn't block others)
+- File persistence: JSON written on every add/remove/completion
+- `stop()` is idempotent
+- `list()` returns copies (safe from external mutation)
+
+---
+
 ## What's stubbed (not yet implemented)
 
-| Component | File | Lines | POC |
-|-----------|------|-------|-----|
-| Scheduler | `src/scheduler.js` | stub | POC 6 |
+All components implemented. POC 7 (multis integration) is next.
 
 ---
 
 ## Test results
 
-### Unit tests — 88/88 pass
+### Unit tests — 104/104 pass
 
 | Suite | Tests | What's covered |
 |-------|-------|---------------|
@@ -316,8 +340,9 @@ echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
 | SQLiteStore | 10 | requires path, store+get roundtrip, FTS5 search relevance, BM25 ranking, empty query, limit, delete removes FTS index, persistence, null for missing id, special characters |
 | Stream | 9 | emit to subscribers, auto-timestamp, preserve existing timestamp, multiple subscribers, unsubscribe, subscriber error isolation, transport write, no-transport mode, Loop compatibility |
 | JsonlTransport | 2 | JSON + newline format, multiple writes |
+| Scheduler | 16 | add/remove/list, relative schedule (s/m/h), cron schedule, invalid schedule error, start runs due jobs, skips future jobs, recurring nextRun update, file persistence, load on construction, stop idempotent, list returns copies, handler error isolation |
 
-### Integration tests — 38/38 pass (real APIs)
+### Integration tests — 42/42 pass (real APIs)
 
 **POC 1 — Loop + Providers (11 tests):**
 
@@ -359,10 +384,19 @@ echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
 | Stream + Loop + Anthropic | 1 | real stream events with Anthropic provider |
 | CLI subprocess | 2 | JSONL roundtrip (spawn → send goal → receive events → result), messages format support |
 
+**POC 6 — Scheduler (4 tests):**
+
+| Suite | Tests | What's proven |
+|-------|-------|--------------|
+| Scheduler + Loop + OpenAI | 3 | scheduled job triggers LLM run (real API), cron nextRun computation, persistence across restarts |
+| Scheduler + Stream | 1 | scheduled job emits stream events (loop:start, loop:done) |
+
 ### Bugs caught by integration tests
 
 1. **API key formatting:** `pass` returns multi-line entries. Keys from env vars can have trailing whitespace/newlines. Fixed: `.trim()` in provider constructors.
 2. **Anthropic message format:** Loop builds messages in OpenAI format (`tool_calls` array on assistant message). Anthropic API rejects this — needs `content: [{ type: 'tool_use' }]` blocks. Fixed: `_toAnthropicMessage()` normalizes both assistant tool-call messages and tool result messages.
+3. **CLI premature exit:** readline `close` event fires when stdin ends, before async `line` handlers complete. Fixed: pending request counter delays `process.exit()`.
+4. **Scheduler re-entry:** With short tick intervals, the same job could fire multiple times while the async handler was still running. Fixed: running job IDs tracked in a Set, skipped during tick.
 
 ---
 
@@ -384,11 +418,11 @@ echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
 | `src/stream.js` | 33 | ✅ implemented |
 | `src/transport-jsonl.js` | 14 | ✅ implemented |
 | `bin/cli.js` | 65 | ✅ implemented |
-| **Implemented total** | **910** | |
-| `src/scheduler.js` | stub | pending |
-| **Target total** | **~820** | slightly over due to CLI arg parsing |
+| `src/scheduler.js` | 107 | ✅ implemented |
+| **Implemented total** | **1017** | |
+| **Target was** | **~820** | over by ~200 lines (CLI arg parsing, scheduler re-entry guard, FTS triggers) |
 
-Test code: ~1850 lines across 12 files.
+Test code: ~2100 lines across 14 files.
 
 ---
 
@@ -518,7 +552,31 @@ Test code: ~1850 lines across 12 files.
 
 **Bug caught:** CLI exited before async `loop.run()` completed. readline `close` event fires immediately when stdin ends, not after async line handlers finish. Fixed with pending request counter.
 
-### POC 6: Scheduler — pending
+### POC 6: Scheduler ✅
+
+**Goal:** Prove time-triggered agent turns work with persistence and cron.
+
+**Built:** scheduler.js
+
+**Validated:**
+- ✅ Relative schedules: 5s, 30m, 2h, 1d (vanilla Date math)
+- ✅ Cron schedules: `0 7 * * 1-5` (optional cron-parser)
+- ✅ Invalid schedule throws clear error
+- ✅ One-shot jobs run once and mark done
+- ✅ Recurring jobs recompute nextRun after each run
+- ✅ Re-entry guard prevents duplicate handler calls during async handlers
+- ✅ Handler errors don't crash tick loop
+- ✅ Jobs persist to JSON file and survive restart
+- ✅ Scheduled job triggers real LLM run (OpenAI gpt-4o-mini)
+- ✅ Scheduled job emits stream events (loop:start, loop:done)
+
+**Key design decisions:**
+- Running jobs tracked in Set — prevents re-entry when tick interval < handler duration.
+- `cron-parser` is optional — clear error if cron syntax used without it installed.
+- `list()` returns copies — callers can't mutate scheduler state.
+- `stop()` is idempotent — safe to call multiple times.
+
+**Bug caught:** With short tick intervals (50ms in tests), the same job would fire repeatedly while the async handler was still running the LLM call (~800ms). Fixed with `_running` Set guard.
 
 ### POC 7: multis integration — pending
 
@@ -528,7 +586,7 @@ Test code: ~1850 lines across 12 files.
 
 - **Runtime:** Node.js >= 18
 - **Test framework:** `node:test` (built-in)
-- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js`
-- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js`
+- **Test command (unit):** `node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js`
+- **Test command (integration):** `OPENAI_API_KEY=$(pass amr/openai_api | head -1) ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js`
 - **Ollama:** podman container, port 11434, model `qwen2.5:0.5b`
 - **Dependencies:** 0 required, `cron-parser` optional, `better-sqlite3` peer

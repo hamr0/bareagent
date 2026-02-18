@@ -13,10 +13,10 @@
        ╱──────╲        Proves: drop-in replacement, no regression
       ╱        ╲
      ╱Integration╲    Integration (per POC)
-    ╱   38 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
+    ╱   42 pass   ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱───────────────╲   Proves: providers parse real responses, plans are sensible, memory search works, full pipeline works
   ╱                  ╲
- ╱    Unit — 88 pass  ╲  Unit (per component)
+ ╱   Unit — 104 pass  ╲  Unit (per component)
 ╱______________________╲  Mock provider, no network
                           Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
 ```
@@ -29,12 +29,12 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js
+node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
-node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js
+node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js
 
 # All tests
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -182,6 +182,27 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | writes JSON + newline to output | Valid JSON terminated by \n |
 | handles multiple writes | Sequential writes produce separate lines |
 
+### `test/scheduler.test.js` — 16 tests
+
+| Test | What it proves |
+|------|---------------|
+| adds a job and returns an id | Job stored with correct fields, status active |
+| defaults type to once | Missing type defaults to one-shot |
+| removes a job | Job gone from list after remove |
+| parses relative schedule: seconds | `5s` → nextRun ~5s in future |
+| parses relative schedule: minutes | `30m` → nextRun ~30m in future |
+| parses relative schedule: hours | `2h` → nextRun ~2h in future |
+| parses cron schedule | `0 7 * * 1-5` → next weekday 7am |
+| throws on invalid schedule | `banana` → clear error message |
+| start runs due jobs | Job with past nextRun fires immediately |
+| start skips future jobs | Job with future nextRun doesn't fire |
+| recurring jobs get next run updated | After running, nextRun moves to future, status stays active |
+| persists jobs to file | JSON file written after add |
+| loads jobs from file on construction | New instance reads same data |
+| stop is idempotent | Multiple stop() calls don't crash |
+| list returns copies (not references) | External mutation doesn't affect internal state |
+| handler errors do not crash tick loop | Bad handler on job 1 doesn't block job 2 |
+
 ---
 
 ## Integration tests
@@ -296,6 +317,22 @@ Validates: plan → sort → state tracking → loop execution → persistence. 
 | responds to JSONL request with stream events | Full roundtrip: spawn → send goal on stdin → receive JSONL events on stdout → loop:start + result present |
 | handles messages format | `params.messages` array works (not just `params.goal` string) |
 
+### `test/integration-poc6.test.js` — 4 tests
+
+**Scheduler + Loop + OpenAI (gpt-4o-mini) — 3 tests:**
+
+| Test | What it proves |
+|------|---------------|
+| scheduled job triggers Loop run and returns result | Scheduler fires due job → Loop runs with real API → LLM answers correctly → job status set to done |
+| recurring cron job updates nextRun | Cron expression produces valid future weekday 7am nextRun |
+| persists across restarts and fires due jobs | Save jobs → new Scheduler instance → loads and fires due job |
+
+**Scheduler + Stream — 1 test:**
+
+| Test | What it proves |
+|------|---------------|
+| scheduled job emits stream events | Scheduled Loop run produces loop:start and loop:done stream events |
+
 ### Skipping behavior
 
 - OpenAI/Anthropic tests skip if their API key env var is not set
@@ -310,6 +347,7 @@ Validates: plan → sort → state tracking → loop execution → persistence. 
 | API key formatting | `ERR_INVALID_CHAR` in HTTP header | `pass` returns key + metadata on multiple lines; env var had newline |
 | Anthropic message format | `messages.1.content: Input should be a valid list` | Loop builds assistant messages in OpenAI format (`tool_calls` array). Anthropic needs `content: [{ type: 'tool_use' }]` blocks. Provider wasn't normalizing. |
 | CLI premature exit | CLI subprocess returned only 1 event instead of 3+ | readline `close` event fires when stdin ends, before async `line` handlers complete. `process.exit(0)` killed the process mid-request. Fixed with pending request counter. |
+| Scheduler re-entry | Scheduled job handler called 6 times instead of once | With 50ms tick interval and ~800ms async handler, tick loop re-fired the same due job multiple times. Fixed with `_running` Set guard that skips jobs with active handlers. |
 
 These bugs would have been invisible with mock providers. The mocks would have accepted any message format and returned scripted responses.
 
