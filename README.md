@@ -40,25 +40,21 @@ Three layers. You use the first two. You bring the third.
 
 ### Layer 1: ORCHESTRATION — who does what? in what order? what when things go wrong?
 
-```
-Planner     goal -> step DAG via LLM
-State       task lifecycle tracking
-Stream      JSONL event streaming
-```
-
-Planner asks the LLM to decompose a goal into a JSON step DAG with dependencies, using structured output prompting. State tracks each step through `pending -> running -> done | failed`, persisted to a JSON file. Stream emits one JSON object per line to stdout — pipe-friendly, parseable by any language, ready for dashboards or cross-process monitoring.
+| Component | What it does | How |
+|---|---|---|
+| **Planner** | Goal -> step DAG | Structured output prompt, LLM returns JSON dependency graph |
+| **State** | Task lifecycle tracking | `pending -> running -> done \| failed`, persisted to JSON file |
+| **Stream** | Event streaming | One JSON object per line to stdout, pipe-friendly, any-language |
 
 ### Layer 2: EXECUTION — how the agent thinks, remembers, acts, and persist?
 
-```
-Loop        think -> act -> observe cycle
-Scheduler   time-triggered agent turns
-Memory      persistence + search
-Checkpoint  human-in-the-loop approval
-Retry       backoff wrapper for tool calls
-```
-
-Loop is the core engine — the only component most users need. It calls any OpenAI/Anthropic/Ollama provider, executes tool calls, appends results, and loops until the LLM responds with text. Scheduler triggers Loop runs on cron expressions (`0 7 * * 1-5`) or relative times (`2h`, `30m`). Memory persists information across sessions — SQLite FTS5 with BM25 ranking by default, JSON file fallback for zero deps. Checkpoint pauses before irreversible actions and waits for human approval — you provide the transport (readline, Telegram, WebSocket, whatever). Retry wraps any async function with exponential or linear backoff, retrying on 429/5xx/network errors.
+| Component | What it does | How |
+|---|---|---|
+| **Loop** | Think -> act -> observe | Calls OpenAI/Anthropic/Ollama, executes tools, loops until text |
+| **Scheduler** | Time-triggered turns | Cron (`0 7 * * 1-5`), relative (`2h`, `30m`), persisted jobs |
+| **Memory** | Persist + search | SQLite FTS5 with BM25 (default), JSON file fallback (zero deps) |
+| **Checkpoint** | Human approval gate | You provide the transport — readline, Telegram, WebSocket |
+| **Retry** | Backoff on failure | Exponential/linear, retries on 429/5xx/network errors |
 
 ### Layer 3: ACTUATION — you provide this
 
@@ -162,21 +158,6 @@ await loop.runGoal('Book my Berlin trip for next Tuesday');
 ```
 
 ---
-
-## Components
-
-Every component is independent. Use one, use all, or bring your own.
-
-| Component | What it does | Lines |
-|---|---|---|
-| **Loop** | Think, act, observe cycle. The core engine. | ~90 |
-| **Planner** | Break a goal into a step DAG via LLM | ~60 |
-| **StateMachine** | Track task lifecycle (pending, running, done, failed) | ~50 |
-| **Scheduler** | Run agent turns at scheduled times | ~80 |
-| **Memory** | Store and search across sessions | ~30 + store |
-| **Checkpoint** | Pause for human approval before irreversible actions | ~40 |
-| **Stream** | Emit structured events as JSONL | ~50 |
-| **Retry** | Wrap async functions with backoff | ~30 |
 
 ## LLM Providers
 
