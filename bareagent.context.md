@@ -70,7 +70,7 @@ const result = await loop.run(
   tools
 );
 // result: { text: "The weather in Berlin is 22°C and sunny.", toolCalls: [], usage: {...}, error: null }
-// Throws on error by default (v0.3.0+). Use try/catch or pass throwOnError: false for result.error pattern.
+// Throws on error by default. Use try/catch or pass throwOnError: false for result.error pattern.
 ```
 
 ## Health check with validate()
@@ -141,11 +141,15 @@ scheduler.add({ schedule: '2h', action: 'check inbox', type: 'recurring' });
 scheduler.add({ schedule: '0 9 * * 1-5', action: 'morning briefing', type: 'recurring' }); // cron requires cron-parser
 
 scheduler.start(async (job) => {
-  const result = await loop.run(
-    [{ role: 'user', content: job.action }],
-    tools
-  );
-  // do something with result
+  try {
+    const result = await loop.run(
+      [{ role: 'user', content: job.action }],
+      tools
+    );
+    // do something with result
+  } catch (err) {
+    console.error(`Job ${job.id} failed:`, err.message);
+  }
 });
 ```
 
