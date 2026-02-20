@@ -16,8 +16,13 @@
  *   Bring your own: implement { store, search, get, delete }
  */
 class Memory {
+  /**
+   * @param {object} options
+   * @param {object} options.store - Store backend (must implement store/search/get/delete).
+   * @throws {Error} `[Memory] requires options.store` — when options.store is missing.
+   */
   constructor(options = {}) {
-    if (!options.store) throw new Error('Memory requires options.store');
+    if (!options.store) throw new Error('[Memory] requires options.store');
     this._store = options.store;
   }
 

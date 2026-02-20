@@ -16,6 +16,7 @@ class Scheduler {
   constructor(options = {}) {
     this._file = options.file || null;
     this._interval = options.interval || 60000;
+    this.onError = options.onError || null;
     this._jobs = this._file && existsSync(this._file)
       ? JSON.parse(readFileSync(this._file, 'utf8'))
       : [];
@@ -54,6 +55,18 @@ class Scheduler {
     return this._jobs.map(j => ({ ...j }));
   }
 
+  /**
+   * Begin the tick loop. Calls `handler(job)` for each due job every tick interval.
+   *
+   * - `handler` is called with the full job object: `{ id, type, schedule, action, status, nextRun }`.
+   * - Jobs that are still running (handler hasn't resolved) are skipped on subsequent ticks
+   *   via the internal `_running` Set — this prevents overlapping executions of the same job.
+   * - Within a single tick, due jobs are executed sequentially (awaited one at a time).
+   * - If a handler throws, the error is passed to `onError(err, job)` if configured.
+   *   The tick loop continues to the next job — handler errors never crash the scheduler.
+   *
+   * @param {(job: object) => Promise<void>} handler - Async function called for each due job.
+   */
   start(handler) {
     if (this._timer) return;
     this._running = new Set();
@@ -66,7 +79,9 @@ class Scheduler {
         this._running.add(job.id);
         try {
           await handler(job);
-        } catch {}
+        } catch (err) {
+          this.onError?.(err, job);
+        }
         this._running.delete(job.id);
         if (job.type === 'once') {
           job.status = 'done';
@@ -87,6 +102,12 @@ class Scheduler {
     }
   }
 
+  /**
+   * @param {string} schedule - Relative ('5s','30m','2h','1d') or cron expression.
+   * @returns {Date} The next run time.
+   * @throws {Error} `[Scheduler] Cannot parse schedule` — when format is not recognized.
+   * @private
+   */
   _parseSchedule(schedule) {
     // Relative: '5s', '30m', '2h', '1d'
     const rel = schedule.match(/^(\d+)(s|m|h|d)$/);
@@ -100,7 +121,7 @@ class Scheduler {
       const { parseExpression } = require('cron-parser');
       return parseExpression(schedule).next().toDate();
     } catch {
-      throw new Error(`Cannot parse schedule: "${schedule}". Use relative (5s/30m/2h/1d) or cron expression.`);
+      throw new Error(`[Scheduler] Cannot parse schedule: "${schedule}". Use relative (5s/30m/2h/1d) or cron expression.`);
     }
   }
 }

@@ -8,6 +8,14 @@ class OllamaProvider {
     this.url = options.url || 'http://localhost:11434';
   }
 
+  /**
+   * Generate a response from a local Ollama instance.
+   * @param {Array<object>} messages - Conversation messages.
+   * @param {Array<object>} [tools=[]] - Tool definitions.
+   * @param {object} [options={}] - Options (temperature).
+   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
+   */
   async generate(messages, tools = [], options = {}) {
     const body = {
       model: this.model,
@@ -59,13 +67,13 @@ class OllamaProvider {
           try {
             const parsed = JSON.parse(chunks);
             if (res.statusCode >= 400) {
-              const err = new Error(parsed.error || `HTTP ${res.statusCode}`);
+              const err = new Error(`[OllamaProvider] ${parsed.error || `HTTP ${res.statusCode}`}`);
               err.status = res.statusCode;
               return reject(err);
             }
             resolve(parsed);
           } catch (e) {
-            reject(new Error(`Invalid JSON response: ${chunks.slice(0, 200)}`));
+            reject(new Error(`[OllamaProvider] Invalid JSON response: ${chunks.slice(0, 200)}`));
           }
         });
       });

@@ -3,12 +3,26 @@
 const https = require('https');
 
 class AnthropicProvider {
+  /**
+   * @param {object} options
+   * @param {string} options.apiKey - Anthropic API key (required).
+   * @param {string} [options.model='claude-haiku-4-5-20251001'] - Model ID.
+   * @throws {Error} `[AnthropicProvider] requires apiKey` — when apiKey is missing.
+   */
   constructor(options = {}) {
-    if (!options.apiKey) throw new Error('AnthropicProvider requires apiKey');
+    if (!options.apiKey) throw new Error('[AnthropicProvider] requires apiKey');
     this.apiKey = options.apiKey.trim();
     this.model = options.model || 'claude-haiku-4-5-20251001';
   }
 
+  /**
+   * Generate a response from the Anthropic API.
+   * @param {Array<object>} messages - Conversation messages (OpenAI format, auto-converted).
+   * @param {Array<object>} [tools=[]] - Tool definitions.
+   * @param {object} [options={}] - Options (temperature, maxTokens, system).
+   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @throws {Error} `[AnthropicProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
+   */
   async generate(messages, tools = [], options = {}) {
     // Separate system message from conversation messages
     let system;
@@ -109,14 +123,14 @@ class AnthropicProvider {
           try {
             const parsed = JSON.parse(chunks);
             if (res.statusCode >= 400) {
-              const err = new Error(parsed.error?.message || `HTTP ${res.statusCode}`);
+              const err = new Error(`[AnthropicProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`);
               err.status = res.statusCode;
               err.body = parsed;
               return reject(err);
             }
             resolve(parsed);
           } catch (e) {
-            reject(new Error(`Invalid JSON response: ${chunks.slice(0, 200)}`));
+            reject(new Error(`[AnthropicProvider] Invalid JSON response: ${chunks.slice(0, 200)}`));
           }
         });
       });

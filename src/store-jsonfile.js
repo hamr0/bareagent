@@ -12,8 +12,13 @@ const { readFileSync, writeFileSync, existsSync } = require('node:fs');
  *   delete(id)                 → void
  */
 class JsonFileStore {
+  /**
+   * @param {object} options
+   * @param {string} options.path - Path to JSON file (required).
+   * @throws {Error} `[JsonFileStore] requires options.path` — when path is missing.
+   */
   constructor(options = {}) {
-    if (!options.path) throw new Error('JsonFileStore requires options.path');
+    if (!options.path) throw new Error('[JsonFileStore] requires options.path');
     this._path = options.path;
     this._data = existsSync(this._path)
       ? JSON.parse(readFileSync(this._path, 'utf8'))

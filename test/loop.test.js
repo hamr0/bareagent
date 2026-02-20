@@ -279,4 +279,60 @@ describe('Loop', () => {
     assert.equal(result.error, 'API down');
     assert.equal(result.text, '');
   });
+
+  describe('tool validation', () => {
+    const provider = mockProvider([
+      { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } },
+    ]);
+    const msgs = [{ role: 'user', content: 'Hi' }];
+
+    it('rejects tool with missing name', async () => {
+      const loop = new Loop({ provider });
+      await assert.rejects(
+        () => loop.run(msgs, [{ execute: async () => 'ok' }]),
+        { message: /Tool is missing a name/ }
+      );
+    });
+
+    it('rejects tool with non-string name', async () => {
+      const loop = new Loop({ provider });
+      await assert.rejects(
+        () => loop.run(msgs, [{ name: 123, execute: async () => 'ok' }]),
+        { message: /Tool is missing a name/ }
+      );
+    });
+
+    it('rejects tool with missing execute', async () => {
+      const loop = new Loop({ provider });
+      await assert.rejects(
+        () => loop.run(msgs, [{ name: 'test' }]),
+        { message: /missing an execute\(\) function/ }
+      );
+    });
+
+    it('rejects tool where execute is not a function', async () => {
+      const loop = new Loop({ provider });
+      await assert.rejects(
+        () => loop.run(msgs, [{ name: 'test', execute: 'not-a-fn' }]),
+        { message: /missing an execute\(\) function/ }
+      );
+    });
+
+    it('rejects tool with invalid parameters type', async () => {
+      const loop = new Loop({ provider });
+      await assert.rejects(
+        () => loop.run(msgs, [{ name: 'test', execute: async () => 'ok', parameters: 'bad' }]),
+        { message: /invalid parameters/ }
+      );
+    });
+
+    it('accepts valid tool without description or parameters', async () => {
+      const p = mockProvider([
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } },
+      ]);
+      const loop = new Loop({ provider: p });
+      const result = await loop.run(msgs, [{ name: 'test', execute: async () => 'ok' }]);
+      assert.equal(result.text, 'ok');
+    });
+  });
 });

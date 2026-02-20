@@ -10,6 +10,14 @@ class OpenAIProvider {
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
   }
 
+  /**
+   * Generate a response from the OpenAI API.
+   * @param {Array<object>} messages - Conversation messages.
+   * @param {Array<object>} [tools=[]] - Tool definitions.
+   * @param {object} [options={}] - Options (temperature, maxTokens).
+   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @throws {Error} `[OpenAIProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
+   */
   async generate(messages, tools = [], options = {}) {
     const body = {
       model: this.model,
@@ -62,14 +70,14 @@ class OpenAIProvider {
           try {
             const parsed = JSON.parse(chunks);
             if (res.statusCode >= 400) {
-              const err = new Error(parsed.error?.message || `HTTP ${res.statusCode}`);
+              const err = new Error(`[OpenAIProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`);
               err.status = res.statusCode;
               err.body = parsed;
               return reject(err);
             }
             resolve(parsed);
           } catch (e) {
-            reject(new Error(`Invalid JSON response: ${chunks.slice(0, 200)}`));
+            reject(new Error(`[OpenAIProvider] Invalid JSON response: ${chunks.slice(0, 200)}`));
           }
         });
       });

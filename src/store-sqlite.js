@@ -12,15 +12,21 @@
  * Requires peer dep: better-sqlite3
  */
 class SQLiteStore {
+  /**
+   * @param {object} options
+   * @param {string} options.path - Path to SQLite database file (required).
+   * @throws {Error} `[SQLiteStore] requires options.path` — when path is missing.
+   * @throws {Error} `[SQLiteStore] requires better-sqlite3` — when peer dep is not installed.
+   */
   constructor(options = {}) {
-    if (!options.path) throw new Error('SQLiteStore requires options.path');
+    if (!options.path) throw new Error('[SQLiteStore] requires options.path');
 
     let Database;
     try {
       Database = require('better-sqlite3');
     } catch {
       throw new Error(
-        'SQLiteStore requires better-sqlite3. Install it: npm install better-sqlite3'
+        '[SQLiteStore] requires better-sqlite3. Install it: npm install better-sqlite3'
       );
     }
 

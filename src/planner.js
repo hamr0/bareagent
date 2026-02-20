@@ -15,12 +15,27 @@ Output format:
 ]`;
 
 class Planner {
+  /**
+   * @param {object} options
+   * @param {object} options.provider - LLM provider (must implement generate()).
+   * @param {string} [options.prompt] - Custom planning prompt override.
+   * @throws {Error} `[Planner] requires a provider` — when options.provider is missing.
+   */
   constructor(options = {}) {
-    if (!options.provider) throw new Error('Planner requires a provider');
+    if (!options.provider) throw new Error('[Planner] requires a provider');
     this.provider = options.provider;
     this.prompt = options.prompt || PLAN_PROMPT;
   }
 
+  /**
+   * Generate a step DAG from a goal.
+   * @param {string} goal - The user's goal to decompose.
+   * @param {object} [context={}] - Optional context with info field.
+   * @returns {Promise<Array<{id: string, action: string, dependsOn: string[], status: string}>>}
+   * @throws {Error} `[Planner] could not parse plan` — when LLM output is not parseable JSON.
+   * @throws {Error} `[Planner] expected JSON array` — when parsed result is not an array.
+   * @throws {Error} `[Planner] step missing id or action` — when a step lacks required fields.
+   */
   async plan(goal, context = {}) {
     const messages = [
       { role: 'system', content: this.prompt },
@@ -47,16 +62,16 @@ class Planner {
     } catch (e) {
       // Try to find array in the text
       const match = cleaned.match(/\[[\s\S]*\]/);
-      if (!match) throw new Error(`Planner: could not parse plan from LLM output: ${text.slice(0, 200)}`);
+      if (!match) throw new Error(`[Planner] could not parse plan from LLM output: ${text.slice(0, 200)}`);
       steps = JSON.parse(match[0]);
     }
 
-    if (!Array.isArray(steps)) throw new Error('Planner: expected JSON array');
+    if (!Array.isArray(steps)) throw new Error('[Planner] expected JSON array');
 
     // Validate and normalize
     const ids = new Set(steps.map(s => s.id));
     return steps.map(s => {
-      if (!s.id || !s.action) throw new Error(`Planner: step missing id or action: ${JSON.stringify(s)}`);
+      if (!s.id || !s.action) throw new Error(`[Planner] step missing id or action: ${JSON.stringify(s)}`);
       const deps = (s.dependsOn || []).filter(d => ids.has(d));
       return { id: s.id, action: s.action, dependsOn: deps, status: 'pending' };
     });

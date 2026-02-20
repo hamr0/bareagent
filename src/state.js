@@ -19,6 +19,14 @@ class StateMachine extends EventEmitter {
     if (this.file) this._load();
   }
 
+  /**
+   * Transition a task to a new state.
+   * @param {string} taskId - Task identifier.
+   * @param {string} event - Transition event (start, complete, fail, pause, resume, cancel, retry).
+   * @param {*} [data] - Optional data to attach to the task.
+   * @returns {string} The new status.
+   * @throws {Error} `[StateMachine] Invalid transition` — when the event is not valid for the current state.
+   */
   transition(taskId, event, data) {
     let task = this.tasks.get(taskId);
     if (!task) {
@@ -28,7 +36,7 @@ class StateMachine extends EventEmitter {
 
     const allowed = TRANSITIONS[task.status];
     if (!allowed || !allowed[event]) {
-      throw new Error(`Invalid transition: ${task.status} + ${event} (task: ${taskId})`);
+      throw new Error(`[StateMachine] Invalid transition: ${task.status} + ${event} (task: ${taskId})`);
     }
 
     const prev = task.status;

@@ -190,4 +190,40 @@ describe('Scheduler', () => {
     assert.equal(ran.length, 1);
     assert.equal(ran[0], 'ok');
   });
+
+  it('onError receives error and job when handler throws', async () => {
+    const errors = [];
+    const sched = new Scheduler({
+      interval: 50,
+      onError: (err, job) => errors.push({ message: err.message, action: job.action }),
+    });
+    sched.add({ schedule: '0s', action: 'fail-job', type: 'once' });
+
+    sched.start(() => { throw new Error('handler broke'); });
+    await new Promise(r => setTimeout(r, 100));
+    sched.stop();
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].message, 'handler broke');
+    assert.equal(errors[0].action, 'fail-job');
+  });
+
+  it('overlap prevention skips job still running on next tick', async () => {
+    const sched = new Scheduler({ interval: 30 });
+    sched.add({ schedule: '0s', action: 'slow', type: 'recurring' });
+
+    let callCount = 0;
+    sched.start(async () => {
+      callCount++;
+      // Simulate slow handler that outlasts one tick interval
+      await new Promise(r => setTimeout(r, 100));
+    });
+
+    // Wait for 2-3 ticks — but handler takes 100ms so overlap should be prevented
+    await new Promise(r => setTimeout(r, 120));
+    sched.stop();
+
+    // Should have been called only once because it was still running during subsequent ticks
+    assert.equal(callCount, 1);
+  });
 });

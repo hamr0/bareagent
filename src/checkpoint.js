@@ -13,9 +13,16 @@ class Checkpoint {
     return this.tools.has(toolName);
   }
 
+  /**
+   * Send a question and wait for a reply.
+   * @param {string} question - The approval question to send.
+   * @param {object} [context={}] - Context passed to send and waitForReply.
+   * @returns {Promise<string|null>} The user's reply, or null.
+   * @throws {Error} `[Checkpoint] send and waitForReply callbacks required` — when callbacks are missing.
+   */
   async ask(question, context = {}) {
     if (!this.send || !this.waitForReply) {
-      throw new Error('Checkpoint: send and waitForReply callbacks required');
+      throw new Error('[Checkpoint] send and waitForReply callbacks required');
     }
     await this.send(question, context);
     const reply = await this.waitForReply(context);

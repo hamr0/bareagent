@@ -1,8 +1,18 @@
 'use strict';
 
 class Loop {
+  /**
+   * @param {object} options
+   * @param {object} options.provider - LLM provider (must implement generate()).
+   * @param {number} [options.maxRounds=5] - Maximum think/act/observe cycles.
+   * @param {string} [options.system] - System prompt prepended to messages.
+   * @param {object} [options.checkpoint] - Checkpoint instance for human-in-the-loop.
+   * @param {object} [options.retry] - Retry instance for backoff on failures.
+   * @param {object} [options.stream] - Stream instance for event emission.
+   * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
+   */
   constructor(options = {}) {
-    if (!options.provider) throw new Error('Loop requires a provider');
+    if (!options.provider) throw new Error('[Loop] requires a provider');
     this.provider = options.provider;
     this.maxRounds = options.maxRounds || 5;
     this.system = options.system || null;
@@ -16,6 +26,16 @@ class Loop {
     this._history = []; // for chat() stateful mode
   }
 
+  /**
+   * Run the think/act/observe loop.
+   * @param {Array<object>} messages - Conversation messages in OpenAI format.
+   * @param {Array<object>} [tools=[]] - Tool definitions with name, execute, description, parameters.
+   * @param {object} [options={}] - Per-run overrides (system, temperature, etc.).
+   * @returns {Promise<{text: string, toolCalls: Array, usage: object, error: string|null}>}
+   * @throws {Error} `[Loop] Tool is missing a name` — when a tool has no name or a non-string name.
+   * @throws {Error} `[Loop] Tool "X" is missing an execute() function` — when execute is not a function.
+   * @throws {Error} `[Loop] Tool "X" has invalid parameters` — when parameters is not an object.
+   */
   async run(messages, tools = [], options = {}) {
     this._stopped = false;
     const system = options.system || this.system;
@@ -23,6 +43,22 @@ class Loop {
       ? [{ role: 'system', content: system }, ...messages]
       : [...messages];
     const toolMap = new Map(tools.map(t => [t.name, t]));
+
+    // Validate tools at wire time
+    for (const tool of tools) {
+      if (typeof tool.name !== 'string' || !tool.name) {
+        throw new Error(`[Loop] Tool is missing a name (got ${JSON.stringify(tool.name)}). Every tool must have a non-empty string name.`);
+      }
+      if (typeof tool.execute !== 'function') {
+        throw new Error(`[Loop] Tool "${tool.name}" is missing an execute() function.`);
+      }
+      if (tool.description !== undefined && typeof tool.description !== 'string') {
+        console.warn(`[Loop] Tool "${tool.name}" has a non-string description — providers may ignore it.`);
+      }
+      if (tool.parameters !== undefined && (typeof tool.parameters !== 'object' || tool.parameters === null)) {
+        throw new Error(`[Loop] Tool "${tool.name}" has invalid parameters — expected an object, got ${typeof tool.parameters}.`);
+      }
+    }
 
     this.stream?.emit({ type: 'loop:start', data: { messageCount: msgs.length } });
 
@@ -67,7 +103,7 @@ class Loop {
 
         const tool = toolMap.get(tc.name);
         if (!tool) {
-          const errMsg = `Unknown tool: ${tc.name}`;
+          const errMsg = `[Loop] Unknown tool: ${tc.name}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
           continue;
@@ -97,7 +133,7 @@ class Loop {
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
         } catch (err) {
-          const errMsg = `Tool error: ${err.message}`;
+          const errMsg = `[Loop] Tool error: ${err.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
         }
@@ -105,7 +141,7 @@ class Loop {
     }
 
     // maxRounds exceeded
-    const warning = `Loop ended after ${this.maxRounds} rounds without final response`;
+    const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
     this.stream?.emit({ type: 'loop:done', data: { text: '', warning } });
     return { text: '', toolCalls: [], usage: lastUsage, error: warning };
   }
