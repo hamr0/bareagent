@@ -2,6 +2,34 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-02-20
+
+Three new features filling gaps identified in the aurora evaluation.
+
+### Added
+
+- **CLIPipeProvider** (`src/provider-clipipe.js`) — Pipe prompts to any CLI tool via stdin/stdout. Constructor takes `{ command, args, cwd, env, timeout }`. Returns `{ text, toolCalls: [], usage }` like all providers. Handles spawn errors, non-zero exit, timeout (SIGTERM + SIGKILL grace), and empty output.
+- **`Loop.validate(tools?)`** (`src/loop.js`) — Health check method that never throws. Returns `{ provider: { ok, error? }, store: { ok, error?, skipped }, tools: { ok, errors? } }`. Tests provider connectivity, store write/read/delete cycle, and tool definition validity.
+- **`runPlan(steps, executeFn, options?)`** (`src/run-plan.js`) — Wave-based parallel executor for Planner step DAGs. Eager input validation (duplicates, unknown deps). Dependency failure propagation, configurable concurrency limit, callbacks (`onStepStart/onStepDone/onStepFail`), and optional StateMachine integration. Returns results in original step order.
+
+### Changed
+
+- `Loop` constructor accepts optional `store` for `validate()` health check.
+- `CLIPipe` added to `bare-agent/providers` exports.
+- `runPlan` added to `bare-agent` main exports.
+
+### Tests
+
+- 33 new unit tests: CLIPipeProvider (9), Loop.validate (9), runPlan (11 + 4 input validation).
+- Total: 155 tests (137 unit + 14 integration + 4 E2E).
+
+### Docs
+
+- `docs/errors.md` — Added CLIPipeProvider, runPlan, and Loop.validate() sections.
+- `docs/04-process/testing.md` — Added test tables for new files, updated pyramid counts.
+
+---
+
 ## [0.1.0] — 2026-02-20
 
 First tagged release. Core library is built, tested, and hardened. Post-POC, pre-consumer.
