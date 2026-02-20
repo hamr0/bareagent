@@ -15,7 +15,7 @@
 
 **Agent orchestration in ~1700 lines. Zero required deps. MIT license.**
 
-Everything between "call the LLM" and "ship the agent" — loop, plan, remember, schedule, checkpoint. Each works alone. All compose together.
+Lightweight enough to understand completely. Complete enough to not reinvent wheels. The core of any agentic automation — not a philosophy, not 50,000 lines of opinions.
 
 ```
 npm install bare-agent
