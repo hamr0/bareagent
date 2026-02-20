@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.1.0 | Node.js >= 18 | 0 required deps | MIT
+> v0.2.0 | Node.js >= 18 | 0 required deps | MIT
 
 ## What this is
 
@@ -12,8 +12,8 @@ npm install bare-agent
 ```
 
 Three entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry
-- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan
+- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 
 ## Which components do I need?
@@ -22,12 +22,15 @@ Three entry points:
 |---|---|
 | Call an LLM with tools and get a result | Loop + a Provider |
 | Break a goal into steps | Planner + a Provider |
+| Execute a step DAG with parallelism | runPlan + executeFn |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |
 | Require human approval before dangerous actions | Checkpoint |
 | Persist context across turns/sessions | Memory + a Store |
 | Observe what the agent is doing | Stream |
 | Retry on transient failures (429, timeouts) | Retry |
+| Use a CLI tool as an LLM provider | CLIPipe |
+| Health-check provider, store, and tools | Loop.validate() |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -59,6 +62,19 @@ const result = await loop.run(
   tools
 );
 // result: { text: "The weather in Berlin is 22°C and sunny.", toolCalls: [], usage: {...}, error: null }
+```
+
+## Health check with validate()
+
+```javascript
+const result = await loop.validate(tools);
+// result: {
+//   provider: { ok: true },
+//   store: { ok: true, skipped: false },
+//   tools: { ok: true }
+// }
+// Never throws — all failures captured in the return structure.
+// Store check skipped if no store was passed to Loop constructor.
 ```
 
 ## Wiring with Memory
@@ -135,6 +151,7 @@ const state = new StateMachine({ file: './tasks.json' });
 const steps = await planner.plan('Book a trip to Berlin');
 // steps: [{ id: 's1', action: 'Search flights', dependsOn: [], status: 'pending' }, ...]
 
+// Option A: manual sequential execution
 for (const step of steps) {
   state.transition(step.id, 'start');
   try {
@@ -149,6 +166,31 @@ for (const step of steps) {
 }
 ```
 
+## Wiring with runPlan (parallel execution)
+
+```javascript
+const { Planner, runPlan, StateMachine } = require('bare-agent');
+
+const planner = new Planner({ provider });
+const steps = await planner.plan('Book a trip to Berlin');
+
+// runPlan executes steps in dependency-respecting waves with parallelism
+const results = await runPlan(steps, async (step) => {
+  const result = await loop.run(
+    [{ role: 'user', content: step.action }],
+    tools
+  );
+  return result.text;
+}, {
+  concurrency: 3,                          // max 3 parallel steps per wave
+  stateMachine: new StateMachine(),         // optional lifecycle tracking
+  onStepStart: (step) => console.log(`Starting: ${step.action}`),
+  onStepDone: (step, result) => console.log(`Done: ${step.id}`),
+  onStepFail: (step, err) => console.error(`Failed: ${step.id}: ${err.message}`),
+});
+// results: [{ id: 's1', status: 'done', result: '...' }, { id: 's2', status: 'failed', error: '...' }, ...]
+```
+
 ## Provider options
 
 ```javascript
@@ -160,9 +202,13 @@ new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
 
 // Ollama (local, no key needed)
 new Ollama({ model: 'llama3.2', url: 'http://localhost:11434' })
+
+// CLIPipe — pipe prompts to any CLI tool via stdin/stdout
+new CLIPipe({ command: 'claude', args: ['--print'], timeout: 30000 })
+new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 ```
 
-All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`.
+All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens).
 
 ## Store options
 
