@@ -4,14 +4,12 @@
                                                     │  ╠╩╗╠═╣╠╦╝╠╣  ╠═╣║ ╦╠╣ ║║║ ║    │
                                                     │  ╚═╝╩ ╩╩╚═╚═╝ ╩ ╩╚═╝╚═╝╝╚╝ ╩    │
                                                     │   think ──→ act ──→ observe     │
-                                                    │     ↑                  │        │ 
+                                                    │     ↑                  │        │
                                                     │     └──────────────────┘        │
                                                     ╰──╮──────────────────────────────╯
                                                        ╰── the brain, without the bloat
-                                                       
-```
 
-# bare-agent
+```
 
 **Agent orchestration in ~1700 lines. Zero required deps. MIT license.**
 
@@ -36,47 +34,67 @@ Not a framework. Not an SDK. Just composable building blocks for agents.
 
 ---
 
-## Architecture
+## What's inside
 
-Three layers. You use the first two. You bring the third.
+Every agent needs the same building blocks. bare-agent gives you each one as an independent, composable piece.
 
-### Layer 1: ORCHESTRATION — who does what? in what order? what when things go wrong?
+### The core loop
 
-| Component | What it does | How |
+| Component | What it does | Key behavior |
 |---|---|---|
-| **Planner** | Goal -> step DAG | Structured output prompt, LLM returns JSON dependency graph |
-| **State** | Task lifecycle tracking | `pending -> running -> done \| failed`, persisted to JSON file |
-| **Stream** | Event streaming | One JSON object per line to stdout, pipe-friendly, any-language |
-| **Errors** | Typed error hierarchy | `BareAgentError` base, `ProviderError`, `ToolError`, `TimeoutError`, `CircuitOpenError` |
+| **Loop** | Think → act → observe → repeat | Calls any LLM, executes your tools, loops until the model gives a final answer. Throws on error by default — use `try/catch` or opt into silent `result.error` with `throwOnError: false` |
+| **Planner** | Break a goal into steps | Sends your goal to the LLM, gets back a step-by-step plan with dependencies. Built-in caching (`cacheTTL`) avoids re-planning identical goals |
+| **runPlan** | Execute steps in parallel waves | Runs independent steps concurrently, respects dependencies, propagates failures, limits concurrency. Retry per step with `stepRetry` |
 
-### Layer 2: EXECUTION — how the agent thinks, remembers, acts, and persist?
+### Resilience
 
-| Component | What it does | How |
+| Component | What it does | Key behavior |
 |---|---|---|
-| **Loop** | Think -> act -> observe | Calls OpenAI/Anthropic/Ollama, executes tools, loops until text |
-| **Scheduler** | Time-triggered turns | Cron (`0 7 * * 1-5`), relative (`2h`, `30m`), persisted jobs |
-| **Memory** | Persist + search | SQLite FTS5 with BM25 (default), JSON file fallback (zero deps) |
-| **Checkpoint** | Human approval gate | You provide the transport — readline, Telegram, WebSocket |
-| **Retry** | Backoff on failure | Exponential/linear with jitter, retries on 429/5xx/network errors |
-| **CircuitBreaker** | Fail-fast on repeated errors | Per-key threshold, auto half-open probe, `wrapProvider()` |
-| **Fallback** | Multi-provider resilience | Tries providers in order, AggregateError if all fail |
+| **Retry** | Backoff on failure | Exponential or linear with jitter (`full`, `equal`). Auto-retries 429/5xx. Respects `err.retryable` |
+| **CircuitBreaker** | Fail fast on repeated errors | After N failures, stops calling the provider entirely. Auto-recovers after a cooldown. Per-key isolation |
+| **Fallback** | Multi-provider resilience | Tries providers in order — if OpenAI is down, automatically tries Anthropic. Transparent to the rest of your code |
+| **Errors** | Typed error hierarchy | `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `CircuitOpenError` — catch specific failures, not string matching |
 
-### Layer 3: ACTUATION — you provide this
+### Memory, state, and control
 
-```
-bare-agent provides the brain. You provide the hands.
-Your tools plug into the Loop as functions:
+| Component | What it does | Key behavior |
+|---|---|---|
+| **Memory** | Persist and search context | SQLite with full-text search and relevance ranking (default), or zero-dep JSON file. Bring your own store for Postgres, Redis, etc. |
+| **StateMachine** | Track task lifecycle | `pending → running → done / failed / waiting / cancelled`. Persists to file. Event hooks for debugging |
+| **Checkpoint** | Human approval gate | Pause before dangerous actions (send email, make purchase). You provide the transport — terminal, Telegram, Slack, whatever |
+| **Scheduler** | Time-triggered turns | Cron expressions (`0 7 * * 1-5`) or relative timers (`2h`, `30m`). Persisted jobs survive restarts |
+| **Stream** | Event streaming | Every Loop action emits structured events. Pipe as JSONL to stdout, subscribe in-process, or write a custom transport |
 
-REST APIs       Gmail, Spotify, Calendar, any HTTP endpoint
-MCP servers     any MCP-compatible tool server
-CLI commands    termux-api, ffmpeg, git, shell scripts
-Browser         Playwright, Puppeteer
-UI automation   ADB, accessibility APIs
-```
+### You provide the hands
 
-bare-agent does not ship tools. Your tools plug into the Loop as functions — `{ name, description, parameters, execute }`. The library handles orchestration. You handle action.
+bare-agent provides the brain — your tools provide the action. Any function can be a tool:
 
-### What bare-agent does NOT do
+| Tool type | Examples |
+|---|---|
+| REST APIs | Gmail, Spotify, Calendar, any HTTP endpoint |
+| MCP servers | Any MCP-compatible tool server |
+| CLI commands | `ffmpeg`, `git`, shell scripts |
+| Browser | Playwright, Puppeteer |
+| Whatever you want | If it's a function, it's a tool |
+
+---
+
+## LLM providers
+
+| Provider | What it covers |
+|---|---|
+| **OpenAI** | OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio — any OpenAI-compatible endpoint |
+| **Anthropic** | Claude models via native API |
+| **Ollama** | Local models, no API key needed |
+| **CLIPipe** | Any CLI tool via stdin/stdout — `claude`, `ollama run`, etc. Real-time streaming with `onChunk` callback |
+| **Fallback** | Tries multiple providers in order — transparent to Loop |
+| **Bring your own** | Implement one method (`generate`), full control |
+
+All providers return the same shape. Swap one for another with zero code changes.
+
+---
+
+## What bare-agent does NOT do
 
 | Not included | Why | Use instead |
 |---|---|---|
@@ -89,153 +107,9 @@ bare-agent does not ship tools. Your tools plug into the Loop as functions — `
 
 ---
 
-## Quick start
+## Cross-language
 
-### Minimal — 10 lines, one LLM call with tools
-
-```javascript
-const { Loop } = require('bare-agent');
-const { OpenAIProvider } = require('bare-agent/providers');
-
-const loop = new Loop({
-  provider: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }),
-});
-
-const result = await loop.run([
-  { role: 'user', content: 'What is the weather in Berlin?' }
-], [weatherTool]);
-
-console.log(result.text);
-```
-
-### With human approval — 30 lines
-
-```javascript
-const { Loop, Checkpoint } = require('bare-agent');
-const { AnthropicProvider } = require('bare-agent/providers');
-
-const checkpoint = new Checkpoint({
-  tools: ['send_email'],
-  send: (q) => console.log(`[APPROVE?] ${q}`),
-  waitForReply: () => new Promise(resolve =>
-    process.stdin.once('data', d => resolve(d.toString().trim()))
-  ),
-});
-
-const loop = new Loop({
-  provider: new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY }),
-  checkpoint,
-});
-
-const result = await loop.run([
-  { role: 'user', content: 'Email mom that I will be late' }
-], [emailTool]);
-```
-
-### Full autonomous agent — 40 lines
-
-```javascript
-const { Loop, Planner, StateMachine, Scheduler,
-        Memory, Checkpoint, Stream, Retry } = require('bare-agent');
-const { AnthropicProvider } = require('bare-agent/providers');
-const { SQLiteStore } = require('bare-agent/stores');
-
-const provider = new AnthropicProvider({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  model: 'claude-haiku-4-5-20251001',
-});
-
-const loop = new Loop({
-  provider,
-  planner: new Planner({ provider }),
-  state: new StateMachine({ file: './tasks.json' }),
-  memory: new Memory({ store: new SQLiteStore('./agent.db') }),
-  checkpoint: new Checkpoint({
-    tools: ['purchase', 'send_email'],
-    send: (q) => telegram.send(chatId, q),
-    waitForReply: () => new Promise(r => telegram.once('message', r)),
-  }),
-  stream: new Stream({ transport: 'jsonl' }),
-  retry: new Retry({ maxAttempts: 3, backoff: 'exponential' }),
-});
-
-await loop.runGoal('Book my Berlin trip for next Tuesday');
-```
-
-### Resilient multi-provider — circuit breaker + fallback + jitter
-
-```javascript
-const { Loop, Retry, CircuitBreaker } = require('bare-agent');
-const { OpenAI, Anthropic, Fallback } = require('bare-agent/providers');
-
-const cb = new CircuitBreaker({ threshold: 3, resetAfter: 30000 });
-
-const provider = new Fallback([
-  cb.wrapProvider(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), 'openai'),
-  cb.wrapProvider(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), 'anthropic'),
-]);
-
-const loop = new Loop({
-  provider,
-  retry: new Retry({ maxAttempts: 3, jitter: 'full' }),
-});
-
-const result = await loop.run([
-  { role: 'user', content: 'Summarize today\'s news' }
-]);
-```
-
----
-
-## LLM Providers
-
-All implement one method: `generate(messages, tools, options) -> { text, toolCalls, usage }`.
-
-| Provider | Covers |
-|---|---|
-| **OpenAI** | OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio — any OpenAI-compatible endpoint |
-| **Anthropic** | Claude models via native API |
-| **Ollama** | Local models, no API key needed |
-| **CLIPipe** | Any CLI tool via stdin/stdout (claude, ollama run, etc.) |
-| **Fallback** | Tries multiple providers in order — transparent to Loop |
-| **Bring your own** | Implement `generate()` — one method, full control |
-
-## Storage
-
-| Store | Deps | Search |
-|---|---|---|
-| **SQLite FTS5** | `better-sqlite3` (peer dep) | Full-text search with BM25 ranking |
-| **JSON file** | None | Substring matching |
-| **Bring your own** | None | Implement 4 methods for Postgres, Redis, etc. |
-
----
-
-## Cross-language usage
-
-bare-agent runs as a subprocess. Communicate via JSONL on stdin/stdout. Works from any language.
-
-```python
-import subprocess, json
-
-proc = subprocess.Popen(
-    ['npx', 'bare-agent', '--jsonl'],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
-)
-
-proc.stdin.write(json.dumps({
-    "method": "run",
-    "params": {"goal": "What is 2+2?"}
-}) + '\n')
-proc.stdin.flush()
-
-for line in proc.stdout:
-    event = json.loads(line)
-    if event['type'] == 'loop:done':
-        print(event['data']['text'])
-        break
-```
-
-Same pattern works from Go, Rust, Java, Ruby — any language that can spawn a process and read lines.
+bare-agent runs as a subprocess. Communicate via JSONL on stdin/stdout. Works from Python, Go, Rust, Java, Ruby — any language that can spawn a process and read lines.
 
 ---
 
@@ -243,21 +117,31 @@ Same pattern works from Go, Rust, Java, Ruby — any language that can spawn a p
 
 ```
 required:     0
-optional:     cron-parser (for cron expressions in scheduler)
+optional:     cron-parser (for cron expressions in Scheduler)
 peer:         better-sqlite3 (for SQLite memory store)
 total lines:  ~1700
 ```
 
-## Status
+---
 
-**Production-validated.** bare-agent powers the SOAR2 pipeline in [Aurora](https://github.com/hamr0/aurora), replacing ~400 lines of hand-rolled agent orchestration with ~60 lines of bare-agent wiring. In production use, bare-agent eliminated:
+## Getting started
 
-- **Boilerplate** — Tool-calling loop, provider normalization, retry logic, and state tracking that every agent project reinvents. Aurora's SOAR2 pipeline dropped from custom loop + manual state management to `Loop + Planner + runPlan + StateMachine`.
-- **Fragile glue code** — Manual wave execution, dependency resolution, and error propagation replaced by `runPlan` with built-in parallelism and failure cascading.
-- **Provider lock-in** — Switching from OpenAI to Anthropic to CLIPipe required zero orchestration changes — just swap the provider constructor.
-- **Debugging friction** — Structured `[ComponentName]` error prefixes and `Stream` events made failures traceable in minutes instead of hours.
+For code examples, wiring recipes, and API details, see the **[Integration Guide](bareagent.context.md)** — it covers everything from a 10-line minimal setup to full multi-component composition.
 
-See [project plan](docs/01-product/prd.md) for the full design. See [CHANGELOG.md](CHANGELOG.md) for release history.
+For error reference, see **[docs/errors.md](docs/errors.md)**.
+
+---
+
+## Production-validated
+
+bare-agent powers the SOAR2 pipeline in [Aurora](https://github.com/hamr0/aurora), replacing ~400 lines of hand-rolled agent orchestration with ~60 lines of bare-agent wiring:
+
+- **56% less code** — Loop + Planner + runPlan + StateMachine replaced custom loop, manual state management, and a buggy wave executor
+- **Zero framework plumbing** — the remaining code is 100% domain logic (prompts, routing, protocol)
+- **Provider-agnostic** — switched from OpenAI to CLIPipe with zero orchestration changes
+- **Debuggable** — structured `[ComponentName]` errors and Stream events made failures traceable in minutes
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
