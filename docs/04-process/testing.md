@@ -16,9 +16,9 @@
     ╱   42 pass    ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱────────────────╲  Proves: providers parse real responses, plans are sensible, memory search works
   ╱                   ╲
- ╱   Unit — 104 pass   ╲  Unit (per component)
+ ╱   Unit — 137 pass   ╲  Unit (per component)
 ╱________________________╲  Mock provider, no network
-                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search
+                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates all components compose correctly. Never skip a layer.
@@ -29,7 +29,7 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js
+node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js test/provider-clipipe.test.js test/run-plan.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -65,7 +65,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | respects custom retryOn | User-provided predicate controls what's retried |
 | times out per attempt | Per-attempt timeout fires, error has `code: 'ETIMEDOUT'` |
 
-### `test/loop.test.js` — 12 tests
+### `test/loop.test.js` — 21 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -81,6 +81,15 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | passes system prompt to messages | System prompt prepended as first message |
 | emits stream events | Stream.emit() called with correct event types |
 | returns error when provider fails | Provider throws → error in result, no exception |
+| **validate: reports provider ok** | generate() succeeds → `provider.ok: true` |
+| **validate: reports provider error** | generate() throws → `provider.ok: false`, error message captured |
+| **validate: reports store ok** | store/get/delete cycle succeeds → `store.ok: true` |
+| **validate: reports store error** | store throws → `store.ok: false`, error message captured |
+| **validate: reports store skipped** | No store configured → `store.ok: true, skipped: true` |
+| **validate: reports store error when get returns null** | store.get returns null after store → error captured |
+| **validate: reports tools ok** | Valid tools → `tools.ok: true` |
+| **validate: reports tools with errors** | Bad tools → errors collected in array, not thrown |
+| **validate: never throws even when everything fails** | All checks fail → structured result, no exception |
 
 ### `test/providers.test.js` — 6 tests
 
@@ -92,6 +101,40 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | Anthropic: constructs with defaults | Default model set correctly |
 | Ollama: constructs with defaults | Default model and url set correctly |
 | Ollama: constructs with custom model and url | Custom config accepted |
+
+### `test/provider-clipipe.test.js` — 9 tests
+
+| Test | What it proves |
+|------|---------------|
+| requires command | Constructor throws without `command` option |
+| generates text from stdout | `echo` command produces expected text response |
+| pipes messages to stdin | Messages formatted and piped to child process stdin, echoed back |
+| formats messages correctly | `_formatPrompt` produces `Role: content\n` format |
+| throws on bad command | Non-existent command → spawn error with command name in message |
+| throws on non-zero exit | Exit code 1 + stderr → error includes code and stderr content |
+| throws on timeout | Slow process killed after timeout → error includes timeout duration |
+| throws on empty output | Process exits 0 with no stdout → clear "no output" error |
+| passes env to child process | Custom env vars available in child process |
+
+### `test/run-plan.test.js` — 11 tests
+
+| Test | What it proves |
+|------|---------------|
+| rejects non-array steps | Non-array input → clear error |
+| rejects empty array | Empty array → clear error |
+| rejects non-function executeFn | Non-function second arg → clear error |
+| rejects duplicate step ids | Two steps with same id → error with id name |
+| rejects unknown dependency | dependsOn referencing missing id → error with both ids |
+| runs independent steps in parallel | All independent steps execute in one wave |
+| runs dependent steps in waves | s1 → s2 executes sequentially across waves |
+| step failure does not abort siblings | Failed step in wave doesn't prevent sibling completion |
+| propagates dependency failure | Failed dep → dependent step marked failed without executing |
+| respects concurrency limit | With concurrency=2, never more than 2 running simultaneously |
+| fires callbacks correctly | onStepStart, onStepDone, onStepFail all fire with correct args |
+| integrates with StateMachine | Steps transition through start/complete/fail in StateMachine |
+| handles diamond dependency pattern | s1 → s2+s3 → s4 executes in correct topological order |
+| does not mutate input steps | Original steps array unchanged after execution |
+| returns results in original step order | Results array matches input order, not execution order |
 
 ### `test/planner.test.js` — 10 tests
 

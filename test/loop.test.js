@@ -280,6 +280,140 @@ describe('Loop', () => {
     assert.equal(result.text, '');
   });
 
+  describe('validate', () => {
+    it('reports provider ok', async () => {
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.validate();
+
+      assert.equal(result.provider.ok, true);
+      assert.equal(result.provider.error, undefined);
+    });
+
+    it('reports provider error', async () => {
+      const provider = {
+        async generate() { throw new Error('API key invalid'); },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.validate();
+
+      assert.equal(result.provider.ok, false);
+      assert.equal(result.provider.error, 'API key invalid');
+    });
+
+    it('reports store ok', async () => {
+      const data = new Map();
+      const store = {
+        async store(key, value) { data.set(key, value); },
+        async get(key) { return data.get(key) || null; },
+        async delete(key) { data.delete(key); },
+      };
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider, store });
+      const result = await loop.validate();
+
+      assert.equal(result.store.ok, true);
+      assert.equal(result.store.skipped, false);
+    });
+
+    it('reports store error', async () => {
+      const store = {
+        async store() { throw new Error('disk full'); },
+        async get() { return null; },
+        async delete() {},
+      };
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider, store });
+      const result = await loop.validate();
+
+      assert.equal(result.store.ok, false);
+      assert.equal(result.store.error, 'disk full');
+    });
+
+    it('reports store skipped when no store', async () => {
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.validate();
+
+      assert.equal(result.store.ok, true);
+      assert.equal(result.store.skipped, true);
+    });
+
+    it('reports store error when get returns null', async () => {
+      const store = {
+        async store() {},
+        async get() { return null; },
+        async delete() {},
+      };
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider, store });
+      const result = await loop.validate();
+
+      assert.equal(result.store.ok, false);
+      assert.ok(result.store.error.includes('store.get returned null'));
+    });
+
+    it('reports tools ok', async () => {
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.validate([
+        { name: 'test', execute: async () => 'ok' },
+      ]);
+
+      assert.equal(result.tools.ok, true);
+      assert.equal(result.tools.errors, undefined);
+    });
+
+    it('reports tools with errors', async () => {
+      const provider = {
+        async generate() { return { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.validate([
+        { execute: async () => 'ok' },
+        { name: 'bad', execute: 'not-fn' },
+        { name: 'bad2', execute: async () => 'ok', parameters: 'string' },
+      ]);
+
+      assert.equal(result.tools.ok, false);
+      assert.equal(result.tools.errors.length, 3);
+      assert.ok(result.tools.errors[0].includes('missing a name'));
+      assert.ok(result.tools.errors[1].includes('missing an execute'));
+      assert.ok(result.tools.errors[2].includes('invalid parameters'));
+    });
+
+    it('never throws even when everything fails', async () => {
+      const provider = {
+        async generate() { throw new Error('provider down'); },
+      };
+      const store = {
+        async store() { throw new Error('store broken'); },
+        async get() { return null; },
+        async delete() {},
+      };
+      const loop = new Loop({ provider, store });
+      const result = await loop.validate([
+        { execute: async () => 'ok' },
+      ]);
+
+      assert.equal(result.provider.ok, false);
+      assert.equal(result.store.ok, false);
+      assert.equal(result.tools.ok, false);
+    });
+  });
+
   describe('tool validation', () => {
     const provider = mockProvider([
       { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } },

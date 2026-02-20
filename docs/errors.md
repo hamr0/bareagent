@@ -59,6 +59,35 @@ Every error thrown or rejected by bare-agent is prefixed with `[ComponentName]`.
 
 **Note:** After exhausting `maxAttempts`, Retry rethrows the last error from the wrapped function — it does not add its own prefix.
 
+## CLIPipeProvider
+
+| Error | When | Fix |
+|-------|------|-----|
+| `[CLIPipeProvider] requires command` | Constructor called without `command` | Pass a command: `new CLIPipeProvider({ command: 'claude', args: ['--print'] })` |
+| `[CLIPipeProvider] failed to spawn: ...` | CLI binary not found or not executable (ENOENT, EACCES) | Check that the command is installed and in PATH |
+| `[CLIPipeProvider] process exited with code N: ...` | CLI tool returned non-zero exit | Check stderr output (included in error message). May be bad args or tool-specific error |
+| `[CLIPipeProvider] timed out after Nms` | CLI tool didn't produce output within timeout | Increase `timeout` in constructor. Default is 30000ms |
+| `[CLIPipeProvider] process produced no output` | CLI tool exited 0 but wrote nothing to stdout | Check the command actually produces output for the given input |
+
+## runPlan
+
+| Error | When | Fix |
+|-------|------|-----|
+| `[runPlan] steps must be a non-empty array` | Called with empty array or non-array | Pass the output of `Planner.plan()` |
+| `[runPlan] executeFn must be a function` | Second argument is not a function | Pass an async function: `async (step) => result` |
+| `[runPlan] duplicate step id: "X"` | Two steps share the same id | Ensure all step ids are unique |
+| `[runPlan] step "X" depends on unknown step "Y"` | dependsOn references a non-existent id | Check that all dependency ids exist in the steps array |
+
+**runPlan non-thrown errors** (returned in results array, not thrown):
+- `dependency 'sN' failed` — a step's dependency failed, so this step was skipped. Fix the upstream step.
+
+## Loop.validate()
+
+`validate()` never throws. All errors are captured in the return value:
+- `result.provider.error` — provider generate() failed (auth, network, etc.)
+- `result.store.error` — store write/read/delete cycle failed
+- `result.tools.errors[]` — same validation messages as `run()` but collected, not thrown
+
 ## OpenAIProvider
 
 | Error | When | Fix |

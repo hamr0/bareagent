@@ -8,6 +8,7 @@ const { Checkpoint } = require('./src/checkpoint');
 const { Memory } = require('./src/memory');
 const { Stream } = require('./src/stream');
 const { Retry } = require('./src/retry');
+const { runPlan } = require('./src/run-plan');
 
 module.exports = {
   Loop,
@@ -18,4 +19,5 @@ module.exports = {
   Memory,
   Stream,
   Retry,
+  runPlan,
 };

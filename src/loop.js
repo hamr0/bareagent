@@ -9,6 +9,7 @@ class Loop {
    * @param {object} [options.checkpoint] - Checkpoint instance for human-in-the-loop.
    * @param {object} [options.retry] - Retry instance for backoff on failures.
    * @param {object} [options.stream] - Stream instance for event emission.
+   * @param {object} [options.store] - Store instance for validate() health check.
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
    */
   constructor(options = {}) {
@@ -22,6 +23,7 @@ class Loop {
     this.onToolCall = options.onToolCall || null;
     this.onText = options.onText || null;
     this.onError = options.onError || null;
+    this.store = options.store || null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
   }
@@ -144,6 +146,69 @@ class Loop {
     const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
     this.stream?.emit({ type: 'loop:done', data: { text: '', warning } });
     return { text: '', toolCalls: [], usage: lastUsage, error: warning };
+  }
+
+  /**
+   * Health check — validates provider, store, and tools without throwing.
+   * @param {Array<object>} [tools=[]] - Tool definitions to validate.
+   * @returns {Promise<{provider: {ok: boolean, error?: string}, store: {ok: boolean, error?: string, skipped: boolean}, tools: {ok: boolean, errors?: string[]}}>}
+   * Never throws — all failures captured in return value.
+   */
+  async validate(tools = []) {
+    const result = {
+      provider: { ok: false },
+      store: { ok: false, skipped: false },
+      tools: { ok: true },
+    };
+
+    // Provider check
+    try {
+      await this.provider.generate([{ role: 'user', content: 'respond with ok' }], [], {});
+      result.provider.ok = true;
+    } catch (err) {
+      result.provider.error = err.message;
+    }
+
+    // Store check
+    if (!this.store) {
+      result.store.ok = true;
+      result.store.skipped = true;
+    } else {
+      try {
+        const testKey = `__validate_${Date.now()}`;
+        await this.store.store(testKey, { test: true });
+        const got = await this.store.get(testKey);
+        if (got === null || got === undefined) {
+          result.store.error = 'store.get returned null for test key';
+        } else {
+          await this.store.delete(testKey);
+          result.store.ok = true;
+        }
+      } catch (err) {
+        result.store.error = err.message;
+      }
+    }
+
+    // Tools check
+    const toolErrors = [];
+    for (const tool of tools) {
+      if (typeof tool.name !== 'string' || !tool.name) {
+        toolErrors.push(`Tool is missing a name (got ${JSON.stringify(tool.name)})`);
+        continue;
+      }
+      if (typeof tool.execute !== 'function') {
+        toolErrors.push(`Tool "${tool.name}" is missing an execute() function`);
+      }
+      if (tool.parameters !== undefined && (typeof tool.parameters !== 'object' || tool.parameters === null)) {
+        toolErrors.push(`Tool "${tool.name}" has invalid parameters — expected an object, got ${typeof tool.parameters}`);
+      }
+    }
+    if (toolErrors.length > 0) {
+      result.tools.ok = false;
+      result.tools.errors = toolErrors;
+    }
+
+    return result;
   }
 
   async chat(text, tools = [], options = {}) {
