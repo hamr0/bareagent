@@ -1,5 +1,7 @@
 'use strict';
 
+const { ToolError } = require('./errors');
+
 class Loop {
   /**
    * @param {object} options
@@ -135,7 +137,8 @@ class Loop {
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
         } catch (err) {
-          const errMsg = `[Loop] Tool error: ${err.message}`;
+          const toolErr = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
+          const errMsg = `[Loop] Tool error: ${toolErr.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
         }

@@ -13,7 +13,7 @@
 
 # bare-agent
 
-**Agent orchestration in ~1500 lines. Zero required deps. MIT license.**
+**Agent orchestration in ~1700 lines. Zero required deps. MIT license.**
 
 Everything between "call the LLM" and "ship the agent" — loop, plan, remember, schedule, checkpoint. Each works alone. All compose together.
 
@@ -47,6 +47,7 @@ Three layers. You use the first two. You bring the third.
 | **Planner** | Goal -> step DAG | Structured output prompt, LLM returns JSON dependency graph |
 | **State** | Task lifecycle tracking | `pending -> running -> done \| failed`, persisted to JSON file |
 | **Stream** | Event streaming | One JSON object per line to stdout, pipe-friendly, any-language |
+| **Errors** | Typed error hierarchy | `BareAgentError` base, `ProviderError`, `ToolError`, `TimeoutError`, `CircuitOpenError` |
 
 ### Layer 2: EXECUTION — how the agent thinks, remembers, acts, and persist?
 
@@ -56,7 +57,9 @@ Three layers. You use the first two. You bring the third.
 | **Scheduler** | Time-triggered turns | Cron (`0 7 * * 1-5`), relative (`2h`, `30m`), persisted jobs |
 | **Memory** | Persist + search | SQLite FTS5 with BM25 (default), JSON file fallback (zero deps) |
 | **Checkpoint** | Human approval gate | You provide the transport — readline, Telegram, WebSocket |
-| **Retry** | Backoff on failure | Exponential/linear, retries on 429/5xx/network errors |
+| **Retry** | Backoff on failure | Exponential/linear with jitter, retries on 429/5xx/network errors |
+| **CircuitBreaker** | Fail-fast on repeated errors | Per-key threshold, auto half-open probe, `wrapProvider()` |
+| **Fallback** | Multi-provider resilience | Tries providers in order, AggregateError if all fail |
 
 ### Layer 3: ACTUATION — you provide this
 
@@ -159,17 +162,42 @@ const loop = new Loop({
 await loop.runGoal('Book my Berlin trip for next Tuesday');
 ```
 
+### Resilient multi-provider — circuit breaker + fallback + jitter
+
+```javascript
+const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { OpenAI, Anthropic, Fallback } = require('bare-agent/providers');
+
+const cb = new CircuitBreaker({ threshold: 3, resetAfter: 30000 });
+
+const provider = new Fallback([
+  cb.wrapProvider(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), 'openai'),
+  cb.wrapProvider(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), 'anthropic'),
+]);
+
+const loop = new Loop({
+  provider,
+  retry: new Retry({ maxAttempts: 3, jitter: 'full' }),
+});
+
+const result = await loop.run([
+  { role: 'user', content: 'Summarize today\'s news' }
+]);
+```
+
 ---
 
 ## LLM Providers
 
-Three built-in. All implement one method: `generate(messages, tools, options) -> { text, toolCalls, usage }`.
+All implement one method: `generate(messages, tools, options) -> { text, toolCalls, usage }`.
 
 | Provider | Covers |
 |---|---|
 | **OpenAI** | OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio — any OpenAI-compatible endpoint |
 | **Anthropic** | Claude models via native API |
 | **Ollama** | Local models, no API key needed |
+| **CLIPipe** | Any CLI tool via stdin/stdout (claude, ollama run, etc.) |
+| **Fallback** | Tries multiple providers in order — transparent to Loop |
 | **Bring your own** | Implement `generate()` — one method, full control |
 
 ## Storage
@@ -217,7 +245,7 @@ Same pattern works from Go, Rust, Java, Ruby — any language that can spawn a p
 required:     0
 optional:     cron-parser (for cron expressions in scheduler)
 peer:         better-sqlite3 (for SQLite memory store)
-total lines:  ~1500
+total lines:  ~1700
 ```
 
 ## Status

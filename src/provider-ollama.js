@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const { ProviderError } = require('./errors');
 
 class OllamaProvider {
   constructor(options = {}) {
@@ -67,9 +68,10 @@ class OllamaProvider {
           try {
             const parsed = JSON.parse(chunks);
             if (res.statusCode >= 400) {
-              const err = new Error(`[OllamaProvider] ${parsed.error || `HTTP ${res.statusCode}`}`);
-              err.status = res.statusCode;
-              return reject(err);
+              return reject(new ProviderError(
+                `[OllamaProvider] ${parsed.error || `HTTP ${res.statusCode}`}`,
+                { status: res.statusCode, body: parsed }
+              ));
             }
             resolve(parsed);
           } catch (e) {

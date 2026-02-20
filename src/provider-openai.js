@@ -2,6 +2,7 @@
 
 const https = require('https');
 const http = require('http');
+const { ProviderError } = require('./errors');
 
 class OpenAIProvider {
   constructor(options = {}) {
@@ -70,10 +71,10 @@ class OpenAIProvider {
           try {
             const parsed = JSON.parse(chunks);
             if (res.statusCode >= 400) {
-              const err = new Error(`[OpenAIProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`);
-              err.status = res.statusCode;
-              err.body = parsed;
-              return reject(err);
+              return reject(new ProviderError(
+                `[OpenAIProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`,
+                { status: res.statusCode, body: parsed }
+              ));
             }
             resolve(parsed);
           } catch (e) {

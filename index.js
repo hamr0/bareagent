@@ -9,6 +9,15 @@ const { Memory } = require('./src/memory');
 const { Stream } = require('./src/stream');
 const { Retry } = require('./src/retry');
 const { runPlan } = require('./src/run-plan');
+const { CircuitBreaker } = require('./src/circuit-breaker');
+const {
+  BareAgentError,
+  ProviderError,
+  ToolError,
+  TimeoutError,
+  ValidationError,
+  CircuitOpenError,
+} = require('./src/errors');
 
 module.exports = {
   Loop,
@@ -20,4 +29,11 @@ module.exports = {
   Stream,
   Retry,
   runPlan,
+  CircuitBreaker,
+  BareAgentError,
+  ProviderError,
+  ToolError,
+  TimeoutError,
+  ValidationError,
+  CircuitOpenError,
 };

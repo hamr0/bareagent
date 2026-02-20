@@ -2,6 +2,49 @@
 
 Every error thrown or rejected by bare-agent is prefixed with `[ComponentName]`. Use this page to look up what went wrong and how to fix it.
 
+## Typed Error Hierarchy
+
+bare-agent provides typed error classes for programmatic error handling. All extend `Error`.
+
+```
+Error
+└── BareAgentError          { code, retryable, context }
+    ├── ProviderError       { status, body } — auto retryable for 429/5xx
+    ├── ToolError           code: 'TOOL_ERROR', retryable: false
+    ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
+    ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
+    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+```
+
+| Class | When thrown | `retryable` |
+|-------|-----------|-------------|
+| `ProviderError` | HTTP 4xx/5xx from any provider | `true` for 429, 500-504; `false` otherwise |
+| `ToolError` | Tool `execute()` throws during Loop | `false` |
+| `TimeoutError` | Retry per-attempt timeout exceeded | `true` |
+| `CircuitOpenError` | CircuitBreaker is open, request rejected | `true` |
+| `ValidationError` | Input validation failures | `false` |
+
+**Import:** `const { ProviderError, CircuitOpenError } = require('bare-agent');`
+
+**Usage:** `try { ... } catch (err) { if (err instanceof ProviderError && err.status === 429) { /* rate limited */ } }`
+
+The `retryable` property integrates with Retry's fast path — errors with `retryable: true` are automatically retried without checking status codes.
+
+## CircuitBreaker
+
+| Error | When | Fix |
+|-------|------|-----|
+| `Circuit "key" is open` (`CircuitOpenError`) | Too many failures (>= threshold) and resetAfter hasn't elapsed | Wait for the circuit to transition to half-open, or call `cb.reset(key)` |
+
+The circuit breaker tracks failures per key. After `threshold` failures, calls are rejected immediately with `CircuitOpenError` until `resetAfter` ms elapse. The first call after that enters half-open state — success closes the circuit, failure reopens it.
+
+## FallbackProvider
+
+| Error | When | Fix |
+|-------|------|-----|
+| `[FallbackProvider] all providers failed` (`AggregateError`) | Every provider in the list threw | Check `err.errors` array for individual provider failures. Ensure at least one provider is configured correctly |
+| `[FallbackProvider] requires at least one provider` | Constructor called with empty array | Pass at least one provider |
+
 ## Loop
 
 | Error | When | Fix |
@@ -55,9 +98,9 @@ Every error thrown or rejected by bare-agent is prefixed with `[ComponentName]`.
 
 | Error | When | Fix |
 |-------|------|-----|
-| `[Retry] Timeout` | A single attempt exceeded the configured `timeout` (default 60s) | Increase `timeout` in constructor or per-call options. Has `code: 'ETIMEDOUT'` for programmatic detection |
+| `[Retry] Timeout` (`TimeoutError`) | A single attempt exceeded the configured `timeout` (default 60s) | Increase `timeout` in constructor or per-call options. `instanceof TimeoutError`, `code: 'ETIMEDOUT'`, `retryable: true` |
 
-**Note:** After exhausting `maxAttempts`, Retry rethrows the last error from the wrapped function — it does not add its own prefix.
+**Note:** After exhausting `maxAttempts`, Retry rethrows the last error from the wrapped function — it does not add its own prefix. Errors with `err.retryable === true` are automatically retried; `err.retryable === false` bail immediately without consuming remaining attempts.
 
 ## CLIPipeProvider
 

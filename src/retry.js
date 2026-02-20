@@ -1,6 +1,10 @@
 'use strict';
 
+const { TimeoutError } = require('./errors');
+
 const DEFAULT_RETRY_ON = (err) => {
+  if (err.retryable === true) return true;
+  if (err.retryable === false) return false;
   const status = err.status || err.statusCode;
   if (status === 429 || (status >= 500 && status <= 504)) return true;
   const code = err.code;
@@ -14,6 +18,7 @@ class Retry {
     this.backoff = options.backoff || 'exponential';
     this.timeout = options.timeout || 60000;
     this.retryOn = options.retryOn || DEFAULT_RETRY_ON;
+    this.jitter = options.jitter !== undefined ? options.jitter : false;
   }
 
   /**
@@ -21,7 +26,7 @@ class Retry {
    * @param {() => Promise<*>} fn - Async function to execute.
    * @param {object} [options={}] - Per-call overrides for maxAttempts, retryOn, timeout.
    * @returns {Promise<*>} The result of fn().
-   * @throws {Error} `[Retry] Timeout` — when an individual attempt exceeds the timeout.
+   * @throws {TimeoutError} When an individual attempt exceeds the timeout.
    * @throws {Error} Rethrows the last error when maxAttempts is exhausted or error is not retryable.
    */
   async call(fn, options = {}) {
@@ -32,7 +37,7 @@ class Retry {
     for (let attempt = 1; attempt <= max; attempt++) {
       try {
         const result = await (timeout
-          ? Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('[Retry] Timeout'), { code: 'ETIMEDOUT' })), timeout))])
+          ? Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new TimeoutError('[Retry] Timeout')), timeout))])
           : fn());
         return result;
       } catch (err) {
@@ -44,9 +49,30 @@ class Retry {
   }
 
   _delay(attempt) {
-    if (typeof this.backoff === 'number') return this.backoff;
-    if (this.backoff === 'linear') return attempt * 1000;
-    return Math.min(2 ** (attempt - 1) * 1000, 30000); // exponential, cap 30s
+    let base;
+    if (typeof this.backoff === 'number') {
+      base = this.backoff;
+    } else if (this.backoff === 'linear') {
+      base = attempt * 1000;
+    } else {
+      base = Math.min(2 ** (attempt - 1) * 1000, 30000); // exponential, cap 30s
+    }
+    return this._applyJitter(base);
+  }
+
+  _applyJitter(base) {
+    if (this.jitter === false || this.jitter === 0) return base;
+    if (this.jitter === 'full') {
+      return Math.floor(Math.random() * base);
+    }
+    if (this.jitter === 'equal') {
+      return Math.floor(base / 2 + Math.random() * (base / 2));
+    }
+    if (typeof this.jitter === 'number') {
+      const spread = base * this.jitter;
+      return Math.floor(base - spread + Math.random() * spread);
+    }
+    return base;
   }
 }
 

@@ -1,6 +1,6 @@
 # bare-agent
 
-Lightweight, composable agent orchestration library. ~1500 lines, 0 required deps, MIT.
+Lightweight, composable agent orchestration library. ~1700 lines, 0 required deps, MIT.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
 
 ## Components
@@ -14,11 +14,13 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | Checkpoint | src/checkpoint.js | Human-in-the-loop approval gate |
 | Memory | src/memory.js | Thin wrapper delegating to swappable store |
 | Stream | src/stream.js | Structured event emitter |
-| Retry | src/retry.js | Backoff wrapper for async functions |
+| Retry | src/retry.js | Backoff wrapper with jitter for async functions |
+| CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
+| Errors | src/errors.js | Typed error hierarchy (BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError) |
 
-Providers: OpenAI (src/provider-openai.js), Anthropic (src/provider-anthropic.js), Ollama (src/provider-ollama.js)
+Providers: OpenAI (src/provider-openai.js), Anthropic (src/provider-anthropic.js), Ollama (src/provider-ollama.js), CLIPipe (src/provider-clipipe.js), Fallback (src/provider-fallback.js)
 Stores: SQLiteStore (src/store-sqlite.js, peer dep: better-sqlite3), JsonFileStore (src/store-jsonfile.js, zero deps)
-Exports: `bare-agent` (components), `bare-agent/providers`, `bare-agent/stores`
+Exports: `bare-agent` (components + error classes + CircuitBreaker), `bare-agent/providers` (+ Fallback), `bare-agent/stores`
 
 ## Commands
 

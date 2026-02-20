@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawn } = require('child_process');
+const { ProviderError } = require('./errors');
 
 class CLIPipeProvider {
   /**
@@ -91,17 +92,17 @@ class CLIPipeProvider {
       child.stderr.on('data', d => { stderr += d; });
 
       child.on('error', err => {
-        reject(new Error(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`));
+        reject(new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`, { status: 0 }));
       });
 
       child.on('close', code => {
         if (killed) return; // timeout already rejected
         if (code !== 0) {
-          return reject(new Error(`[CLIPipeProvider] process exited with code ${code}: ${stderr.trim()}`));
+          return reject(new ProviderError(`[CLIPipeProvider] process exited with code ${code}: ${stderr.trim()}`, { status: code }));
         }
         const text = stdout.trim();
         if (!text) {
-          return reject(new Error('[CLIPipeProvider] process produced no output'));
+          return reject(new ProviderError('[CLIPipeProvider] process produced no output', { status: 0 }));
         }
         resolve(text);
       });
@@ -113,7 +114,7 @@ class CLIPipeProvider {
         setTimeout(() => {
           try { child.kill('SIGKILL'); } catch (_) {}
         }, 1000);
-        reject(new Error(`[CLIPipeProvider] timed out after ${this.timeout}ms`));
+        reject(new ProviderError(`[CLIPipeProvider] timed out after ${this.timeout}ms`, { status: 0 }));
       }, this.timeout);
 
       child.on('close', () => clearTimeout(timer));

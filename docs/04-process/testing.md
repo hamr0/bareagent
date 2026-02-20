@@ -16,9 +16,9 @@
     ╱   42 pass    ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱────────────────╲  Proves: providers parse real responses, plans are sensible, memory search works
   ╱                   ╲
- ╱   Unit — 142 pass   ╲  Unit (per component)
+ ╱   Unit — 175 pass   ╲  Unit (per component)
 ╱________________________╲  Mock provider, no network
-                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution, systemPromptFlag
+                            Proves: loop wiring, retry logic, error hierarchy, circuit breaker, fallback provider, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution, step retry
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates all components compose correctly. Never skip a layer.
@@ -29,7 +29,7 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js test/provider-clipipe.test.js test/run-plan.test.js
+node --test test/errors.test.js test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js test/provider-clipipe.test.js test/run-plan.test.js test/circuit-breaker.test.js test/provider-fallback.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
@@ -54,7 +54,21 @@ node --test test/**/*.test.js
 
 Fast, deterministic, no network. Use mock providers that return scripted responses.
 
-### `test/retry.test.js` — 6 tests
+### `test/errors.test.js` — 9 tests
+
+| Test | What it proves |
+|------|---------------|
+| BareAgentError extends Error with defaults | instanceof chains, default retryable=false |
+| BareAgentError accepts code, retryable, context | Custom properties set correctly |
+| ProviderError auto-retryable for 429 | 429 → retryable: true, has .status/.body |
+| ProviderError auto-retryable for 5xx | 500/502/503/504 all retryable |
+| ProviderError not retryable for 4xx (non-429) | 400/401/403/404/422 not retryable |
+| ToolError has correct defaults | code: 'TOOL_ERROR', retryable: false |
+| TimeoutError has correct defaults | code: 'ETIMEDOUT', retryable: true |
+| ValidationError has correct defaults | code: 'VALIDATION_ERROR', retryable: false |
+| CircuitOpenError has correct defaults | code: 'CIRCUIT_OPEN', retryable: true |
+
+### `test/retry.test.js` — 12 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -63,7 +77,13 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | throws after maxAttempts exhausted | Gives up after max, throws last error |
 | does not retry non-retryable errors | Non-matching errors (e.g. 400) fail immediately |
 | respects custom retryOn | User-provided predicate controls what's retried |
-| times out per attempt | Per-attempt timeout fires, error has `code: 'ETIMEDOUT'` |
+| times out per attempt with TimeoutError | Per-attempt timeout fires, instanceof TimeoutError |
+| retries when err.retryable === true | retryable fast path auto-retries |
+| bails when err.retryable === false | retryable fast path bails immediately |
+| jitter: "full" produces delay in [0, base) | Full jitter randomization |
+| jitter: "equal" produces delay in [base/2, base) | Equal jitter half-range |
+| numeric jitter applies proportional spread | Fractional jitter parameter |
+| jitter: false (default) returns exact base delay | No jitter when disabled |
 
 ### `test/loop.test.js` — 21 tests
 
@@ -120,7 +140,32 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | **handles no system messages with systemPromptFlag set** | Flag not added when no system messages present |
 | passes env to child process | Custom env vars available in child process |
 
-### `test/run-plan.test.js` — 12 tests
+### `test/circuit-breaker.test.js` — 9 tests
+
+| Test | What it proves |
+|------|---------------|
+| stays closed under threshold | Failures below threshold don't trip |
+| opens after threshold failures | Threshold reached → state: open |
+| rejects when open with CircuitOpenError | Open circuit throws CircuitOpenError |
+| transitions to half-open after resetAfter | Timer elapses → half-open → success closes |
+| half-open failure reopens circuit | Single failure in half-open reopens |
+| reset() forces closed | Manual reset clears failure count |
+| per-key isolation | Different keys have independent state |
+| onStateChange fires | Callback called with key, from, to |
+| wrapProvider wraps generate() | Wrapped provider passes through circuit |
+
+### `test/provider-fallback.test.js` — 6 tests
+
+| Test | What it proves |
+|------|---------------|
+| returns result from first provider on success | Happy path — first provider works |
+| falls back when first fails | First throws → second succeeds |
+| throws AggregateError when all fail | All fail → AggregateError with all errors |
+| shouldFallback=false stops fallback | Custom predicate prevents fallback |
+| onFallback fires with indices | Callback called with error, from, to |
+| rejects empty providers array | Constructor validates non-empty |
+
+### `test/run-plan.test.js` — 15 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -140,6 +185,9 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | **fires onWaveStart with wave number and steps** | Diamond: wave 1=[s1], wave 2=[s2,s3], wave 3=[s4] |
 | does not mutate input steps | Original steps array unchanged after execution |
 | returns results in original step order | Results array matches input order, not execution order |
+| **retries step on transient failure** | stepRetry retries flaky steps successfully |
+| **fails step after maxAttempts exhausted** | stepRetry gives up after max retries |
+| **no effect without stepRetry option** | Without option, steps fail on first error |
 
 ### `test/planner.test.js` — 10 tests
 

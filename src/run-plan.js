@@ -48,7 +48,7 @@ async function runPlan(steps, executeFn, options = {}) {
     }
   }
 
-  const { concurrency = Infinity, stateMachine, onStepStart, onStepDone, onStepFail, onWaveStart } = options;
+  const { concurrency = Infinity, stateMachine, onStepStart, onStepDone, onStepFail, onWaveStart, stepRetry } = options;
 
   let waveNumber = 0;
 
@@ -95,7 +95,9 @@ async function runPlan(steps, executeFn, options = {}) {
       onStepStart?.(step);
 
       try {
-        const result = await executeFn(step);
+        const result = stepRetry
+          ? await stepRetry.call(() => executeFn(step))
+          : await executeFn(step);
         entry.status = 'done';
         entry.result = result;
         stateMachine?.transition(step.id, 'complete', result);

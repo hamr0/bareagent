@@ -2,6 +2,42 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.2.2] — 2026-02-20
+
+Multi-agent resilience: typed errors, circuit breaker, fallback provider, jitter, step retry.
+
+### Added
+
+- **Typed error hierarchy** (`src/errors.js`) — `BareAgentError` base class with `code`, `retryable`, `context`. Subclasses: `ProviderError` (auto-retryable for 429/5xx), `ToolError`, `TimeoutError`, `ValidationError`, `CircuitOpenError`.
+- **CircuitBreaker** (`src/circuit-breaker.js`) — Per-key circuit breaker with configurable threshold and reset timer. States: closed → open → half-open. `wrapProvider()` for transparent provider wrapping. `onStateChange` callback.
+- **FallbackProvider** (`src/provider-fallback.js`) — Tries providers in order. Throws `AggregateError` when all fail. `shouldFallback` and `onFallback` callbacks. Composes with CircuitBreaker via `cb.wrapProvider()`.
+- **Retry jitter** — `new Retry({ jitter: 'full'|'equal'|number(0-1) })` adds randomized backoff spread to prevent thundering herd.
+- **Retry `retryable` fast path** — Errors with `err.retryable === true` are automatically retried; `err.retryable === false` bail immediately. Falls through to existing status/code checks when `retryable` is undefined.
+- **`runPlan` `stepRetry` option** — Wraps each step's executeFn with a Retry instance for transient failure recovery.
+
+### Changed
+
+- All providers now throw `ProviderError` instead of plain `Error` on HTTP failures. Backward compatible (`instanceof Error` still works, `.status`/`.body` still accessible).
+- Loop wraps tool execution errors in `ToolError`.
+- Retry timeout throws `TimeoutError` instead of plain `Error`.
+- `bare-agent` main export now includes `CircuitBreaker` and all error classes.
+- `bare-agent/providers` now includes `Fallback`.
+
+### Tests
+
+- 33 new unit tests: errors (9), retry jitter + retryable (6), circuit breaker (9), fallback provider (6), runPlan stepRetry (3).
+- Total: 193 tests.
+
+### Docs
+
+- README — Added CircuitBreaker, Fallback, Errors to architecture tables. Added resilient agent example.
+- CLAUDE.md — Updated component table with CircuitBreaker, Errors, Fallback.
+- bareagent.context.md — Added error hierarchy and circuit breaker + fallback recipes.
+- docs/errors.md — Added typed error hierarchy, CircuitBreaker, FallbackProvider sections.
+- docs/04-process/testing.md — Updated test tables and pyramid counts.
+
+---
+
 ## [0.2.1] — 2026-02-20
 
 Feedback fixes from Aurora's SOAR2 pipeline integration.

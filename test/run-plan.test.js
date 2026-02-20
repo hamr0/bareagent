@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { runPlan } = require('../src/run-plan');
 const { StateMachine } = require('../src/state');
+const { Retry } = require('../src/retry');
 
 describe('runPlan', () => {
   describe('input validation', () => {
@@ -270,5 +271,49 @@ describe('runPlan', () => {
     const results = await runPlan(steps, async () => 'ok');
 
     assert.deepEqual(results.map(r => r.id), ['s3', 's1', 's2']);
+  });
+
+  describe('stepRetry', () => {
+    it('retries step on transient failure', async () => {
+      let attempts = 0;
+      const steps = [{ id: 's1', action: 'flaky' }];
+      const results = await runPlan(steps, async () => {
+        attempts++;
+        if (attempts < 3) {
+          const err = new Error('transient');
+          err.retryable = true;
+          throw err;
+        }
+        return 'ok';
+      }, { stepRetry: new Retry({ maxAttempts: 3, backoff: 10 }) });
+
+      assert.equal(results[0].status, 'done');
+      assert.equal(results[0].result, 'ok');
+      assert.equal(attempts, 3);
+    });
+
+    it('fails step after maxAttempts exhausted', async () => {
+      const steps = [{ id: 's1', action: 'bad' }];
+      const results = await runPlan(steps, async () => {
+        const err = new Error('permanent');
+        err.retryable = true;
+        throw err;
+      }, { stepRetry: new Retry({ maxAttempts: 2, backoff: 10 }) });
+
+      assert.equal(results[0].status, 'failed');
+      assert.equal(results[0].error, 'permanent');
+    });
+
+    it('no effect without stepRetry option', async () => {
+      let attempts = 0;
+      const steps = [{ id: 's1', action: 'fail' }];
+      const results = await runPlan(steps, async () => {
+        attempts++;
+        throw new Error('once');
+      });
+
+      assert.equal(results[0].status, 'failed');
+      assert.equal(attempts, 1);
+    });
   });
 });

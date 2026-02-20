@@ -1,8 +1,8 @@
 # bare-agent — Project Plan
 
-> Lightweight, composable agent orchestration library. ~800 lines, 0 required deps, MIT license.
+> Lightweight, composable agent orchestration library. ~1700 lines, 0 required deps, MIT license.
 > Use what you need, ignore the rest. Works as npm import or cross-language subprocess.
-> npm: `bare-agent@0.1.0` (reserved 2026-02-17, maintainer: hamr0)
+> npm: `bare-agent@0.2.2` (maintainer: hamr0)
 
 ---
 
@@ -29,7 +29,7 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 
 ---
 
-## 2. Architecture — 3 Layers, 10 Components
+## 2. Architecture — 3 Layers, 13 Components
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -48,10 +48,10 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 │  │  Loop    │  │ Schedule │  │ Memory   │  │Checkpoint│    │
 │  │  ~80 ln  │  │  ~80 ln  │  │ ~100 ln  │  │  ~40 ln  │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
-│                ┌──────────┐                                  │
-│                │  Retry   │                                  │
-│                │  ~30 ln  │                                  │
-│                └──────────┘                                  │
+│                ┌──────────┐  ┌──────────┐  ┌──────────┐      │
+│                │  Retry   │  │Circuit Bk│  │ Fallback │      │
+│                │  ~50 ln  │  │  ~75 ln  │  │  ~40 ln  │      │
+│                └──────────┘  └──────────┘  └──────────┘      │
 ├─────────────────────────────────────────────────────────────┤
 │  LAYER 3: ACTUATION (user-provided)                         │
 │  "How does digital intent become physical action?"          │
@@ -302,7 +302,56 @@ Default retryOn:
   Network errors (ECONNRESET, ETIMEDOUT)
 ```
 
-**~30 lines.** Wraps any async function. Used by Loop to wrap tool calls and LLM calls.
+**~50 lines.** Wraps any async function. Used by Loop to wrap tool calls and LLM calls.
+
+### 3.10 Errors (typed hierarchy)
+
+All errors extend `BareAgentError` which extends `Error`. Each carries `code`, `retryable`, `context`.
+
+```
+Error → BareAgentError
+          ├── ProviderError       { status, body } — auto retryable for 429/5xx
+          ├── ToolError           code: 'TOOL_ERROR', retryable: false
+          ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
+          ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
+          └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+```
+
+**~50 lines.** All providers throw `ProviderError`. Loop wraps tool errors in `ToolError`. Retry timeout throws `TimeoutError`. `retryable` integrates with Retry's fast path.
+
+### 3.11 CircuitBreaker (fail-fast)
+
+Per-key circuit breaker with three states: closed → open → half-open.
+
+```
+Interface:
+  call(fn, key)               → result (or throws CircuitOpenError)
+  getState(key)               → 'closed'|'open'|'half-open'
+  reset(key)                  → force closed
+  wrapProvider(provider, key) → wrapped provider with generate()
+
+Options:
+  threshold: 5        — failures before opening
+  resetAfter: 60000   — ms before half-open probe
+  onStateChange       — callback(key, from, to)
+```
+
+**~75 lines.** Generation counter prevents stale half-open races. Composes with FallbackProvider via `cb.wrapProvider()`.
+
+### 3.12 FallbackProvider (multi-provider resilience)
+
+Tries providers in order. All fail → `AggregateError`.
+
+```
+Interface:
+  generate(messages, tools, options) → { text, toolCalls, usage }
+
+Options:
+  shouldFallback(err, index)    → boolean (return false to stop)
+  onFallback(err, from, to)     → callback
+```
+
+**~40 lines.** Implements standard `generate()` interface — transparent to Loop.
 
 ---
 
@@ -829,9 +878,12 @@ Task tracking                 →  StateMachine
 Agent execution               →  Loop
 Multi-agent streaming         →  Stream (JSONL or JSON-RPC)
 Retrieval (BM25 + semantic)   →  Memory (bring-your-own store with custom ranker)
+Provider resilience           →  CircuitBreaker + FallbackProvider
+Step retry (SOAR2)            →  runPlan({ stepRetry })
+Error classification          →  ProviderError, ToolError, TimeoutError
 ```
 
-Aurora's hybrid retriever (BM25 + semantic + activation) is too specialized for bare-agent's default store. Aurora would implement the Memory interface with its own retriever behind it — 4 methods, full control.
+Aurora's SOAR2 pipeline uses `CircuitBreaker.wrapProvider()` + `FallbackProvider` for multi-provider resilience, and `runPlan({ stepRetry })` for transient step failure recovery. The typed error hierarchy (`ProviderError.retryable`) integrates with `Retry({ jitter: 'full' })` to prevent thundering herd on rate limits.
 
 ---
 
@@ -924,7 +976,7 @@ Milestone: `npx bare-agent serve --jsonl` works.
 
 ## 12. Success Criteria
 
-1. **Under 1000 lines total** — if it grows beyond this, something is over-engineered
+1. **Under 2000 lines total** — if it grows beyond this, something is over-engineered
 2. **Zero required deps** — core must run on vanilla Node.js
 3. **Works in 10 lines** — minimal usage (Loop only) must be trivially simple
 4. **Works in 40 lines** — full usage (all components) must still be readable

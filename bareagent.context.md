@@ -1,19 +1,19 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.2.1 | Node.js >= 18 | 0 required deps | MIT
+> v0.2.2 | Node.js >= 18 | 0 required deps | MIT
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~1500 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, and persistent memory. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (~1700 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, and provider fallback. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent
 ```
 
 Four entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan
-- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError
+- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
 
@@ -30,8 +30,13 @@ Four entry points:
 | Persist context across turns/sessions | Memory + a Store |
 | Observe what the agent is doing | Stream |
 | Retry on transient failures (429, timeouts) | Retry |
+| Add jitter to backoff delays | Retry({ jitter: 'full' }) |
+| Fail fast on repeated provider errors | CircuitBreaker |
+| Fall back to another provider on failure | FallbackProvider |
+| Retry individual plan steps | runPlan({ stepRetry }) |
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
+| Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -244,6 +249,20 @@ Tools are validated at the start of `run()`. Missing `name` or `execute` throws 
 - All errors are prefixed `[ComponentName]` for easy identification.
 - See `docs/errors.md` in the repo for a full error reference with triggers and fixes.
 
+### Typed error hierarchy
+
+```
+Error
+└── BareAgentError          { code, retryable, context }
+    ├── ProviderError       { status, body } — auto retryable for 429/5xx
+    ├── ToolError           code: 'TOOL_ERROR', retryable: false
+    ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
+    ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
+    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+```
+
+All error classes extend `Error` — `instanceof Error` always works. The `retryable` property integrates with `Retry`'s fast path: `err.retryable === true` auto-retries, `err.retryable === false` bails immediately.
+
 ## Key contracts
 
 - Loop builds messages in OpenAI format internally. Each provider normalizes to its native format.
@@ -318,7 +337,32 @@ const result = await loop.run([
 console.log(result.text);
 ```
 
-### Recipe 3: Stream + JsonlTransport
+### Recipe 3: CircuitBreaker + Fallback + Retry (resilient multi-provider)
+
+```javascript
+const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { OpenAI, Anthropic, Fallback } = require('bare-agent/providers');
+
+const cb = new CircuitBreaker({
+  threshold: 3,
+  resetAfter: 30000,
+  onStateChange: (key, from, to) => console.log(`[${key}] ${from} → ${to}`),
+});
+
+const provider = new Fallback([
+  cb.wrapProvider(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), 'openai'),
+  cb.wrapProvider(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), 'anthropic'),
+], {
+  onFallback: (err, from, to) => console.warn(`Provider ${from} failed, trying ${to}`),
+});
+
+const loop = new Loop({
+  provider,
+  retry: new Retry({ maxAttempts: 3, jitter: 'full' }),
+});
+```
+
+### Recipe 4: Stream + JsonlTransport
 
 ```javascript
 const { Loop, Stream } = require('bare-agent');
