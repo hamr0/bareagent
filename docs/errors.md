@@ -13,7 +13,8 @@ Error
     ├── ToolError           code: 'TOOL_ERROR', retryable: false
     ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
     ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
-    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    ├── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    └── MaxRoundsError      code: 'MAX_ROUNDS', retryable: false
 ```
 
 | Class | When thrown | `retryable` |
@@ -22,6 +23,7 @@ Error
 | `ToolError` | Tool `execute()` throws during Loop | `false` |
 | `TimeoutError` | Retry per-attempt timeout exceeded | `true` |
 | `CircuitOpenError` | CircuitBreaker is open, request rejected | `true` |
+| `MaxRoundsError` | Loop exceeded `maxRounds` without final response | `false` |
 | `ValidationError` | Input validation failures | `false` |
 
 **Import:** `const { ProviderError, CircuitOpenError } = require('bare-agent');`
@@ -55,7 +57,7 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 | `[Loop] Tool "X" has invalid parameters` | `parameters` is present but not an object | Set `parameters` to a JSON Schema object or remove it |
 | `[Loop] Unknown tool: X` | LLM requested a tool not in the `tools` array | Not an error you throw — fed back to the LLM so it can self-correct |
 | `[Loop] Tool error: ...` | A tool's `execute()` threw during the loop | Not an error you throw — fed back to the LLM. Check the tool's implementation |
-| `[Loop] ended after N rounds without final response` | LLM kept requesting tool calls past `maxRounds` | Increase `maxRounds` or simplify the task. Returned in `result.error`, not thrown |
+| `[Loop] ended after N rounds without final response` | LLM kept requesting tool calls past `maxRounds` | Increase `maxRounds` or simplify the task. Throws `MaxRoundsError` by default (v0.3.0+). Pass `throwOnError: false` for v0.2.x behavior (returned in `result.error`) |
 
 **Note:** `[Loop] Tool "X" has a non-string description` is a `console.warn`, not a thrown error.
 

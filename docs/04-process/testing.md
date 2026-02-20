@@ -16,9 +16,9 @@
     ╱   42 pass    ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱────────────────╲  Proves: providers parse real responses, plans are sensible, memory search works
   ╱                   ╲
- ╱   Unit — 175 pass   ╲  Unit (per component)
+ ╱   Unit — 189 pass   ╲  Unit (per component)
 ╱________________________╲  Mock provider, no network
-                            Proves: loop wiring, retry logic, error hierarchy, circuit breaker, fallback provider, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution, step retry
+                            Proves: loop wiring, throwOnError, retry logic, error hierarchy, circuit breaker, fallback provider, state transitions, plan parsing + caching, store CRUD + search, CLI pipe + onChunk, wave execution, step retry
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates all components compose correctly. Never skip a layer.
@@ -54,7 +54,7 @@ node --test test/**/*.test.js
 
 Fast, deterministic, no network. Use mock providers that return scripted responses.
 
-### `test/errors.test.js` — 9 tests
+### `test/errors.test.js` — 10 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -67,6 +67,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | TimeoutError has correct defaults | code: 'ETIMEDOUT', retryable: true |
 | ValidationError has correct defaults | code: 'VALIDATION_ERROR', retryable: false |
 | CircuitOpenError has correct defaults | code: 'CIRCUIT_OPEN', retryable: true |
+| **MaxRoundsError has correct defaults** | code: 'MAX_ROUNDS', retryable: false |
 
 ### `test/retry.test.js` — 12 tests
 
@@ -85,7 +86,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | numeric jitter applies proportional spread | Fractional jitter parameter |
 | jitter: false (default) returns exact base delay | No jitter when disabled |
 
-### `test/loop.test.js` — 21 tests
+### `test/loop.test.js` — 27 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -95,12 +96,18 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | executes multiple tool calls in one round | Two tools called in same round, both results fed back |
 | handles unknown tool gracefully | Unknown tool name → error string to LLM → loop continues |
 | handles tool execution errors gracefully | Tool throws → error message to LLM → loop continues |
-| stops after maxRounds | Infinite tool-call loop terminated at maxRounds |
+| stops after maxRounds | Infinite tool-call loop → throws MaxRoundsError |
 | stops mid-loop when stop() is called | stop() flag checked each iteration, exits cleanly |
 | chat() maintains stateful history | Multi-turn conversation, history preserved between calls |
 | passes system prompt to messages | System prompt prepended as first message |
 | emits stream events | Stream.emit() called with correct event types |
-| returns error when provider fails | Provider throws → error in result, no exception |
+| throws when provider fails | Provider throws → error propagated (throwOnError default) |
+| **throwOnError: false returns error on provider failure** | Provider throws → error in result.error, no exception |
+| **throwOnError: false returns error on maxRounds** | maxRounds exceeded → error in result.error, no exception |
+| **throws original ProviderError instance** | Provider throws ProviderError → same instance re-thrown |
+| **MaxRoundsError has code MAX_ROUNDS** | maxRounds exceeded → MaxRoundsError with code/retryable |
+| **stream events fire before throw** | loop:start + loop:error emitted before exception |
+| **chat() propagates throw** | chat() re-throws provider errors |
 | **validate: reports provider ok** | generate() succeeds → `provider.ok: true` |
 | **validate: reports provider error** | generate() throws → `provider.ok: false`, error message captured |
 | **validate: reports store ok** | store/get/delete cycle succeeds → `store.ok: true` |
@@ -122,7 +129,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | Ollama: constructs with defaults | Default model and url set correctly |
 | Ollama: constructs with custom model and url | Custom config accepted |
 
-### `test/provider-clipipe.test.js` — 13 tests
+### `test/provider-clipipe.test.js` — 15 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -138,6 +145,8 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | **works without systemPromptFlag (default unchanged)** | No systemPromptFlag → all messages in stdin as before |
 | **handles multiple system messages** | Multiple system messages joined with `\n\n` in flag value |
 | **handles no system messages with systemPromptFlag set** | Flag not added when no system messages present |
+| **onChunk fires with string chunks** | onChunk callback receives string chunks during stdout |
+| **chunks joined equal result.text before trim** | All chunks concatenated match the final trimmed result |
 | passes env to child process | Custom env vars available in child process |
 
 ### `test/circuit-breaker.test.js` — 9 tests
@@ -189,7 +198,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | **fails step after maxAttempts exhausted** | stepRetry gives up after max retries |
 | **no effect without stepRetry option** | Without option, steps fail on first error |
 
-### `test/planner.test.js` — 10 tests
+### `test/planner.test.js` — 15 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -202,6 +211,11 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | throws on missing id or action | Validates step shape |
 | passes context to provider | Context.info injected into messages |
 | uses temperature 0 | Deterministic planning |
+| **cache disabled by default (provider called twice)** | Without cacheTTL, provider called on every plan() |
+| **returns cached result when cacheTTL set** | Same goal + context → provider called once, cached result returned |
+| **cache expires after TTL** | After TTL elapses, provider called again |
+| **different context.info = different cache entry** | Different context keys cache separately |
+| **clearCache() empties cache** | Manual invalidation forces fresh LLM call |
 | accepts custom prompt override | User can replace planning prompt |
 
 ### `test/state.test.js` — 13 tests

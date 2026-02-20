@@ -119,7 +119,7 @@ describe('Planner + StateMachine + Loop integration', { skip: !OPENAI_API_KEY &&
     const provider = new OpenAIProvider({ apiKey: OPENAI_API_KEY, model: 'gpt-4o-mini' });
     const planner = new Planner({ provider });
     const state = new StateMachine({ file: stateFile });
-    const loop = new Loop({ provider, maxRounds: 3 });
+    const loop = new Loop({ provider, maxRounds: 3, throwOnError: false });
 
     // Dummy tools
     const tools = [

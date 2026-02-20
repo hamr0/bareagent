@@ -25,6 +25,8 @@ class Planner {
     if (!options.provider) throw new Error('[Planner] requires a provider');
     this.provider = options.provider;
     this.prompt = options.prompt || PLAN_PROMPT;
+    this._cacheTTL = options.cacheTTL || 0;
+    this._cache = new Map();
   }
 
   /**
@@ -37,6 +39,14 @@ class Planner {
    * @throws {Error} `[Planner] step missing id or action` — when a step lacks required fields.
    */
   async plan(goal, context = {}) {
+    if (this._cacheTTL > 0) {
+      const cacheKey = goal + '|' + (context.info || '');
+      const cached = this._cache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        return cached.result;
+      }
+    }
+
     const messages = [
       { role: 'system', content: this.prompt },
     ];
@@ -50,7 +60,18 @@ class Planner {
       temperature: 0,
     });
 
-    return this._parse(result.text);
+    const steps = this._parse(result.text);
+
+    if (this._cacheTTL > 0) {
+      const cacheKey = goal + '|' + (context.info || '');
+      this._cache.set(cacheKey, { result: steps, expiresAt: Date.now() + this._cacheTTL });
+    }
+
+    return steps;
+  }
+
+  clearCache() {
+    this._cache.clear();
   }
 
   _parse(text) {

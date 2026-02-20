@@ -17,6 +17,7 @@ const {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
+  MaxRoundsError,
 } = require('./src/errors');
 
 module.exports = {
@@ -36,4 +37,5 @@ module.exports = {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
+  MaxRoundsError,
 };

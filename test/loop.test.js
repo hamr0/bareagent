@@ -3,6 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Loop } = require('../src/loop');
+const { MaxRoundsError, ProviderError } = require('../src/errors');
 
 // Mock provider that returns scripted responses
 function mockProvider(responses) {
@@ -175,13 +176,14 @@ describe('Loop', () => {
     };
 
     const loop = new Loop({ provider, maxRounds: 3 });
-    const result = await loop.run(
-      [{ role: 'user', content: 'Loop forever' }],
-      [weatherTool]
+    await assert.rejects(
+      () => loop.run([{ role: 'user', content: 'Loop forever' }], [weatherTool]),
+      (err) => {
+        assert.ok(err instanceof MaxRoundsError);
+        assert.ok(err.message.includes('3 rounds'));
+        return true;
+      }
     );
-
-    assert.ok(result.error);
-    assert.ok(result.error.includes('3 rounds'));
   });
 
   it('stops mid-loop when stop() is called', async () => {
@@ -197,7 +199,7 @@ describe('Loop', () => {
       },
     };
 
-    const loop = new Loop({ provider, maxRounds: 10 });
+    const loop = new Loop({ provider, maxRounds: 10, throwOnError: false });
     // Stop after first round
     loop.onToolCall = () => loop.stop();
 
@@ -268,16 +270,103 @@ describe('Loop', () => {
     assert.ok(types.includes('loop:done'));
   });
 
-  it('returns error when provider fails', async () => {
+  it('throws when provider fails', async () => {
     const provider = {
       async generate() { throw new Error('API down'); },
     };
 
     const loop = new Loop({ provider });
-    const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+    await assert.rejects(
+      () => loop.run([{ role: 'user', content: 'Hi' }]),
+      { message: 'API down' }
+    );
+  });
 
+  it('throwOnError: false returns error on provider failure', async () => {
+    const provider = {
+      async generate() { throw new Error('API down'); },
+    };
+    const loop = new Loop({ provider, throwOnError: false });
+    const result = await loop.run([{ role: 'user', content: 'Hi' }]);
     assert.equal(result.error, 'API down');
     assert.equal(result.text, '');
+  });
+
+  it('throwOnError: false returns error on maxRounds', async () => {
+    const provider = {
+      async generate() {
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_x', name: 'get_weather', arguments: { city: 'Berlin' } }],
+          usage: { inputTokens: 5, outputTokens: 5 },
+        };
+      },
+    };
+    const loop = new Loop({ provider, maxRounds: 2, throwOnError: false });
+    const result = await loop.run([{ role: 'user', content: 'Loop' }], [weatherTool]);
+    assert.ok(result.error);
+    assert.ok(result.error.includes('2 rounds'));
+  });
+
+  it('throws original ProviderError instance', async () => {
+    const original = new ProviderError('rate limited', { status: 429 });
+    const provider = {
+      async generate() { throw original; },
+    };
+    const loop = new Loop({ provider });
+    await assert.rejects(
+      () => loop.run([{ role: 'user', content: 'Hi' }]),
+      (err) => {
+        assert.strictEqual(err, original);
+        assert.ok(err instanceof ProviderError);
+        return true;
+      }
+    );
+  });
+
+  it('MaxRoundsError has code MAX_ROUNDS', async () => {
+    const provider = {
+      async generate() {
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_x', name: 'get_weather', arguments: { city: 'Berlin' } }],
+          usage: { inputTokens: 5, outputTokens: 5 },
+        };
+      },
+    };
+    const loop = new Loop({ provider, maxRounds: 1 });
+    await assert.rejects(
+      () => loop.run([{ role: 'user', content: 'Loop' }], [weatherTool]),
+      (err) => {
+        assert.equal(err.code, 'MAX_ROUNDS');
+        assert.equal(err.retryable, false);
+        return true;
+      }
+    );
+  });
+
+  it('stream events fire before throw', async () => {
+    const events = [];
+    const stream = { emit(event) { events.push(event); } };
+    const provider = {
+      async generate() { throw new Error('boom'); },
+    };
+    const loop = new Loop({ provider, stream });
+    await assert.rejects(() => loop.run([{ role: 'user', content: 'Hi' }]));
+    const types = events.map(e => e.type);
+    assert.ok(types.includes('loop:start'));
+    assert.ok(types.includes('loop:error'));
+  });
+
+  it('chat() propagates throw', async () => {
+    const provider = {
+      async generate() { throw new Error('chat boom'); },
+    };
+    const loop = new Loop({ provider });
+    await assert.rejects(
+      () => loop.chat('Hi'),
+      { message: 'chat boom' }
+    );
   });
 
   describe('validate', () => {

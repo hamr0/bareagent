@@ -196,6 +196,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
         checkpoint,
         retry,
         stream,
+        throwOnError: false,
         system: context ? `Prior results:\n${context}` : undefined,
       });
 
@@ -296,6 +297,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
       maxRounds: 5,
       checkpoint,
       stream,
+      throwOnError: false,
       system: `You have access to a send_email tool. Follow this policy:\n${policyContext}`,
     });
 
@@ -373,6 +375,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
         provider,
         maxRounds: 3,
         stream,
+        throwOnError: false,
         system: context ? `Context:\n${context}` : undefined,
       });
 

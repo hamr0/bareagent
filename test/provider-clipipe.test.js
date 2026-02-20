@@ -150,6 +150,30 @@ describe('CLIPipeProvider', () => {
     assert.ok(parsed.stdin.includes('User: Hello'));
   });
 
+  it('onChunk fires with string chunks', async () => {
+    const chunks = [];
+    const provider = new CLIPipeProvider({
+      command: 'echo',
+      args: ['hello world'],
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+    await provider.generate([{ role: 'user', content: 'hi' }]);
+    assert.ok(chunks.length > 0, 'onChunk should have been called');
+    assert.equal(typeof chunks[0], 'string');
+  });
+
+  it('chunks joined equal result.text before trim', async () => {
+    const chunks = [];
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'process.stdout.write("hello ");process.stdout.write("world")'],
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+    const result = await provider.generate([{ role: 'user', content: 'hi' }]);
+    const joined = chunks.join('');
+    assert.equal(joined.trim(), result.text);
+  });
+
   it('passes env to child process', async () => {
     const provider = new CLIPipeProvider({
       command: 'node',

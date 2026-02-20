@@ -117,6 +117,81 @@ describe('Planner', () => {
     assert.equal(capturedOptions.temperature, 0);
   });
 
+  it('cache disabled by default (provider called twice)', async () => {
+    let callCount = 0;
+    const provider = {
+      async generate() {
+        callCount++;
+        return { text: '[{ "id": "s1", "action": "Do it", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider });
+    await planner.plan('Goal');
+    await planner.plan('Goal');
+    assert.equal(callCount, 2);
+  });
+
+  it('returns cached result when cacheTTL set', async () => {
+    let callCount = 0;
+    const provider = {
+      async generate() {
+        callCount++;
+        return { text: '[{ "id": "s1", "action": "Do it", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider, cacheTTL: 5000 });
+    const r1 = await planner.plan('Goal');
+    const r2 = await planner.plan('Goal');
+    assert.equal(callCount, 1);
+    assert.deepEqual(r1, r2);
+  });
+
+  it('cache expires after TTL', async () => {
+    let callCount = 0;
+    const provider = {
+      async generate() {
+        callCount++;
+        return { text: '[{ "id": "s1", "action": "Do it", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider, cacheTTL: 50 });
+    await planner.plan('Goal');
+    assert.equal(callCount, 1);
+    await new Promise(r => setTimeout(r, 60));
+    await planner.plan('Goal');
+    assert.equal(callCount, 2);
+  });
+
+  it('different context.info = different cache entry', async () => {
+    let callCount = 0;
+    const provider = {
+      async generate() {
+        callCount++;
+        return { text: '[{ "id": "s1", "action": "Do it", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider, cacheTTL: 5000 });
+    await planner.plan('Goal', { info: 'context A' });
+    await planner.plan('Goal', { info: 'context B' });
+    assert.equal(callCount, 2);
+  });
+
+  it('clearCache() empties cache', async () => {
+    let callCount = 0;
+    const provider = {
+      async generate() {
+        callCount++;
+        return { text: '[{ "id": "s1", "action": "Do it", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider, cacheTTL: 5000 });
+    await planner.plan('Goal');
+    assert.equal(callCount, 1);
+    planner.clearCache();
+    await planner.plan('Goal');
+    assert.equal(callCount, 2);
+  });
+
   it('accepts custom prompt override', async () => {
     let capturedMessages;
     const provider = {

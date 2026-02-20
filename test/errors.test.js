@@ -9,6 +9,7 @@ const {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
+  MaxRoundsError,
 } = require('../src/errors');
 
 describe('Errors', () => {
@@ -82,5 +83,13 @@ describe('Errors', () => {
     assert.equal(err.code, 'CIRCUIT_OPEN');
     assert.equal(err.retryable, true);
     assert.equal(err.message, 'Circuit breaker is open');
+  });
+
+  it('MaxRoundsError has correct defaults', () => {
+    const err = new MaxRoundsError();
+    assert.ok(err instanceof BareAgentError);
+    assert.equal(err.code, 'MAX_ROUNDS');
+    assert.equal(err.retryable, false);
+    assert.equal(err.message, 'Loop exceeded maximum rounds');
   });
 });

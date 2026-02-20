@@ -23,6 +23,7 @@ class CLIPipeProvider {
     this.env = options.env || undefined;
     this.timeout = options.timeout ?? 30000;
     this.systemPromptFlag = options.systemPromptFlag || null;
+    this.onChunk = options.onChunk || null;
   }
 
   /**
@@ -88,7 +89,7 @@ class CLIPipeProvider {
       let stderr = '';
       let killed = false;
 
-      child.stdout.on('data', d => { stdout += d; });
+      child.stdout.on('data', d => { stdout += d; this.onChunk?.(d.toString()); });
       child.stderr.on('data', d => { stderr += d; });
 
       child.on('error', err => {

@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.2.2 | Node.js >= 18 | 0 required deps | MIT
+> v0.3.0 | Node.js >= 18 | 0 required deps | MIT
 
 ## What this is
 
@@ -12,7 +12,7 @@ npm install bare-agent
 ```
 
 Four entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
@@ -36,7 +36,9 @@ Four entry points:
 | Retry individual plan steps | runPlan({ stepRetry }) |
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
-| Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
+| Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError, MaxRoundsError |
+| Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
+| Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -68,6 +70,7 @@ const result = await loop.run(
   tools
 );
 // result: { text: "The weather in Berlin is 22°C and sunny.", toolCalls: [], usage: {...}, error: null }
+// Throws on error by default (v0.3.0+). Use try/catch or pass throwOnError: false for result.error pattern.
 ```
 
 ## Health check with validate()
@@ -244,7 +247,8 @@ Tools are validated at the start of `run()`. Missing `name` or `execute` throws 
 
 ## Error handling
 
-- **Loop never throws during execution** — provider/tool errors are caught and returned in `result.error`.
+- **Loop throws by default** (v0.3.0+) — provider errors re-thrown as-is, maxRounds throws `MaxRoundsError`. Use `try/catch` or `.catch()`.
+- **Loop `throwOnError: false`** — opt into v0.2.x behavior where errors are returned in `result.error` instead of thrown.
 - **Loop throws at setup** — missing provider, malformed tools.
 - All errors are prefixed `[ComponentName]` for easy identification.
 - See `docs/errors.md` in the repo for a full error reference with triggers and fixes.
@@ -258,7 +262,8 @@ Error
     ├── ToolError           code: 'TOOL_ERROR', retryable: false
     ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
     ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
-    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    ├── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    └── MaxRoundsError      code: 'MAX_ROUNDS', retryable: false
 ```
 
 All error classes extend `Error` — `instanceof Error` always works. The `retryable` property integrates with `Retry`'s fast path: `err.retryable === true` auto-retries, `err.retryable === false` bails immediately.
@@ -279,7 +284,7 @@ All error classes extend `Error` — `instanceof Error` always works. The `retry
 5. **Ollama tool call IDs are synthetic** — `call_${Date.now()}`. Works fine but IDs aren't stable across retries.
 6. **Loop's `chat()` is stateful** — it accumulates history forever. For long conversations, use `run()` with your own message management.
 7. **CLIPipe `_formatPrompt()` flattens all messages** — System messages become `System: content` plaintext in stdin. If your CLI tool expects system prompts via a dedicated flag (e.g. `claude --system`), use `systemPromptFlag` to separate them. Without it, structured output prompts embedded in system messages will break.
-8. **Loop `run()` returns `{error}` instead of throwing** — You must check `result.error` after every call. A missing check silently swallows provider failures, tool errors, and maxRounds exhaustion.
+8. **Loop `run()` throws by default (v0.3.0+)** — Provider errors and maxRounds exhaustion throw instead of returning `result.error`. Use `try/catch` or pass `throwOnError: false` for the old behavior.
 9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
@@ -305,8 +310,7 @@ const results = await runPlan(steps, async (step) => {
     [{ role: 'user', content: step.action }],
     tools
   );
-  if (result.error) throw new Error(result.error);
-  return result.text;
+  return result.text; // throws on error by default (v0.3.0+)
 }, {
   concurrency: 3,
   stateMachine: new StateMachine(),

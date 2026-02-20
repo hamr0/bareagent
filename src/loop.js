@@ -1,6 +1,6 @@
 'use strict';
 
-const { ToolError } = require('./errors');
+const { ToolError, MaxRoundsError } = require('./errors');
 
 class Loop {
   /**
@@ -25,6 +25,7 @@ class Loop {
     this.onToolCall = options.onToolCall || null;
     this.onText = options.onText || null;
     this.onError = options.onError || null;
+    this.throwOnError = options.throwOnError !== undefined ? options.throwOnError : true;
     this.store = options.store || null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
@@ -78,6 +79,7 @@ class Loop {
       } catch (err) {
         this.stream?.emit({ type: 'loop:error', data: { error: err.message, round } });
         this.onError?.(err);
+        if (this.throwOnError) throw err;
         return { text: '', toolCalls: [], usage: lastUsage, error: err.message };
       }
 
@@ -148,6 +150,7 @@ class Loop {
     // maxRounds exceeded
     const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
     this.stream?.emit({ type: 'loop:done', data: { text: '', warning } });
+    if (this.throwOnError) throw new MaxRoundsError(warning);
     return { text: '', toolCalls: [], usage: lastUsage, error: warning };
   }
 

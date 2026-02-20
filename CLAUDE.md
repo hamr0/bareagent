@@ -7,7 +7,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle. Never throws, errors in result.error |
+| Loop | src/loop.js | Core think/act/observe cycle. Throws by default (throwOnError: true); pass throwOnError: false for result.error |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
 | Scheduler | src/scheduler.js | Time-triggered turns (cron + relative) |
@@ -16,7 +16,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | Stream | src/stream.js | Structured event emitter |
 | Retry | src/retry.js | Backoff wrapper with jitter for async functions |
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
-| Errors | src/errors.js | Typed error hierarchy (BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError) |
+| Errors | src/errors.js | Typed error hierarchy (BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError) |
 
 Providers: OpenAI (src/provider-openai.js), Anthropic (src/provider-anthropic.js), Ollama (src/provider-ollama.js), CLIPipe (src/provider-clipipe.js), Fallback (src/provider-fallback.js)
 Stores: SQLiteStore (src/store-sqlite.js, peer dep: better-sqlite3), JsonFileStore (src/store-jsonfile.js, zero deps)
