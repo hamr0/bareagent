@@ -2,6 +2,35 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-02-20
+
+Feedback fixes from Aurora's SOAR2 pipeline integration.
+
+### Added
+
+- **CLIPipeProvider `systemPromptFlag`** — New constructor option to separate system messages from stdin and pass them as a CLI flag (e.g. `--system`). Fixes structured output breaking when `_formatPrompt()` flattens system messages into plaintext.
+- **`runPlan` `onWaveStart` callback** — `onWaveStart(waveNumber, steps)` fires before each wave executes, enabling consumer-side wave progress display (e.g. `[Wave 1: s1, s2]`).
+- **`bare-agent/transports` export** — New entry point exporting `{ JsonlTransport }`. Fixes `ERR_PACKAGE_PATH_NOT_EXPORTED` when importing JsonlTransport directly.
+
+### Changed
+
+- `CLIPipeProvider._spawn()` accepts optional `extraArgs` parameter, appended after `this.args`.
+- `package.json` exports map updated with `./transports` entry.
+
+### Tests
+
+- 5 new unit tests: CLIPipeProvider systemPromptFlag (4), runPlan onWaveStart (1).
+- Total: 160 tests (142 unit + 14 integration + 4 E2E).
+
+### Docs
+
+- `bareagent.context.md` — Added Gotchas section and Recipes section.
+- `docs/errors.md` — Updated CLIPipeProvider section with systemPromptFlag behavior.
+- `docs/04-process/testing.md` — Updated test counts and added new test descriptions.
+- `README.md` — Updated line count, status section, added Aurora production validation.
+
+---
+
 ## [0.2.0] — 2026-02-20
 
 Three new features filling gaps identified in the aurora evaluation.

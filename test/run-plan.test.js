@@ -227,6 +227,30 @@ describe('runPlan', () => {
     }
   });
 
+  it('fires onWaveStart with wave number and steps', async () => {
+    const waves = [];
+    const steps = [
+      { id: 's1', action: 'root' },
+      { id: 's2', action: 'left', dependsOn: ['s1'] },
+      { id: 's3', action: 'right', dependsOn: ['s1'] },
+      { id: 's4', action: 'join', dependsOn: ['s2', 's3'] },
+    ];
+
+    await runPlan(steps, async (step) => `done-${step.id}`, {
+      onWaveStart: (num, waveSteps) => {
+        waves.push({ num, ids: waveSteps.map(s => s.id).sort() });
+      },
+    });
+
+    assert.equal(waves.length, 3);
+    assert.equal(waves[0].num, 1);
+    assert.deepEqual(waves[0].ids, ['s1']);
+    assert.equal(waves[1].num, 2);
+    assert.deepEqual(waves[1].ids, ['s2', 's3']);
+    assert.equal(waves[2].num, 3);
+    assert.deepEqual(waves[2].ids, ['s4']);
+  });
+
   it('does not mutate input steps', async () => {
     const steps = [{ id: 's1', action: 'test' }];
     const original = JSON.stringify(steps);

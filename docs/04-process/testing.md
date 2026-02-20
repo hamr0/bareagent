@@ -16,9 +16,9 @@
     ╱   42 pass    ╲   Real API calls — OpenAI, Anthropic, Ollama
    ╱────────────────╲  Proves: providers parse real responses, plans are sensible, memory search works
   ╱                   ╲
- ╱   Unit — 137 pass   ╲  Unit (per component)
+ ╱   Unit — 142 pass   ╲  Unit (per component)
 ╱________________________╲  Mock provider, no network
-                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution
+                            Proves: loop wiring, retry logic, error handling, state transitions, plan parsing, store CRUD + search, CLI pipe, wave execution, systemPromptFlag
 ```
 
 **Rule:** Unit tests validate logic. Integration tests validate real-world compatibility. E2E validates all components compose correctly. Never skip a layer.
@@ -102,7 +102,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | Ollama: constructs with defaults | Default model and url set correctly |
 | Ollama: constructs with custom model and url | Custom config accepted |
 
-### `test/provider-clipipe.test.js` — 9 tests
+### `test/provider-clipipe.test.js` — 13 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -114,9 +114,13 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | throws on non-zero exit | Exit code 1 + stderr → error includes code and stderr content |
 | throws on timeout | Slow process killed after timeout → error includes timeout duration |
 | throws on empty output | Process exits 0 with no stdout → clear "no output" error |
+| **separates system messages via systemPromptFlag** | System content passed as CLI flag, removed from stdin |
+| **works without systemPromptFlag (default unchanged)** | No systemPromptFlag → all messages in stdin as before |
+| **handles multiple system messages** | Multiple system messages joined with `\n\n` in flag value |
+| **handles no system messages with systemPromptFlag set** | Flag not added when no system messages present |
 | passes env to child process | Custom env vars available in child process |
 
-### `test/run-plan.test.js` — 11 tests
+### `test/run-plan.test.js` — 12 tests
 
 | Test | What it proves |
 |------|---------------|
@@ -133,6 +137,7 @@ Fast, deterministic, no network. Use mock providers that return scripted respons
 | fires callbacks correctly | onStepStart, onStepDone, onStepFail all fire with correct args |
 | integrates with StateMachine | Steps transition through start/complete/fail in StateMachine |
 | handles diamond dependency pattern | s1 → s2+s3 → s4 executes in correct topological order |
+| **fires onWaveStart with wave number and steps** | Diamond: wave 1=[s1], wave 2=[s2,s3], wave 3=[s4] |
 | does not mutate input steps | Original steps array unchanged after execution |
 | returns results in original step order | Results array matches input order, not execution order |
 

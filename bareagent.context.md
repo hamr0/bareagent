@@ -1,20 +1,21 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.2.0 | Node.js >= 18 | 0 required deps | MIT
+> v0.2.1 | Node.js >= 18 | 0 required deps | MIT
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~1017 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, and persistent memory. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (~1500 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, and persistent memory. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent
 ```
 
-Three entry points:
+Four entry points:
 - `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
+- `require('bare-agent/transports')` — JsonlTransport
 
 ## Which components do I need?
 
@@ -184,6 +185,7 @@ const results = await runPlan(steps, async (step) => {
 }, {
   concurrency: 3,                          // max 3 parallel steps per wave
   stateMachine: new StateMachine(),         // optional lifecycle tracking
+  onWaveStart: (num, steps) => console.log(`[Wave ${num}]: ${steps.map(s => s.id).join(', ')}`),
   onStepStart: (step) => console.log(`Starting: ${step.action}`),
   onStepDone: (step, result) => console.log(`Done: ${step.id}`),
   onStepFail: (step, err) => console.error(`Failed: ${step.id}: ${err.message}`),
@@ -204,7 +206,7 @@ new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
 new Ollama({ model: 'llama3.2', url: 'http://localhost:11434' })
 
 // CLIPipe — pipe prompts to any CLI tool via stdin/stdout
-new CLIPipe({ command: 'claude', args: ['--print'], timeout: 30000 })
+new CLIPipe({ command: 'claude', args: ['--print'], systemPromptFlag: '--system-prompt', timeout: 30000 })
 new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 ```
 
@@ -257,3 +259,88 @@ Tools are validated at the start of `run()`. Missing `name` or `execute` throws 
 4. **Scheduler runs jobs sequentially within a tick** — if one handler takes 5s, others wait. Use short handlers or offload work.
 5. **Ollama tool call IDs are synthetic** — `call_${Date.now()}`. Works fine but IDs aren't stable across retries.
 6. **Loop's `chat()` is stateful** — it accumulates history forever. For long conversations, use `run()` with your own message management.
+7. **CLIPipe `_formatPrompt()` flattens all messages** — System messages become `System: content` plaintext in stdin. If your CLI tool expects system prompts via a dedicated flag (e.g. `claude --system`), use `systemPromptFlag` to separate them. Without it, structured output prompts embedded in system messages will break.
+8. **Loop `run()` returns `{error}` instead of throwing** — You must check `result.error` after every call. A missing check silently swallows provider failures, tool errors, and maxRounds exhaustion.
+9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
+10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
+11. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+
+## Recipes
+
+### Recipe 1: Planner → runPlan (main use case)
+
+```javascript
+const { Planner, runPlan, StateMachine, Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+
+const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
+const loop = new Loop({ provider });
+
+// Plan
+const planner = new Planner({ provider });
+const steps = await planner.plan('Book a trip to Berlin');
+
+// Execute with wave progress
+const results = await runPlan(steps, async (step) => {
+  const result = await loop.run(
+    [{ role: 'user', content: step.action }],
+    tools
+  );
+  if (result.error) throw new Error(result.error);
+  return result.text;
+}, {
+  concurrency: 3,
+  stateMachine: new StateMachine(),
+  onWaveStart: (num, wave) => console.log(`[Wave ${num}]: ${wave.map(s => s.id).join(', ')}`),
+  onStepDone: (step, result) => console.log(`Done: ${step.id}`),
+  onStepFail: (step, err) => console.error(`Failed: ${step.id}: ${err.message}`),
+});
+```
+
+### Recipe 2: Loop + CLIPipe with systemPromptFlag
+
+```javascript
+const { Loop } = require('bare-agent');
+const { CLIPipe } = require('bare-agent/providers');
+
+// Without systemPromptFlag: system messages become "System: ..." in stdin (breaks structured output)
+// With systemPromptFlag: system content passed via --system flag, only user/assistant in stdin
+const provider = new CLIPipe({
+  command: 'claude',
+  args: ['--print'],
+  systemPromptFlag: '--system-prompt',
+});
+
+const loop = new Loop({ provider });
+const result = await loop.run([
+  { role: 'user', content: 'List 3 facts about Berlin' }
+]);
+console.log(result.text);
+```
+
+### Recipe 3: Stream + JsonlTransport
+
+```javascript
+const { Loop, Stream } = require('bare-agent');
+const { JsonlTransport } = require('bare-agent/transports');
+const { OpenAI } = require('bare-agent/providers');
+
+// JSONL events to stdout — pipe to any consumer
+const stream = new Stream({ transport: new JsonlTransport() });
+const loop = new Loop({
+  provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+  stream,
+});
+
+// Subscribe for in-process handling
+stream.subscribe((event) => {
+  if (event.type === 'loop:tool_call') {
+    console.error(`[debug] Tool: ${event.data.name}`);
+  }
+});
+
+const result = await loop.run(
+  [{ role: 'user', content: 'What is the weather in Berlin?' }],
+  [weatherTool]
+);
+```

@@ -13,7 +13,7 @@
 
 # bare-agent
 
-**Agent orchestration in ~800 lines. Zero required deps. MIT license.**
+**Agent orchestration in ~1500 lines. Zero required deps. MIT license.**
 
 Everything between "call the LLM" and "ship the agent" — loop, plan, remember, schedule, checkpoint. Each works alone. All compose together.
 
@@ -217,12 +217,19 @@ Same pattern works from Go, Rust, Java, Ruby — any language that can spawn a p
 required:     0
 optional:     cron-parser (for cron expressions in scheduler)
 peer:         better-sqlite3 (for SQLite memory store)
-total lines:  ~820
+total lines:  ~1500
 ```
 
 ## Status
 
-Early development. Core components built and validated through POCs. See [project plan](docs/01-product/prd.md) for the full design.
+**Production-validated.** bare-agent powers the SOAR2 pipeline in [Aurora](https://github.com/hamr0/aurora), replacing ~400 lines of hand-rolled agent orchestration with ~60 lines of bare-agent wiring. In production use, bare-agent eliminated:
+
+- **Boilerplate** — Tool-calling loop, provider normalization, retry logic, and state tracking that every agent project reinvents. Aurora's SOAR2 pipeline dropped from custom loop + manual state management to `Loop + Planner + runPlan + StateMachine`.
+- **Fragile glue code** — Manual wave execution, dependency resolution, and error propagation replaced by `runPlan` with built-in parallelism and failure cascading.
+- **Provider lock-in** — Switching from OpenAI to Anthropic to CLIPipe required zero orchestration changes — just swap the provider constructor.
+- **Debugging friction** — Structured `[ComponentName]` error prefixes and `Stream` events made failures traceable in minutes instead of hours.
+
+See [project plan](docs/01-product/prd.md) for the full design. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 

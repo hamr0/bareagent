@@ -10,6 +10,7 @@
  * @param {function} [options.onStepStart] - Callback(step) fired when a step begins.
  * @param {function} [options.onStepDone] - Callback(step, result) fired on success.
  * @param {function} [options.onStepFail] - Callback(step, error) fired on failure.
+ * @param {function} [options.onWaveStart] - Callback(waveNumber, steps) fired before each wave executes.
  * @returns {Promise<Array<{id: string, status: string, result?: *, error?: string}>>}
  * @throws {Error} `[runPlan] steps must be a non-empty array` — when steps is not a non-empty array.
  * @throws {Error} `[runPlan] executeFn must be a function` — when executeFn is not a function.
@@ -47,7 +48,9 @@ async function runPlan(steps, executeFn, options = {}) {
     }
   }
 
-  const { concurrency = Infinity, stateMachine, onStepStart, onStepDone, onStepFail } = options;
+  const { concurrency = Infinity, stateMachine, onStepStart, onStepDone, onStepFail, onWaveStart } = options;
+
+  let waveNumber = 0;
 
   // Wave loop
   while (true) {
@@ -80,6 +83,9 @@ async function runPlan(steps, executeFn, options = {}) {
 
     // Apply concurrency limit
     const wave = ready.slice(0, concurrency);
+
+    waveNumber++;
+    onWaveStart?.(waveNumber, wave.map(e => e.step));
 
     // Execute wave
     await Promise.all(wave.map(async entry => {

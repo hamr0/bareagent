@@ -69,6 +69,8 @@ Every error thrown or rejected by bare-agent is prefixed with `[ComponentName]`.
 | `[CLIPipeProvider] timed out after Nms` | CLI tool didn't produce output within timeout | Increase `timeout` in constructor. Default is 30000ms |
 | `[CLIPipeProvider] process produced no output` | CLI tool exited 0 but wrote nothing to stdout | Check the command actually produces output for the given input |
 
+**systemPromptFlag behavior:** When `systemPromptFlag` is set (e.g. `'--system'`), system messages are extracted from the messages array, joined with `\n\n`, and passed as a CLI argument (`[flag, content]`) appended after `this.args`. Non-system messages are formatted normally via `_formatPrompt()` and piped to stdin. If no system messages are present, the flag is not added. This prevents `_formatPrompt()` from flattening structured system prompts into `System: ...` plaintext, which breaks tools like `claude --print` that expect system content via a dedicated flag.
+
 ## runPlan
 
 | Error | When | Fix |

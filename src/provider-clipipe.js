@@ -11,6 +11,7 @@ class CLIPipeProvider {
    * @param {string} [options.cwd] - Working directory for the child process.
    * @param {object} [options.env] - Environment variables for the child process.
    * @param {number} [options.timeout=30000] - Timeout in milliseconds.
+   * @param {string} [options.systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
    * @throws {Error} `[CLIPipeProvider] requires command` — when options.command is missing.
    */
   constructor(options = {}) {
@@ -20,6 +21,7 @@ class CLIPipeProvider {
     this.cwd = options.cwd || undefined;
     this.env = options.env || undefined;
     this.timeout = options.timeout ?? 30000;
+    this.systemPromptFlag = options.systemPromptFlag || null;
   }
 
   /**
@@ -34,8 +36,20 @@ class CLIPipeProvider {
    * @throws {Error} `[CLIPipeProvider] process produced no output` — when stdout is empty.
    */
   async generate(messages, tools = [], options = {}) {
-    const prompt = this._formatPrompt(messages);
-    const text = await this._spawn(prompt);
+    let extraArgs = [];
+    let promptMessages = messages;
+
+    if (this.systemPromptFlag) {
+      const systemMessages = messages.filter(m => m.role === 'system');
+      if (systemMessages.length > 0) {
+        const systemContent = systemMessages.map(m => m.content).join('\n\n');
+        extraArgs = [this.systemPromptFlag, systemContent];
+        promptMessages = messages.filter(m => m.role !== 'system');
+      }
+    }
+
+    const prompt = this._formatPrompt(promptMessages);
+    const text = await this._spawn(prompt, extraArgs);
     return {
       text,
       toolCalls: [],
@@ -58,11 +72,12 @@ class CLIPipeProvider {
   /**
    * Spawn the CLI process, pipe prompt to stdin, collect stdout.
    * @param {string} prompt
+   * @param {string[]} [extraArgs=[]] - Additional args prepended to this.args.
    * @returns {Promise<string>}
    */
-  _spawn(prompt) {
+  _spawn(prompt, extraArgs = []) {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.command, this.args, {
+      const child = spawn(this.command, [...this.args, ...extraArgs], {
         cwd: this.cwd,
         env: this.env,
         stdio: ['pipe', 'pipe', 'pipe'],

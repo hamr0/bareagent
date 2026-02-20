@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "files": [
     "index.js",
     "src/",
@@ -20,7 +20,8 @@
   "exports": {
     ".": "./index.js",
     "./providers": "./src/providers.js",
-    "./stores": "./src/stores.js"
+    "./stores": "./src/stores.js",
+    "./transports": "./src/transports.js"
   },
   "engines": {
     "node": ">=18"

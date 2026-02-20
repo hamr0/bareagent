@@ -88,6 +88,68 @@ describe('CLIPipeProvider', () => {
     );
   });
 
+  it('separates system messages via systemPromptFlag', async () => {
+    // bash -c receives extra args as positional params ($0, $1, ...)
+    const provider = new CLIPipeProvider({
+      command: 'bash',
+      args: ['-c', 'read -r stdin; printf "%s\\n%s\\n%s" "$1" "$2" "$stdin"', '_'],
+      systemPromptFlag: '--system',
+    });
+    const result = await provider.generate([
+      { role: 'system', content: 'Be helpful.' },
+      { role: 'user', content: 'Hello' },
+    ]);
+    const lines = result.text.split('\n');
+    // extraArgs [--system, "Be helpful."] appended after bash args
+    assert.equal(lines[0], '--system');
+    assert.equal(lines[1], 'Be helpful.');
+    assert.ok(lines[2].includes('User: Hello'), 'user message should be in stdin');
+    assert.ok(!lines[2].includes('System:'), 'system message should not appear in stdin');
+  });
+
+  it('works without systemPromptFlag (default behavior unchanged)', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(d))'],
+    });
+    const result = await provider.generate([
+      { role: 'system', content: 'Be brief.' },
+      { role: 'user', content: 'Hello' },
+    ]);
+    assert.ok(result.text.includes('System: Be brief.'));
+    assert.ok(result.text.includes('User: Hello'));
+  });
+
+  it('handles multiple system messages', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'bash',
+      args: ['-c', 'cat <&0 > /dev/null; printf "%s" "$2"', '_'],
+      systemPromptFlag: '--system',
+    });
+    const result = await provider.generate([
+      { role: 'system', content: 'Be helpful.' },
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'Hello' },
+    ]);
+    // Multiple system messages joined with \n\n
+    assert.equal(result.text, 'Be helpful.\n\nBe concise.');
+  });
+
+  it('handles no system messages with systemPromptFlag set', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify({args:process.argv.slice(2),stdin:d})))'],
+      systemPromptFlag: '--system',
+    });
+    const result = await provider.generate([
+      { role: 'user', content: 'Hello' },
+    ]);
+    const parsed = JSON.parse(result.text);
+    // No --system flag when there are no system messages
+    assert.ok(!parsed.args.includes('--system'), 'should not add flag when no system messages');
+    assert.ok(parsed.stdin.includes('User: Hello'));
+  });
+
   it('passes env to child process', async () => {
     const provider = new CLIPipeProvider({
       command: 'node',
