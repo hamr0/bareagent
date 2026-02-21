@@ -633,14 +633,305 @@ Debug output goes to stderr. JSONL events go to stdout. They never mix.
 
 ---
 
-## 10. What bare-agent does NOT do
+## 10. Patterns, Not Features
+
+bare-agent deliberately leaves certain things out of the framework. Not because they're unimportant — but because they're application logic that varies wildly between use cases. Baking them in would mean picking one opinion and forcing it on everyone.
+
+Instead, bare-agent gives you composable primitives. Below are common patterns people ask about, with recipes showing how to build them from what's already there.
+
+### Multi-agent orchestration
+
+**Why it's not built in:** What most frameworks call "multi-agent" is persona routing — pick a system prompt + tool subset based on the task. That's application logic. Adding it to bare-agent would mean opinionating on routing strategies, handoff protocols, and shared state — the complexity bloat bare-agent exists to avoid.
+
+**How to do it:** Create multiple Loop instances with different configs. Your app decides which one handles each message.
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+
+const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Different "agents" are just Loops with different system prompts and tools
+const researcher = new Loop({
+  provider,
+  systemPrompt: 'You are a research assistant. Find and summarize information.',
+});
+
+const coder = new Loop({
+  provider,
+  systemPrompt: 'You are a coding assistant. Write and review code.',
+});
+
+// Your app routes — could be keyword matching, LLM classification, @mentions, anything
+function route(message) {
+  if (message.includes('@code')) return coder;
+  if (message.includes('@research')) return researcher;
+  return researcher; // default
+}
+
+const agent = route(userMessage);
+const result = await agent.run([{ role: 'user', content: userMessage }], tools);
+```
+
+**Handoffs between agents** — when Agent A needs Agent B mid-conversation:
+
+```javascript
+// Agent A runs, decides it needs code help
+const researchResult = await researcher.run(messages, researchTools);
+
+// Your app detects the handoff need (from tool call, keyword, or LLM decision)
+if (needsCodeHelp(researchResult)) {
+  // Pass relevant context to Agent B — you control what transfers
+  const handoffMessages = [
+    { role: 'system', content: 'Context from research phase: ' + researchResult.text },
+    { role: 'user', content: 'Write the implementation based on the research above.' },
+  ];
+  const codeResult = await coder.run(handoffMessages, codeTools);
+}
+```
+
+**Shared state** — use a common Memory/store instance:
+
+```javascript
+const { Memory } = require('bare-agent');
+const { SQLite } = require('bare-agent/stores');
+
+// Both agents share the same memory
+const sharedMemory = new Memory({ store: new SQLite('./shared.db') });
+
+const researcher = new Loop({ provider, memory: sharedMemory });
+const coder = new Loop({ provider, memory: sharedMemory });
+```
+
+### Structured output formats (named phases, schemas)
+
+**Why it's not built in:** Naming execution phases "wave1/wave2" or enforcing output schemas is domain-specific. A trip planner's phases look nothing like a code reviewer's. Constraining this at the framework level limits what you can build.
+
+**How to do it:** Use system prompts and Planner's structured output.
+
+```javascript
+// Option 1: System prompt with format instructions
+const loop = new Loop({
+  provider,
+  systemPrompt: `When responding, structure your output as:
+## Analysis
+<your analysis>
+## Recommendation
+<your recommendation>
+## Action Items
+<numbered list>`,
+});
+
+// Option 2: Use Planner for named phases
+const planner = new Planner({ provider });
+const steps = await planner.plan('Review this PR', {
+  // Your domain's phases — planner respects them
+  phases: ['understand', 'analyze', 'suggest'],
+});
+// steps come back with your phase names, not the framework's
+
+// Option 3: Tool that enforces structure
+const tools = [{
+  name: 'submit_review',
+  description: 'Submit a structured code review',
+  parameters: {
+    type: 'object',
+    properties: {
+      severity: { type: 'string', enum: ['critical', 'warning', 'info'] },
+      findings: { type: 'array', items: { type: 'string' } },
+      approved: { type: 'boolean' },
+    },
+    required: ['severity', 'findings', 'approved'],
+  },
+  execute: async (review) => { /* your logic */ },
+}];
+```
+
+### Output limiting and token budgets
+
+**Why it's not built in:** Token budgets, response length limits, and output filtering depend on your LLM, your billing, and your UX. The framework can't know your constraints.
+
+**How to do it:** Use provider options and post-processing.
+
+```javascript
+// Option 1: Provider-level token limits
+const provider = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  model: 'gpt-4o-mini',
+  maxTokens: 500,  // hard limit on response length
+});
+
+// Option 2: System prompt guidance
+const loop = new Loop({
+  provider,
+  systemPrompt: 'Keep responses under 3 sentences. Be direct.',
+});
+
+// Option 3: Post-process with usage tracking
+const result = await loop.run(messages, tools);
+if (result.usage.outputTokens > budget) {
+  // summarize, truncate, or warn — your call
+}
+```
+
+### Rate limiting
+
+**Why it's not built in:** Rate limits are per-provider, per-plan, per-endpoint. A framework can't know yours.
+
+**How to do it:** Wrap your provider or tools.
+
+```javascript
+// Simple rate limiter — 10 calls per minute
+function rateLimited(fn, maxPerMinute) {
+  const calls = [];
+  return async (...args) => {
+    const now = Date.now();
+    calls.push(now);
+    while (calls.length && calls[0] < now - 60000) calls.shift();
+    if (calls.length > maxPerMinute) {
+      const waitMs = 60000 - (now - calls[0]);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+    return fn(...args);
+  };
+}
+
+// Wrap a provider
+const rawProvider = new OpenAI({ apiKey: '...' });
+rawProvider.generate = rateLimited(rawProvider.generate.bind(rawProvider), 10);
+```
+
+### Hooks (lifecycle events)
+
+**Why it's not built in:** Hooks are for extensibility when you can't predict use cases — useful for platforms with third-party plugins. For a tool where you control the code, just add the behavior directly. "When an escalation happens, notify me" is one line in the handler, not a hook system.
+
+**How to do it:** Stream is already a hook system. Subscribe to events and react.
+
+```javascript
+const { Loop, Stream } = require('bare-agent');
+
+const stream = new Stream();
+
+// "Hook" into tool calls — log, audit, block, transform
+stream.subscribe((event) => {
+  if (event.type === 'loop:tool_call') {
+    console.log(`Tool called: ${event.data.name}`);
+    audit.log(event);
+  }
+  if (event.type === 'loop:error') {
+    alerting.send(`Agent failed: ${event.data.message}`);
+  }
+  if (event.type === 'task:transition' && event.data.to === 'failed') {
+    escalate(event.data.taskId);
+  }
+});
+
+const loop = new Loop({ provider, stream });
+```
+
+If you need before/after semantics (e.g., transform tool args before execution), wrap the tool's `execute` function:
+
+```javascript
+function withHooks(tool, { before, after }) {
+  const original = tool.execute;
+  return {
+    ...tool,
+    execute: async (args) => {
+      const finalArgs = before ? await before(tool.name, args) : args;
+      const result = await original(finalArgs);
+      if (after) await after(tool.name, result);
+      return result;
+    },
+  };
+}
+
+// Usage: log every tool call, redact sensitive args
+const wrappedTools = tools.map(t => withHooks(t, {
+  before: (name, args) => { console.log(`→ ${name}`, args); return args; },
+  after: (name, result) => { console.log(`← ${name}`, result); },
+}));
+```
+
+### Heartbeat (ambient awareness)
+
+**Why it's not built in:** Heartbeat is "periodically check if anything needs attention" — the scope of "anything" is entirely your domain. A personal assistant checks unread messages. A monitoring agent checks server health. The framework can't know what to check.
+
+**How to do it:** Scheduler with a recurring job. The difference between heartbeat and cron is specificity: cron runs a defined action, heartbeat asks the LLM to decide what needs attention.
+
+```javascript
+const { Loop, Scheduler } = require('bare-agent');
+
+const scheduler = new Scheduler({ file: './jobs.json' });
+
+// Heartbeat = recurring job where the LLM decides what to do
+scheduler.add({
+  type: 'recurring',
+  schedule: '30m',  // every 30 minutes
+  action: 'Check if anything needs my attention. Review unread messages, pending tasks, and upcoming deadlines.',
+});
+
+// The handler gives the LLM full context to triage
+scheduler.start(async (job) => {
+  const context = await gatherContext(); // your app pulls unread counts, task status, etc.
+  const result = await loop.run([
+    { role: 'system', content: `Current state:\n${JSON.stringify(context)}` },
+    { role: 'user', content: job.action },
+  ], tools);
+
+  // LLM decides: nothing to do, or takes action
+  if (result.text !== 'Nothing needs attention.') {
+    await notify(result.text);
+  }
+});
+```
+
+Start with specific cron jobs. If you find yourself creating the same ones repeatedly ("check messages", "check tasks", "check deadlines"), collapse them into a single heartbeat.
+
+### Cron expressions
+
+**What's built in:** Scheduler already supports cron. It uses `cron-parser` (peer dep) for cron expressions and has built-in relative scheduling (`5s`, `30m`, `2h`, `1d`).
+
+```javascript
+const { Scheduler } = require('bare-agent');
+
+const scheduler = new Scheduler({ file: './jobs.json' });
+
+// Relative — one-shot
+scheduler.add({ type: 'once', schedule: '2h', action: 'Remind me to call dentist' });
+
+// Cron — recurring
+scheduler.add({
+  type: 'recurring',
+  schedule: '0 9 * * 1-5',  // weekdays at 9am
+  action: 'Summarize overnight messages',
+});
+
+scheduler.add({
+  type: 'recurring',
+  schedule: '*/15 * * * *',  // every 15 minutes
+  action: 'Check for new support tickets',
+});
+
+// Handler wires scheduler to your agent
+scheduler.start(async (job) => {
+  const result = await loop.run([
+    { role: 'user', content: job.action }
+  ], tools);
+  await notify(result.text);
+});
+```
+
+**Not built in:** Timezone handling, calendar-aware scheduling (skip holidays), job priorities. These are app-specific — wrap `scheduler.add()` with your own logic.
+
+---
+
+## 11. What bare-agent does NOT do
 
 | Not included | Why | Use instead |
 |-------------|-----|-------------|
 | Web UI | Use AG-UI protocol or build your own | CopilotKit, custom frontend |
 | Authentication | Every app has different auth | Wrap Checkpoint with your auth |
 | Tool implementations | Actuation is user-provided | Your APIs, MCP servers, CLI commands |
-| Rate limiting | App-specific policy | Wrap your tools or provider |
 | Multi-tenant isolation | Platform concern | Build on top with scope filtering |
 | Browser automation | Heavy, separate concern | Playwright/Puppeteer as a tool |
 | Prompt engineering | Model-specific, changes fast | Override system prompts yourself |
