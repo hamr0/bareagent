@@ -2,6 +2,8 @@
 
 > For AI assistants and developers wiring bareagent into a project.
 > v0.3.0 | Node.js >= 18 | 0 required deps | MIT
+>
+> Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
 ## What this is
 
@@ -278,6 +280,22 @@ All error classes extend `Error` — `instanceof Error` always works. The `retry
 - `provider.generate(messages, tools, options)` must return `{ text, toolCalls, usage }`.
 - Store must implement `store(content, metadata) → id`, `search(query, options) → [{id, content, metadata, score}]`, `get(id)`, `delete(id)`.
 - Components are independent: Memory doesn't know Loop, Scheduler doesn't know Planner. You compose them.
+
+## Patterns, not features
+
+These are deliberately NOT in bare-agent. Don't look for them — build them from existing primitives.
+
+| Pattern | Not built in because | How to do it |
+|---|---|---|
+| **Multi-agent orchestration** | Routing, handoffs, shared state are app logic | Multiple Loop instances with different system prompts/tools. Your app routes. Share state via a common Memory/store. |
+| **Structured output / named phases** | Domain-specific (trip planner ≠ code reviewer) | System prompts with format instructions, Planner with custom phase names, or tools with JSON Schema enforcing structure. |
+| **Output limiting / token budgets** | Per-provider, per-plan, per-UX | Provider `maxTokens` option, system prompt guidance, or post-process `result.usage.outputTokens`. |
+| **Rate limiting** | Per-provider, per-endpoint | Wrap `provider.generate` with a rate-limiting function. |
+| **Hooks (lifecycle events)** | You own the code — add behavior directly | Stream subscriptions for after-the-fact hooks. Wrap tool `execute` functions for before/after semantics. |
+| **Heartbeat (ambient awareness)** | "Check if anything needs attention" scope is your domain | Scheduler recurring job where the LLM triages: `scheduler.add({ type: 'recurring', schedule: '30m', action: 'Check if anything needs attention' })`. |
+| **Cron** | **This IS built in** | Scheduler supports cron expressions (requires `cron-parser` peer dep) and relative schedules (`5s`, `30m`, `2h`, `1d`) natively. |
+
+For full recipes with code examples, see `docs/02-features/usage-guide.md` § "Patterns, Not Features".
 
 ## Gotchas
 
