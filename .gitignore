@@ -2,3 +2,4 @@ node_modules/
 *.db
 *.log
 .env
+contrib/python/__pycache__/
