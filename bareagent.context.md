@@ -297,6 +297,25 @@ These are deliberately NOT in bare-agent. Don't look for them — build them fro
 
 For full recipes with code examples, see `docs/02-features/usage-guide.md` § "Patterns, Not Features".
 
+## Production usage
+
+| Component | aurora (SOAR2 pipeline) | multis (personal assistant) |
+|---|---|---|
+| Loop | ✓ | ✓ |
+| Planner | ✓ | ✓ |
+| runPlan | ✓ | — (sequential execution) |
+| Retry | ✓ | ✓ |
+| CircuitBreaker | — | ✓ |
+| Fallback | — | — (deferred) |
+| Memory | — (own BM25 store) | — (own SQLite FTS5 store) |
+| StateMachine | — | — (deferred) |
+| Scheduler | — | ✓ |
+| Checkpoint | — | ✓ |
+| Stream | — | — (deferred) |
+| CLIPipe | ✓ | — |
+
+Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/03-logs/bareagent-eval-multis.md`.
+
 ## Gotchas
 
 1. **Anthropic requires apiKey** — OpenAI and Ollama don't (for local/keyless endpoints).

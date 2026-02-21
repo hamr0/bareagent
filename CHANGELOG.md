@@ -2,6 +2,26 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.3.2] — 2026-02-21
+
+Docs and integration improvements from multis eval. No code changes.
+
+### Fixed
+
+- **`better-sqlite3` peer dep** — Widened from `^12.6.2` to `>=9.0.0`. Projects using v11 no longer need `--legacy-peer-deps`.
+
+### Docs
+
+- **"Patterns, Not Features"** section in usage guide — Recipes for multi-agent orchestration, structured output, output limiting, rate limiting, hooks, heartbeat, cron. Each explains why it's not a framework feature and how to do it with existing primitives.
+- **Tool context adapter recipe** — Closure pattern for tools needing execution context (senderId, chatId, permissions).
+- **Checkpoint chat-platform recipe** — Pending approvals Map + reply interception for wiring Checkpoint to Telegram/Slack/Discord.
+- **Gotcha #11** — Loop injects system prompt as `{ role: 'system' }` message at index 0, not in options.
+- **Linked README → usage guide** and **context file → usage guide** for discoverability.
+- **Compatibility matrix** — Which components aurora and multis actually use.
+- **Provider diagnostic script** (`bin/test-provider.js`) — Quick pass/fail check for API key + provider connectivity.
+
+---
+
 ## [0.3.0] — 2026-02-20
 
 **BREAKING:** Loop.run() now throws on error by default. Callers relying on `result.error` must pass `throwOnError: false`.

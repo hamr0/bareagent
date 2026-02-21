@@ -43,6 +43,15 @@ Use bare-agent. The integration guide is in bareagent.context.md.
 
 That's it. The context doc is structured for LLM consumption — your agent reads it once and knows how to wire every component.
 
+**Not sure what you need?** Paste this into any AI assistant:
+
+```
+I want to build an agent using bare-agent. Read the integration guide at
+node_modules/bare-agent/bareagent.context.md, then ask me up to 5 questions
+about what I need. Based on my answers, tell me which components to use
+and show me the wiring code.
+```
+
 ---
 
 ## What's inside
