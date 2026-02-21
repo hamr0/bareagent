@@ -923,6 +923,99 @@ scheduler.start(async (job) => {
 
 **Not built in:** Timezone handling, calendar-aware scheduling (skip holidays), job priorities. These are app-specific — wrap `scheduler.add()` with your own logic.
 
+### Tool execution context (ctx closure pattern)
+
+**Why it's not built in:** bareagent tools get `execute(args)` — just the LLM-provided arguments. But real apps need execution context: who sent the message, which chat, permissions, database handles, etc. That context is entirely app-specific — bareagent can't know it.
+
+**How to do it:** Wrap tools with a closure that captures your context.
+
+```javascript
+// Your app's tools have a different signature — execute(args, ctx)
+const myTools = [
+  {
+    name: 'send_message',
+    description: 'Send a message to a chat',
+    input_schema: { /* ... */ },
+    execute: async (args, ctx) => {
+      // ctx has senderId, chatId, platform, permissions, etc.
+      if (!ctx.isOwner) throw new Error('Not authorized');
+      return await ctx.platform.send(ctx.chatId, args.text);
+    },
+  },
+];
+
+// Adapter: capture ctx in a closure, map to bareagent's format
+function adaptTools(tools, ctx) {
+  return tools.map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.input_schema || tool.parameters,
+    execute: async (args) => tool.execute(args, ctx),
+  }));
+}
+
+// Usage — ctx comes from your message router
+async function handleMessage(message, ctx) {
+  const tools = adaptTools(myTools, ctx);
+  const result = await loop.run(
+    [{ role: 'user', content: message }],
+    tools
+  );
+  return result.text;
+}
+```
+
+This is the universal integration pattern — every app that has tools needing context beyond LLM arguments will use some variant of this closure.
+
+### Checkpoint wiring for chat platforms
+
+**Why it's not built in:** Checkpoint provides `send` and `waitForReply` callbacks — you provide the transport. But wiring this to a chat platform (Telegram, Slack, Discord) requires a pending-approvals Map and reply interception in your message router. That's ~40 lines of glue that's specific to your platform.
+
+**How to do it:** Pending approvals Map + reply interception.
+
+```javascript
+const { Loop, Checkpoint } = require('bare-agent');
+
+// Pending approvals — keyed by chatId (or any identifier)
+const pendingApprovals = new Map();
+
+const checkpoint = new Checkpoint({
+  tools: ['send_email', 'purchase', 'delete_account'],
+  send: async (question) => {
+    // Send the approval question to the user via your platform
+    await platform.send(currentChatId, `🔒 Approval needed:\n${question}\n\nReply "yes" or "no".`);
+  },
+  waitForReply: () => {
+    // Return a promise that resolves when the user replies
+    return new Promise((resolve) => {
+      pendingApprovals.set(currentChatId, resolve);
+    });
+  },
+});
+
+const loop = new Loop({ provider, checkpoint });
+
+// In your message router — intercept replies to pending approvals
+async function onMessage(chatId, text) {
+  // Check if this is a reply to a pending approval
+  if (pendingApprovals.has(chatId)) {
+    const resolve = pendingApprovals.get(chatId);
+    pendingApprovals.delete(chatId);
+    resolve(text);  // unblocks waitForReply()
+    return;
+  }
+
+  // Normal message — run the agent
+  const result = await loop.run(
+    [{ role: 'user', content: text }],
+    adaptTools(myTools, { chatId })
+  );
+  await platform.send(chatId, result.text);
+}
+```
+
+The pattern works for any platform — swap `platform.send` for your Telegram/Slack/Discord/WebSocket client. The Map + resolve pattern is the same everywhere.
+
 ---
 
 ## 11. What bare-agent does NOT do

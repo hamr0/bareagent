@@ -39,7 +39,7 @@
     "cron-parser": "^4.9.0"
   },
   "peerDependencies": {
-    "better-sqlite3": "^12.6.2"
+    "better-sqlite3": ">=9.0.0"
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {

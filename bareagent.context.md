@@ -309,7 +309,8 @@ For full recipes with code examples, see `docs/02-features/usage-guide.md` § "P
 8. **Loop `run()` throws by default (v0.3.0+)** — Provider errors and maxRounds exhaustion throw instead of returning `result.error`. Use `try/catch` or pass `throwOnError: false` for the old behavior.
 9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
-11. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
+12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
 
 ## Recipes
 
@@ -413,4 +414,50 @@ const result = await loop.run(
   [{ role: 'user', content: 'What is the weather in Berlin?' }],
   [weatherTool]
 );
+```
+
+### Recipe 5: Tool context adapter (ctx closure)
+
+```javascript
+// Your tools need execution context (senderId, chatId, permissions, etc.)
+// bareagent tools get execute(args) — just LLM arguments.
+// Solution: closure that captures ctx.
+
+function adaptTools(tools, ctx) {
+  return tools.map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.input_schema || tool.parameters,
+    execute: async (args) => tool.execute(args, ctx),
+  }));
+}
+
+// In your message handler:
+const tools = adaptTools(myTools, { chatId, senderId, isOwner, platform });
+const result = await loop.run([{ role: 'user', content: msg }], tools);
+```
+
+### Recipe 6: Checkpoint on a chat platform
+
+```javascript
+const { Checkpoint } = require('bare-agent');
+
+const pendingApprovals = new Map(); // chatId → resolve function
+
+const checkpoint = new Checkpoint({
+  tools: ['send_email', 'purchase'],
+  send: async (question) => platform.send(chatId, `Approval needed: ${question}\nReply yes/no.`),
+  waitForReply: () => new Promise(resolve => pendingApprovals.set(chatId, resolve)),
+});
+
+// In your message router — intercept approval replies
+function onMessage(chatId, text) {
+  if (pendingApprovals.has(chatId)) {
+    const resolve = pendingApprovals.get(chatId);
+    pendingApprovals.delete(chatId);
+    resolve(text); // unblocks waitForReply()
+    return;
+  }
+  // ... normal agent handling
+}
 ```
