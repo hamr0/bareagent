@@ -68,58 +68,33 @@ Added `@throws` JSDoc to every method that can throw/reject across all 12 source
 
 ---
 
-## Phase 2: Validate via Real Consumers
+## Phase 2: Validate via Real Consumers ✓ COMPLETE
 
 > Goal: Prove that bareagent's contracts hold up when wired into real projects, and add the health-check method that real wiring always reveals the need for.
 
-This phase is where interface design issues surface. Every friction point found here is a potential API fix — not a user error. Do this before writing examples, so the examples reflect the validated API.
+**Completed Feb 2026.** Both aurora and multis integrated. `loop.validate()` shipped. Friction points documented and addressed.
 
-### 2.1 Wire aurora to bareagent
+### 2.1 Wire aurora to bareagent ✓
 
-Use aurora as the first real consumer. The specific question: does bareagent's Memory component conflict with aurora's own BM25/embedding store, or do they compose cleanly?
+Aurora uses bareagent's Loop + runPlan, replacing ~400 lines of hand-rolled orchestration with ~60 lines of bareagent wiring. Memory components compose cleanly — aurora keeps its own BM25/embedding store, bareagent's Memory is optional.
 
-**What to track:**
-- Every place you work *around* bareagent rather than *with* it
-- Any constructor option that should have a default but doesn't
-- Any return shape that surprises you
+### 2.2 Wire multis to bareagent ✓
 
-**Acceptance:** Aurora uses bareagent's Loop (at minimum) without internal hacks. Friction points are logged and either fixed or documented as known limitations.
+Multis replaced ~720 lines of custom agent infra (5 provider files, custom loop, tool executor) with bareagent's Loop + Retry + CircuitBreaker + Scheduler + Checkpoint + Planner. Net: -575 lines of custom code, +5 features that didn't exist before. Full eval: `docs/03-logs/bareagent-eval-multis.md`.
 
-**Size:** Medium. Depends on aurora's current state. May surface API changes that feed back into Phase 1 files.
+**Friction points found and addressed:**
+- `better-sqlite3` peer dep too narrow (`^12.6.2`) — widened to `>=9.0.0`
+- System prompt injected as message surprised tests — added to gotchas
+- Tool ctx closure pattern needed by every integration — added recipe to docs
+- Checkpoint chat-platform wiring pattern (~40 lines glue) — added recipe to docs
 
-### 2.2 Wire multis to bareagent
+### 2.3 Add `loop.validate()` health check ✓
 
-The harder integration. Multis stress-tests Checkpoint + Scheduler together — the two components most likely to have composition bugs.
+`await loop.validate(tools)` returns `{ provider: { ok }, store: { ok, skipped }, tools: { ok } }`. Confirms provider reachable, store writable, tools well-formed. Documented in JSDoc and `bareagent.context.md`.
 
-**Specific questions to answer:**
-- Does `Checkpoint.waitForReply` handle Telegram's async message model? (timeout, double-reply, messages arriving mid-turn)
-- What happens when a scheduled job fires while a Checkpoint is waiting for human input?
-- Does SQLite handle concurrent writes from scheduler + checkpoint without locking errors?
+### Phase 2 exit criteria ✓
 
-**Acceptance:** Multis uses bareagent's Loop + Checkpoint + Scheduler without internal hacks. Edge cases above are tested or explicitly documented as out-of-scope.
-
-**Size:** Medium-Large. This is the integration most likely to reveal design issues.
-
-### 2.3 Add `loop.validate()` health check
-
-Born from real wiring pain in 2.1 and 2.2 — by this point you'll know exactly what validation consumers need at startup.
-
-At minimum:
-- Confirm provider is reachable (one minimal API call)
-- Confirm store is writable (write + read + delete)
-- Confirm all tools are well-formed (reuse validation from 1.2)
-
-Returns a structured result, not a boolean — so the consumer knows *what* failed.
-
-**Files to touch:** `src/loop.js`, `test/loop.test.js` (unit test with mock provider/store), `test/e2e.test.js` (one real validation call)
-
-**Acceptance:** `await loop.validate()` returns `{ provider: ok/error, store: ok/error/skipped, tools: ok/error[] }`. Documented in JSDoc.
-
-**Size:** Small-Medium. The method itself is simple; the design decision is what to validate.
-
-### Phase 2 exit criteria
-
-Aurora and multis both run on bareagent. `loop.validate()` exists and is used in at least one real project's startup. Any API changes discovered during integration are applied and unit tests updated.
+Aurora and multis both run on bareagent. `loop.validate()` exists and is used in at least one real project's startup. API changes discovered during integration (peer dep, gotchas, recipes) are applied and documented.
 
 ---
 
@@ -252,7 +227,7 @@ These are not blocking adoption and should not distract from Phases 1-4:
 **How to play each phase:**
 
 - **Phase 1** is complete (4 tasks, done in one session).
-- **Phase 2** is sequential — aurora first (2.1), then multis (2.2), then health check (2.3) informed by both. This is the longest phase and the one most likely to surface design changes. Budget accordingly.
+- **Phase 2** is complete (3 tasks — aurora, multis, validate). Surfaced 4 friction points, all addressed. Eval logged in `docs/03-logs/bareagent-eval-multis.md`.
 - **Phase 3** tasks are independent of each other (3.1-3.4 can be done in any order). 3.5 (context doc) depends on examples existing so you can reference them. Total: 2-3 sessions.
 - **Phase 4** is a single session. Mostly ceremony, but important ceremony.
 
@@ -267,4 +242,4 @@ Can you wire aurora's search as a bareagent tool in under 20 lines? Can you wire
 
 ---
 
-*Last updated: February 20, 2026. Phase 1 complete. Next up: Phase 2 (real consumer integration) or Phase 4.1 (CHANGELOG + semver tag) if shipping first.*
+*Last updated: February 21, 2026. Phase 1 and Phase 2 complete. Next up: Phase 3 (examples & documentation) or Phase 4.1 (CHANGELOG + semver tag).*
