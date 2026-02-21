@@ -2,6 +2,21 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.3.3] — 2026-02-21
+
+### Added
+
+- **Cross-language SDK wrappers** (`contrib/`) — Tested, importable subprocess wrappers for Python, Go, Rust, Ruby, and Java. Each spawns `npx bare-agent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API across all 5 languages: constructor → `run(goal)` → `close()`. stdlib only where possible (Rust needs `serde_json`). See `contrib/README.md`.
+
+### Docs
+
+- `bareagent.context.md` — Added "Cross-language SDKs" section pointing to `contrib/`.
+- `docs/02-features/usage-guide.md` — Updated subprocess section to reference `contrib/` wrappers.
+- `docs/00-context/system-state.md` — Added cross-language wrappers to blueprint.
+- `README.md` — Updated "Cross-language" bullet to mention `contrib/`.
+
+---
+
 ## [0.3.2] — 2026-02-21
 
 Docs and integration improvements from multis eval. No code changes.

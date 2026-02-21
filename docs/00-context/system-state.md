@@ -316,6 +316,22 @@ Time-triggered agent turns. The only way the agent acts without being messaged.
 
 ---
 
+### Cross-language SDK Wrappers (`contrib/`)
+
+Thin subprocess wrappers for non-Node.js consumers. Each spawns `npx bare-agent --jsonl` and communicates via JSONL stdin/stdout.
+
+| Language | File | Deps | Lines |
+|----------|------|------|-------|
+| Python | `contrib/python/bareagent.py` | stdlib (subprocess, json) | ~60 |
+| Go | `contrib/go/bareagent.go` | stdlib (os/exec, encoding/json, bufio) | ~120 |
+| Rust | `contrib/rust/src/lib.rs` | serde_json | ~120 |
+| Ruby | `contrib/ruby/bareagent.rb` | stdlib (open3, json) | ~55 |
+| Java | `contrib/java/BareAgent.java` | stdlib (ProcessBuilder) | ~110 |
+
+All wrappers share the same API pattern: `BareAgent(provider, model, opts)` → `run(goal)` → `close()`. Optional event callback for streaming.
+
+---
+
 ## What's stubbed (not yet implemented)
 
 All components implemented and validated end-to-end.

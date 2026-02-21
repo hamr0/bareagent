@@ -331,6 +331,21 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
 
+## Cross-language SDKs
+
+Tested, importable wrappers for Python, Go, Rust, Ruby, and Java in `contrib/`. Each spawns `npx bare-agent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API: constructor → `run(goal)` → `close()`.
+
+```python
+# Python — contrib/python/bareagent.py (stdlib only)
+from bareagent import BareAgent
+agent = BareAgent(provider="openai", model="gpt-4o-mini")
+result = agent.run("What is the capital of France?")
+print(result["text"])
+agent.close()
+```
+
+See `contrib/README.md` for all 5 languages and protocol reference.
+
 ## Recipes
 
 ### Recipe 1: Planner → runPlan (main use case)

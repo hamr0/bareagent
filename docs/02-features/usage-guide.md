@@ -395,14 +395,16 @@ func main() {
 }
 ```
 
-### Ruby, Rust, Java — same pattern
+### Ready-made wrappers — `contrib/`
+
+Tested, importable wrappers for **Python, Go, Rust, Ruby, and Java** are in [`contrib/`](../../contrib/README.md). Each follows the same pattern:
 
 1. Spawn `npx bare-agent --jsonl`
 2. Write JSON to stdin
 3. Read JSON lines from stdout
-4. Parse events, act on `loop:done`
+4. Parse events, act on `result` or `error`
 
-No SDK needed. If your language can spawn a process and parse JSON, it works.
+Copy the file into your project — no package registry needed. See `contrib/README.md` for usage and protocol reference.
 
 ---
 

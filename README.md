@@ -77,15 +77,60 @@ Every piece works alone — take what you need, ignore the rest.
 
 **Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, browser automation, shell scripts — if it's a function, it works.
 
-**Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, or anything that can spawn a process.
+**Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
 **Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store).
 
 ---
 
+## Cross-language usage
+
+Not using Node.js? Spawn bare-agent as a subprocess from any language. Ready-made wrappers in [`contrib/`](contrib/README.md) for Python, Go, Rust, Ruby, and Java — copy one file, no package registry needed.
+
+```python
+# Python — 3 lines to run an agent
+from bareagent import BareAgent
+
+agent = BareAgent(provider="openai", model="gpt-4o-mini")
+result = agent.run("What is the capital of France?")
+print(result["text"])  # → "The capital of France is Paris."
+agent.close()
+```
+
+```go
+// Go — same pattern
+agent, _ := bareagent.New("anthropic", "claude-haiku-4-5-20251001", "")
+result, _ := agent.Run("What is the capital of France?")
+fmt.Println(result.Text)
+agent.Close()
+```
+
+```ruby
+# Ruby — same pattern
+agent = BareAgent.new(provider: "ollama", model: "llama3.2")
+result = agent.run("What is the capital of France?")
+puts result["text"]
+agent.close
+```
+
+All wrappers support optional event streaming for intermediate results. See [`contrib/README.md`](contrib/README.md) for Rust, Java, and full protocol reference.
+
+---
+
 ## Production-validated
 
-bare-agent powers the SOAR2 pipeline in [Aurora](https://github.com/hamr0/aurora), replacing ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
+| Component | Aurora (SOAR2) | Multis (assistant) |
+|---|:---:|:---:|
+| Loop | ✓ | ✓ |
+| Planner | ✓ | ✓ |
+| runPlan | ✓ | — |
+| Retry | ✓ | ✓ |
+| CircuitBreaker | — | ✓ |
+| Scheduler | — | ✓ |
+| Checkpoint | — | ✓ |
+| CLIPipe | ✓ | — |
+
+Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
 
 For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/02-features/usage-guide.md)**. For error reference, see **[Error Guide](docs/02-features/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
 
