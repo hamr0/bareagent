@@ -76,7 +76,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely.
 
-**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, browser automation, shell scripts — if it's a function, it works.
+**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing (optional).
 
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
