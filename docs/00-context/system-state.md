@@ -15,6 +15,9 @@ ORCHESTRATION          EXECUTION              ACTUATION
   Stream ✅              Memory ✅               MCP servers
                          Checkpoint ✅             CLI commands
                          Retry ✅                 Browser automation
+
+                                               Built-in (optional):
+                                                 barebrowse (web browsing)
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅
@@ -444,7 +447,9 @@ All components implemented and validated end-to-end.
 | `src/transport-jsonl.js` | 14 | ✅ implemented |
 | `bin/cli.js` | 65 | ✅ implemented |
 | `src/scheduler.js` | 107 | ✅ implemented |
-| **Implemented total** | **1017** | |
+| `tools/browse.js` | 17 | ✅ implemented |
+| `src/tools.js` | 5 | ✅ implemented |
+| **Implemented total** | **1039** | |
 | **Target was** | **~820** | over by ~200 lines (CLI arg parsing, scheduler re-entry guard, FTS triggers) |
 
 Test code: ~2350 lines across 15 files.

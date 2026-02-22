@@ -13,11 +13,12 @@ bareagent is a lightweight agent orchestration library (~1700 lines). It provide
 npm install bare-agent
 ```
 
-Four entry points:
+Five entry points:
 - `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
+- `require('bare-agent/tools')` — createBrowsingTools
 
 ## Which components do I need?
 
@@ -41,6 +42,7 @@ Four entry points:
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError, MaxRoundsError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
+| Browse the web (navigate, click, type, read) | createBrowsingTools + Loop |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -330,6 +332,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser. Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed.
 
 ## Cross-language SDKs
 
@@ -493,5 +496,28 @@ function onMessage(chatId, text) {
     return;
   }
   // ... normal agent handling
+}
+```
+
+### Recipe 7: Loop + Browsing Tools
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createBrowsingTools } = require('bare-agent/tools');
+
+const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
+const browsing = await createBrowsingTools();
+if (!browsing) throw new Error('barebrowse not installed');
+
+const loop = new Loop({ provider });
+try {
+  const result = await loop.run(
+    [{ role: 'user', content: 'Go to example.com and tell me what you see' }],
+    browsing.tools
+  );
+  console.log(result.text);
+} finally {
+  await browsing.close(); // always close — releases browser resources
 }
 ```

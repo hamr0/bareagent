@@ -1,7 +1,7 @@
 # Knowledge Base
 
 ## Architecture
-3-layer design (orchestration/execution/actuation), 8 components + 3 providers + 2 stores, ~1017 lines total. Components are independent and composable.
+3-layer design (orchestration/execution/actuation), 8 components + 3 providers + 2 stores + 1 tool set, ~1017 lines total. Components are independent and composable. Optional browsing capability via `barebrowse` (dynamic import, graceful fallback).
 -> docs/architecture.md
 
 ## API Reference

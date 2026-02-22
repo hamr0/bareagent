@@ -4,7 +4,8 @@
   "files": [
     "index.js",
     "src/",
-    "bin/"
+    "bin/",
+    "tools/"
   ],
   "description": "Lightweight, composable agent orchestration. ~1700 lines, 0 required deps.",
   "license": "MIT",
@@ -21,7 +22,8 @@
     ".": "./index.js",
     "./providers": "./src/providers.js",
     "./stores": "./src/stores.js",
-    "./transports": "./src/transports.js"
+    "./transports": "./src/transports.js",
+    "./tools": "./src/tools.js"
   },
   "engines": {
     "node": ">=18"
@@ -36,6 +38,7 @@
     "lightweight"
   ],
   "optionalDependencies": {
+    "barebrowse": "^0.2.0",
     "cron-parser": "^4.9.0"
   },
   "peerDependencies": {

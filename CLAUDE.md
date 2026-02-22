@@ -17,10 +17,11 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | Retry | src/retry.js | Backoff wrapper with jitter for async functions |
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
 | Errors | src/errors.js | Typed error hierarchy (BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError) |
+| BrowsingTools | tools/browse.js | Optional web browsing via barebrowse (dynamic import, returns null if not installed) |
 
 Providers: OpenAI (src/provider-openai.js), Anthropic (src/provider-anthropic.js), Ollama (src/provider-ollama.js), CLIPipe (src/provider-clipipe.js), Fallback (src/provider-fallback.js)
 Stores: SQLiteStore (src/store-sqlite.js, peer dep: better-sqlite3), JsonFileStore (src/store-jsonfile.js, zero deps)
-Exports: `bare-agent` (components + error classes + CircuitBreaker), `bare-agent/providers` (+ Fallback), `bare-agent/stores`
+Exports: `bare-agent` (components + error classes + CircuitBreaker), `bare-agent/providers` (+ Fallback), `bare-agent/stores`, `bare-agent/tools`
 
 ## Commands
 
