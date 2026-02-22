@@ -1,40 +1,51 @@
 # bare-agent
 
-Lightweight, composable agent orchestration library. ~1700 lines, 0 required deps, MIT.
+Lightweight, composable agent orchestration library. ~1800 lines, 0 required deps, MIT.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
 
 ## Components
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle. Throws by default (throwOnError: true); pass throwOnError: false for result.error |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true by default) |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
+| runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
 | Scheduler | src/scheduler.js | Time-triggered turns (cron + relative) |
 | Checkpoint | src/checkpoint.js | Human-in-the-loop approval gate |
 | Memory | src/memory.js | Thin wrapper delegating to swappable store |
 | Stream | src/stream.js | Structured event emitter |
-| Retry | src/retry.js | Backoff wrapper with jitter for async functions |
+| Retry | src/retry.js | Backoff with jitter for async functions |
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
-| Errors | src/errors.js | Typed error hierarchy (BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError) |
-| BrowsingTools | tools/browse.js | Optional web browsing via barebrowse (dynamic import, returns null if not installed) |
+| JsonlTransport | src/transport-jsonl.js | JSONL output to writable stream (pipe-friendly) |
+| Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError |
 
-Providers: OpenAI (src/provider-openai.js), Anthropic (src/provider-anthropic.js), Ollama (src/provider-ollama.js), CLIPipe (src/provider-clipipe.js), Fallback (src/provider-fallback.js)
-Stores: SQLiteStore (src/store-sqlite.js, peer dep: better-sqlite3), JsonFileStore (src/store-jsonfile.js, zero deps)
-Exports: `bare-agent` (components + error classes + CircuitBreaker), `bare-agent/providers` (+ Fallback), `bare-agent/stores`, `bare-agent/tools`
+Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
+Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
+Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse)
+
+## Exports
+
+| Entry point | Contents |
+|-------------|----------|
+| `bare-agent` | Components + error classes + CircuitBreaker |
+| `bare-agent/providers` | All providers including Fallback |
+| `bare-agent/stores` | SQLite + JsonFile |
+| `bare-agent/transports` | JsonlTransport |
+| `bare-agent/tools` | createBrowsingTools |
 
 ## Commands
 
 ```bash
-npm test                                    # Unit tests (fast, no keys)
-node --test test/integration*.test.js       # Integration (needs API keys)
+npm test                                    # All tests (unit + integration + e2e)
+node --test test/integration*.test.js       # Integration only (needs API keys)
 node --test test/e2e.test.js                # E2E composition tests
 ```
 
 ## Key Patterns
 
-- Loop builds messages in OpenAI format internally; each provider normalizes
-- All provider.generate() returns `{ text, toolCalls, usage }`; all stores implement `store/search/get/delete`
+- Loop builds messages in OpenAI format; each provider normalizes to its own API
+- provider.generate() returns `{ text, toolCalls, usage }`; stores implement `store/search/get/delete`
 - Components are independent: Memory doesn't know Loop, Scheduler doesn't know Planner
 
 ## Dev Rules
