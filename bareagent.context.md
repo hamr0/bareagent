@@ -333,7 +333,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
-13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser. Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
+13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (13 tools: browse, goto, snapshot, click, type, press, scroll, select, screenshot, back, forward, drag, upload). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
 
 ## Cross-language SDKs
 
@@ -561,10 +561,14 @@ npx barebrowse close
 
 | Category | Commands |
 |---|---|
-| **Session** | `open <url>`, `close` |
-| **Navigation** | `snapshot`, `click <ref>`, `type <ref> <text>` |
-| **Debugging** | `screenshot` (full-page PNG) |
+| **Session** | `open <url> [flags]`, `close`, `status` |
+| **Navigation** | `goto <url>`, `back`, `forward`, `snapshot [--mode=act\|read]`, `screenshot`, `pdf` |
+| **Interaction** | `click <ref>`, `type <ref> <text>`, `fill <ref> <text>`, `press <key>`, `scroll <dy>`, `hover <ref>`, `select <ref> <value>`, `drag <from> <to>`, `upload <ref> <files..>` |
+| **Tabs** | `tabs`, `tab <index>` |
+| **Debugging** | `eval <expr>`, `wait-idle`, `wait-for --text=X --selector=Y`, `console-logs`, `network-log`, `dialog-log`, `save-state` |
 
-**Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click` and `type` commands.
+**Open flags:** `--mode=headless|headed|hybrid`, `--proxy=URL`, `--viewport=WxH`, `--storage-state=FILE`, `--no-cookies`, `--browser=firefox|chromium`, `--timeout=N`
+
+**Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click`, `type`, `drag`, `upload`, and other ref-based commands.
 
 **Key insight:** Don't read every snapshot. Take snapshots freely, but only read the `.yml` file at decision points where you need to choose what to click or verify page content.
