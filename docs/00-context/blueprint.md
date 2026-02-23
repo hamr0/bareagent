@@ -17,7 +17,8 @@ ORCHESTRATION          EXECUTION              ACTUATION
                          Retry ✅                 Browser automation
 
                                                Built-in (optional):
-                                                 barebrowse (web browsing)
+                                                 barebrowse (library tools)
+                                                 barebrowse (CLI session)
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅
@@ -449,6 +450,21 @@ All components implemented and validated end-to-end.
 | `src/scheduler.js` | 107 | ✅ implemented |
 | `tools/browse.js` | 17 | ✅ implemented |
 | `src/tools.js` | 5 | ✅ implemented |
+
+### Browsing Tools
+
+Two strategies for web browsing, both powered by `barebrowse` (optional dep):
+
+**Library tools** (`createBrowsingTools` via `bare-agent/tools`):
+- Returns tool objects (`navigate`, `click`, `type`, `snapshot`, `close`) compatible with Loop
+- Snapshots returned inline as tool results — simple but higher token cost for multi-step flows
+- Best for: single-page reads, simple interactions
+
+**CLI session** (`barebrowse` CLI — `npx barebrowse`):
+- Session-based commands: `open <url>`, `click <ref>`, `type <ref> <text>`, `snapshot`, `close`
+- Snapshots written to `.barebrowse/*.yml` on disk — agent reads only when needed
+- Lower token cost for multi-step flows (snapshots not in conversation context)
+- Best for: multi-page workflows, research tasks, token-constrained environments
 | **Implemented total** | **1039** | |
 | **Target was** | **~820** | over by ~200 lines (CLI arg parsing, scheduler re-entry guard, FTS triggers) |
 

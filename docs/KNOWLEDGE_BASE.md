@@ -20,9 +20,9 @@ Known bugs (API key formatting, Anthropic message normalization, CLI exit, sched
 Full project plan: component specs, data formats, usage profiles (minimal/medium/full), consumption modes (npm/subprocess/JSON-RPC), implementation phases.
 -> docs/01-product/prd.md
 
-## System State (Blueprint)
-Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC.
--> docs/00-context/system-state.md
+## Blueprint
+Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots).
+-> docs/00-context/blueprint.md
 
 ## Vision
 First-principles analysis of agent orchestration: what components exist, what a personal assistant actually needs, why frameworks are overcomplicated.

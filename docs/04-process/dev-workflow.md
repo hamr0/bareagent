@@ -37,4 +37,4 @@ Integration tests use env vars. Ollama runs via podman on this machine.
 1. Build throwaway POC validating the core idea
 2. POC passes -> design the real interface
 3. Build with tests (unit + integration)
-4. Update `docs/00-context/system-state.md` with what was built
+4. Update `docs/00-context/blueprint.md` with what was built

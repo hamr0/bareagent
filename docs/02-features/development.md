@@ -77,7 +77,7 @@ bare-agent/
 2. Cover happy path + 2-3 common edge cases
 3. POC passes -> design the real interface
 4. Build with tests (unit + integration)
-5. Update docs/00-context/system-state.md with what was built
+5. Update docs/00-context/blueprint.md with what was built
 6. Never ship the POC -- rewrite it
 
 ## Test Philosophy

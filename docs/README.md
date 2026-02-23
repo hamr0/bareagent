@@ -6,7 +6,7 @@
 docs/
 ├── 00-context/              WHY and WHAT EXISTS
 │   ├── vision.md            First-principles thinking behind the architecture
-│   └── system-state.md      What's built — interfaces, behaviors, exact specs
+│   └── blueprint.md          What's built — interfaces, behaviors, exact specs
 │
 ├── 01-product/              WHAT the product must do
 │   └── prd.md               Full project plan, component specs, POC strategy
@@ -30,7 +30,7 @@ docs/
 | I want to... | Read |
 |---|---|
 | Understand why bare-agent exists | [vision.md](00-context/vision.md) |
-| See what's built and how it works | [system-state.md](00-context/system-state.md) |
+| See what's built and how it works | [blueprint.md](00-context/blueprint.md) |
 | Read the full project plan | [prd.md](01-product/prd.md) |
 | Use bare-agent in my project | [usage-guide.md](02-features/usage-guide.md) |
 | Run the tests | [testing.md](04-process/testing.md) |

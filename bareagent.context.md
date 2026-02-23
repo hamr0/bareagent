@@ -42,7 +42,8 @@ Five entry points:
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError, MaxRoundsError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
-| Browse the web (navigate, click, type, read) | createBrowsingTools + Loop |
+| Browse the web (inline snapshots) | createBrowsingTools + Loop |
+| Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -332,7 +333,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
-13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser. Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed.
+13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser. Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
 
 ## Cross-language SDKs
 
@@ -521,3 +522,49 @@ try {
   await browsing.close(); // always close — releases browser resources
 }
 ```
+
+### Recipe 7b: CLI Browsing (token-efficient)
+
+Two browsing strategies — pick based on your use case:
+
+| | Library tools (Recipe 7) | CLI session (this recipe) |
+|---|---|---|
+| **How** | `createBrowsingTools()` → Loop tools | `npx barebrowse` CLI commands |
+| **Snapshots** | Inline in tool results (conversation context) | Written to `.barebrowse/*.yml` on disk |
+| **Token cost** | Higher — every snapshot in LLM context | Lower — agent reads files only at decision points |
+| **Best for** | Single-page reads, simple interactions | Multi-page workflows, research, token-constrained envs |
+
+**CLI workflow pattern:**
+
+```bash
+# Install: npm install barebrowse (CLI available via npx)
+
+# 1. Open a URL (starts session)
+npx barebrowse open https://example.com
+
+# 2. Take a snapshot → writes .barebrowse/<session>/<timestamp>.yml
+npx barebrowse snapshot
+
+# 3. Agent reads the .yml file, finds [ref=N] markers for interactive elements
+
+# 4. Click a link or button by ref number
+npx barebrowse click 5
+
+# 5. Snapshot again at the new page
+npx barebrowse snapshot
+
+# 6. Close session when done
+npx barebrowse close
+```
+
+**CLI command reference:**
+
+| Category | Commands |
+|---|---|
+| **Session** | `open <url>`, `close` |
+| **Navigation** | `snapshot`, `click <ref>`, `type <ref> <text>` |
+| **Debugging** | `screenshot` (full-page PNG) |
+
+**Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click` and `type` commands.
+
+**Key insight:** Don't read every snapshot. Take snapshots freely, but only read the `.yml` file at decision points where you need to choose what to click or verify page content.

@@ -2,6 +2,25 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.3.5] — 2026-02-23
+
+Docs-only release. No code changes.
+
+### Changed
+
+- **Renamed** `docs/00-context/system-state.md` → `docs/00-context/blueprint.md`.
+
+### Docs
+
+- `bareagent.context.md` — Browsing component table split into library tools vs CLI session rows; gotcha #13 expanded with CLI session advice; added Recipe 7b (CLI browsing strategy comparison, workflow, command reference).
+- `docs/00-context/blueprint.md` — System diagram shows both browsing modes; added "Browsing Tools" subsection documenting library vs CLI strategies.
+- `README.md` — Browsing table row and Tools description mention both library tools and CLI session mode.
+- `CLAUDE.md` — Tools line mentions both browsing strategies.
+- `docs/KNOWLEDGE_BASE.md` — Expanded blueprint entry with browsing strategy docs.
+- Updated all `system-state.md` references to `blueprint.md` across `docs/README.md`, `docs/02-features/development.md`, `docs/04-process/dev-workflow.md`, `CHANGELOG.md`.
+
+---
+
 ## [0.3.3] — 2026-02-21
 
 ### Added
@@ -12,7 +31,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 - `bareagent.context.md` — Added "Cross-language SDKs" section pointing to `contrib/`.
 - `docs/02-features/usage-guide.md` — Updated subprocess section to reference `contrib/` wrappers.
-- `docs/00-context/system-state.md` — Added cross-language wrappers to blueprint.
+- `docs/00-context/blueprint.md` — Added cross-language wrappers to blueprint.
 - `README.md` — Updated "Cross-language" bullet to mention `contrib/`.
 
 ---
