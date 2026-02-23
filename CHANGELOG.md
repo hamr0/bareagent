@@ -2,6 +2,16 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.3.6] — 2026-02-23
+
+Docs-only release. No code changes.
+
+### Docs
+
+- `bareagent.context.md` — Gotcha #13 updated with full barebrowse tool list (13 tools); Recipe 7b expanded with complete CLI command reference (session, navigation, interaction, tabs, debugging), open flags, and ref-based command details.
+
+---
+
 ## [0.3.5] — 2026-02-23
 
 Docs-only release. No code changes.
