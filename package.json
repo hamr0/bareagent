@@ -16,7 +16,7 @@
   },
   "main": "index.js",
   "bin": {
-    "bare-agent": "./bin/cli.js"
+    "bare-agent": "bin/cli.js"
   },
   "exports": {
     ".": "./index.js",
