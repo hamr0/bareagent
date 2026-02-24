@@ -1,13 +1,13 @@
 ```
-                                                    ╭─────────────────────────────────╮
-                                                    │  ╔╗ ╔═╗╦═╗╔═╗ ╔═╗╔═╗╔═╗╔╗╔╔╦╗   │
-                                                    │  ╠╩╗╠═╣╠╦╝╠╣  ╠═╣║ ╦╠╣ ║║║ ║    │
-                                                    │  ╚═╝╩ ╩╩╚═╚═╝ ╩ ╩╚═╝╚═╝╝╚╝ ╩    │
-                                                    │   think ──→ act ──→ observe     │
-                                                    │     ↑                  │        │
-                                                    │     └──────────────────┘        │
-                                                    ╰──╮──────────────────────────────╯
-                                                       ╰── the brain, without the bloat
+                         ╭─────────────────────────────────╮
+                         │  ╔╗ ╔═╗╦═╗╔═╗ ╔═╗╔═╗╔═╗╔╗╔╔╦╗   │
+                         │  ╠╩╗╠═╣╠╦╝╠╣  ╠═╣║ ╦╠╣ ║║║ ║    │
+                         │  ╚═╝╩ ╩╩╚═╚═╝ ╩ ╩╚═╝╚═╝╝╚╝ ╩    │
+                         │   think ──→ act ──→ observe     │
+                         │     ↑                  │        │
+                         │     └──────────────────┘        │
+                         ╰──╮──────────────────────────────╯
+                            ╰── the brain, without the bloat
 
 ```
 
@@ -134,6 +134,28 @@ All wrappers support optional event streaming for intermediate results. See [`co
 Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
 
 For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/02-features/usage-guide.md)**. For error reference, see **[Error Guide](docs/02-features/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
+
+## The bare ecosystem
+
+Three vanilla JS modules. Zero dependencies. Same API patterns.
+
+| | [**barebrowse**](https://npmjs.com/package/barebrowse) | [**baremobile**](https://npmjs.com/package/baremobile) | [**bareagent**](https://npmjs.com/package/bare-agent) |
+|---|---|---|---|
+| **Does** | Gives agents a real browser | Gives agents an Android device | Gives agents a think→act loop |
+| **How** | URL in → pruned snapshot out | Screen in → pruned snapshot out | Goal in → coordinated actions out |
+| **Replaces** | Playwright, Selenium, Puppeteer | Appium, Espresso, UIAutomator2 | LangChain, CrewAI, AutoGen |
+| **Interfaces** | Library · CLI · MCP | Library · CLI · MCP | Library · CLI · subprocess |
+| **Solo or together** | Works standalone | Works standalone | Orchestrates both as tools |
+
+**What you can build:**
+
+- **Headless automation** — scrape sites, fill forms, extract data, monitor pages on a schedule
+- **QA & testing** — automated test suites for web and Android apps without heavyweight frameworks
+- **Personal AI assistants** — chatbots that browse the web or control your phone on your behalf
+- **Remote device control** — manage Android devices over WiFi, including on-device via Termux
+- **Agentic workflows** — multi-step tasks where an AI plans, browses, and acts across web and mobile
+
+**Why this exists:** Most automation stacks ship 200MB of opinions before you write a line of code. These don't. Install, import, go.
 
 ## License
 
