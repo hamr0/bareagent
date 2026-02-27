@@ -1,6 +1,6 @@
 {
-  "name": "bare-agent",
-  "version": "0.3.6",
+  "name": "bareagent",
+  "version": "0.4.0",
   "files": [
     "index.js",
     "src/",
@@ -16,7 +16,7 @@
   },
   "main": "index.js",
   "bin": {
-    "bare-agent": "bin/cli.js"
+    "bareagent": "bin/cli.js"
   },
   "exports": {
     ".": "./index.js",
@@ -39,6 +39,7 @@
   ],
   "optionalDependencies": {
     "barebrowse": "^0.2.0",
+    "baremobile": "^0.7.0",
     "cron-parser": "^4.9.0"
   },
   "peerDependencies": {

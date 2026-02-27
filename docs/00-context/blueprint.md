@@ -1,4 +1,4 @@
-# bare-agent — Blueprint
+# bareagent — Blueprint
 
 > Single source of truth. Updated after each POC.
 
@@ -19,6 +19,9 @@ ORCHESTRATION          EXECUTION              ACTUATION
                                                Built-in (optional):
                                                  barebrowse (library tools)
                                                  barebrowse (CLI session)
+                                                 baremobile (library tools)
+                                                 baremobile (CLI session)
+                                                 baremobile (MCP server)
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅
@@ -322,7 +325,7 @@ Time-triggered agent turns. The only way the agent acts without being messaged.
 
 ### Cross-language SDK Wrappers (`contrib/`)
 
-Thin subprocess wrappers for non-Node.js consumers. Each spawns `npx bare-agent --jsonl` and communicates via JSONL stdin/stdout.
+Thin subprocess wrappers for non-Node.js consumers. Each spawns `npx bareagent --jsonl` and communicates via JSONL stdin/stdout.
 
 | Language | File | Deps | Lines |
 |----------|------|------|-------|
@@ -449,13 +452,36 @@ All components implemented and validated end-to-end.
 | `bin/cli.js` | 65 | ✅ implemented |
 | `src/scheduler.js` | 107 | ✅ implemented |
 | `tools/browse.js` | 17 | ✅ implemented |
-| `src/tools.js` | 5 | ✅ implemented |
+| `tools/mobile.js` | ~230 | ✅ implemented |
+| `src/tools.js` | 6 | ✅ implemented |
 
 ### Browsing Tools
 
-Two strategies for web browsing, both powered by `barebrowse` (optional dep):
+Two strategies for web browsing, both powered by `barebrowse` (optional dep).
+Two strategies for mobile control, both powered by `baremobile` (optional dep):
 
-**Library tools** (`createBrowsingTools` via `bare-agent/tools`):
+**Library tools** (`createMobileTools` via `bareagent/tools`):
+- Returns tool objects (`mobile_snapshot`, `mobile_tap`, `mobile_type`, `mobile_press`, `mobile_scroll`, `mobile_swipe`, `mobile_long_press`, `mobile_launch`, `mobile_back`, `mobile_home`, `mobile_screenshot`, `mobile_intent`, `mobile_tap_xy`, `mobile_tap_grid`, `mobile_grid`, `mobile_wait_text`, `mobile_wait_state`) compatible with Loop
+- Dual platform: Android (default) and iOS via `{ platform: 'ios' }` option
+- Action tools auto-return fresh snapshots — LLM always sees the result
+- 1s settle delay after actions for UI updates (2s for launch)
+- Android-only: `mobile_intent`, `mobile_tap_xy`, `mobile_tap_grid`, `mobile_grid`
+- iOS-only: `mobile_unlock`
+
+**CLI session** (`baremobile` CLI — `npx baremobile`):
+- Session-based commands: `open`, `snapshot`, `tap <ref>`, `type <ref> <text>`, `close`
+- Snapshots written to `.baremobile/screen-*.yml` on disk — agent reads only when needed
+- Lower token cost for multi-step flows
+- Best for: multi-step app testing, automation, token-constrained environments
+
+**Termux:API** (on-device Android APIs via `baremobile/src/termux-api.js`):
+- Direct device API access: SMS, calls, GPS, camera, clipboard, contacts, notifications
+- No screen control — complements Termux ADB for full autonomous phone agent
+- Requires Termux + Termux:API app from F-Droid
+
+Two strategies for web browsing:
+
+**Library tools** (`createBrowsingTools` via `bareagent/tools`):
 - Returns tool objects (`navigate`, `click`, `type`, `snapshot`, `close`) compatible with Loop
 - Snapshots returned inline as tool results — simple but higher token cost for multi-step flows
 - Best for: single-page reads, simple interactions

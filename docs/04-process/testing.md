@@ -1,4 +1,4 @@
-# bare-agent — Test Guide
+# bareagent — Test Guide
 
 > What's tested, how, and why. Updated after each POC.
 
@@ -451,6 +451,7 @@ Validates: plan → sort → state tracking → loop execution → persistence. 
 
 - OpenAI/Anthropic tests skip if their API key env var is not set
 - Ollama tests skip gracefully on `ECONNREFUSED` (Ollama not running)
+- Mobile tools tests (when added) require a connected Android device/emulator or iOS device via USB. `createMobileTools()` returns `null` if `baremobile` is not installed — tests should skip gracefully on `null`
 
 ---
 

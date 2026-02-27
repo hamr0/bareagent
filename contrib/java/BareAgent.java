@@ -2,7 +2,7 @@ import java.io.*;
 import java.util.*;
 
 /**
- * bare-agent Java wrapper -- subprocess + JSONL over stdin/stdout.
+ * bareagent Java wrapper -- subprocess + JSONL over stdin/stdout.
  * stdlib only: ProcessBuilder, simple JSON parsing (no javax.json needed).
  *
  * Usage:
@@ -25,7 +25,7 @@ public class BareAgent {
 
     public BareAgent(String provider, String model, String url) throws IOException {
         List<String> cmd = new ArrayList<>(Arrays.asList(
-            "npx", "bare-agent", "--jsonl", "--provider", provider
+            "npx", "bareagent", "--jsonl", "--provider", provider
         ));
         if (model != null) { cmd.add("--model"); cmd.add(model); }
         if (url != null) { cmd.add("--url"); cmd.add(url); }
@@ -128,7 +128,7 @@ public class BareAgent {
 
     public static void main(String[] args) throws Exception {
         BareAgent agent = new BareAgent("openai", "gpt-4o-mini", null);
-        System.out.println("Spawned bare-agent subprocess");
+        System.out.println("Spawned bareagent subprocess");
         agent.setOnEvent((type, raw) ->
             System.out.printf("[%s] %s%n", type, raw)
         );

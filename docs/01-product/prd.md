@@ -1,8 +1,8 @@
-# bare-agent — Project Plan
+# bareagent — Project Plan
 
 > Lightweight, composable agent orchestration library. ~1700 lines, 0 required deps, MIT license.
 > Use what you need, ignore the rest. Works as npm import or cross-language subprocess.
-> npm: `bare-agent@0.2.2` (maintainer: hamr0)
+> npm: `bareagent@0.2.2` (maintainer: hamr0)
 
 ---
 
@@ -12,7 +12,7 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 
 **Not a framework.** No middleware chains, no plugin systems, no lifecycle hooks, no decorator patterns. Just classes with methods you compose yourself.
 
-**The problem it solves:** There's no middle ground between writing 250 lines from scratch (everyone reinvents the wheel) and adopting a 50k-line framework (95% irrelevant). bare-agent is that middle ground.
+**The problem it solves:** There's no middle ground between writing 250 lines from scratch (everyone reinvents the wheel) and adopting a 50k-line framework (95% irrelevant). bareagent is that middle ground.
 
 ### Target users
 
@@ -33,7 +33,7 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  LAYER 1: ORCHESTRATION (provided by bare-agent)            │
+│  LAYER 1: ORCHESTRATION (provided by bareagent)            │
 │  "Who does what, in what order, what when things go wrong?" │
 │                                                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
@@ -41,7 +41,7 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 │  │  ~60 ln  │  │  ~40 ln  │  │  ~50 ln  │  │  ~60 ln  │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
 ├─────────────────────────────────────────────────────────────┤
-│  LAYER 2: EXECUTION (provided by bare-agent)                │
+│  LAYER 2: EXECUTION (provided by bareagent)                │
 │  "How does the agent think, remember, and persist?"         │
 │                                                              │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
@@ -64,13 +64,13 @@ A Node.js library that provides the complete agent orchestration stack as indepe
 │  - UI automation (ADB, DroidClaw, accessibility APIs)       │
 │                                                              │
 │  Your tools plug into the Loop as functions.                │
-│  bare-agent provides the brain. You provide the hands.      │
+│  bareagent provides the brain. You provide the hands.      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Why 10 components, not 12
 
-The original 12-component diagram included Tool Registry and Transport as separate components. In bare-agent:
+The original 12-component diagram included Tool Registry and Transport as separate components. In bareagent:
 - **Tool Registry** is absorbed into Loop — tools are just an array of `{ name, description, parameters, execute }` passed to `loop.run()`. No registry abstraction needed for <100 tools.
 - **Transport** is absorbed into Checkpoint and Stream — transport is how you send/receive messages (Telegram, CLI, WebSocket). It's a callback the user provides, not a component we build.
 
@@ -200,7 +200,7 @@ Built-in transports:
 
 **~60 lines** for core + JSONL. JSON-RPC transport adds ~80 lines.
 
-This is the cross-language bridge. A Python app spawns bare-agent as a subprocess, reads JSONL from stdout, sends commands via stdin.
+This is the cross-language bridge. A Python app spawns bareagent as a subprocess, reads JSONL from stdout, sends commands via stdin.
 
 ### 3.6 Scheduler (time triggers)
 
@@ -439,9 +439,9 @@ const loop = new Loop({ provider: myProvider });
 ### 5.1 npm import (Node.js / TypeScript)
 
 ```javascript
-const { Loop, Planner, Memory } = require('bare-agent');
-const { OpenAI } = require('bare-agent/providers');
-const { SQLite } = require('bare-agent/stores');
+const { Loop, Planner, Memory } = require('bareagent');
+const { OpenAI } = require('bareagent/providers');
+const { SQLite } = require('bareagent/stores');
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
@@ -455,15 +455,15 @@ const result = await loop.run([
 
 ### 5.2 Subprocess + JSONL (any language)
 
-Run bare-agent as a standalone process. Communicate via stdin/stdout JSONL.
+Run bareagent as a standalone process. Communicate via stdin/stdout JSONL.
 
 ```bash
 # Start the agent subprocess
-node bare-agent-server.js --provider openai --model gpt-4o-mini &
+node bareagent-server.js --provider openai --model gpt-4o-mini &
 
 # Send a goal (from any language)
 echo '{"method":"run","params":{"goal":"Search for flights to Berlin"}}' | \
-  bare-agent --jsonl
+  bareagent --jsonl
 
 # Read results line by line
 # Each line is a JSON event: tool calls, status updates, final result
@@ -474,7 +474,7 @@ From Python:
 import subprocess, json
 
 proc = subprocess.Popen(
-    ['node', 'bare-agent-server.js'],
+    ['node', 'bareagent-server.js'],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
 )
 
@@ -497,7 +497,7 @@ From Go, Rust, Java, Ruby — same pattern. Spawn process, write JSONL, read JSO
 For apps that want a persistent agent server:
 
 ```bash
-bare-agent serve --port 3100 --provider anthropic
+bareagent serve --port 3100 --provider anthropic
 ```
 
 ```
@@ -623,8 +623,8 @@ CREATE TABLE chunk_meta (
 ### Minimal: CLI chatbot (Loop only)
 
 ```javascript
-const { Loop } = require('bare-agent');
-const { OpenAI } = require('bare-agent/providers');
+const { Loop } = require('bareagent');
+const { OpenAI } = require('bareagent/providers');
 
 const loop = new Loop({ provider: new OpenAI({ apiKey: '...' }) });
 
@@ -640,9 +640,9 @@ process.stdin.on('data', async (input) => {
 ### Medium: Personal assistant with tools + memory
 
 ```javascript
-const { Loop, Memory, Checkpoint } = require('bare-agent');
-const { Anthropic } = require('bare-agent/providers');
-const { SQLite } = require('bare-agent/stores');
+const { Loop, Memory, Checkpoint } = require('bareagent');
+const { Anthropic } = require('bareagent/providers');
+const { SQLite } = require('bareagent/stores');
 
 const memory = new Memory({ store: new SQLite('./agent.db') });
 
@@ -672,9 +672,9 @@ const result = await loop.run([{ role: 'user', content: userMessage }], tools);
 
 ```javascript
 const { Loop, Planner, StateMachine, Scheduler,
-        Memory, Checkpoint, Stream, Retry } = require('bare-agent');
-const { Anthropic } = require('bare-agent/providers');
-const { SQLite } = require('bare-agent/stores');
+        Memory, Checkpoint, Stream, Retry } = require('bareagent');
+const { Anthropic } = require('bareagent/providers');
+const { SQLite } = require('bareagent/stores');
 
 const stream = new Stream({ transport: 'jsonl' });
 const state = new StateMachine({ file: './tasks.json' });
@@ -710,7 +710,7 @@ scheduler.start((job) => loop.run([{ role: 'user', content: job.action }], tools
 
 **Components used:** All 9 + provider + store. **Lines of user code:** ~40.
 
-### Cross-language: Python consuming bare-agent
+### Cross-language: Python consuming bareagent
 
 ```python
 import subprocess, json, os
@@ -718,7 +718,7 @@ import subprocess, json, os
 class MicroAgent:
     def __init__(self, provider='openai', model='gpt-4o-mini'):
         self.proc = subprocess.Popen(
-            ['npx', 'bare-agent', 'serve', '--jsonl',
+            ['npx', 'bareagent', 'serve', '--jsonl',
              '--provider', provider, '--model', model],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, env={**os.environ}
@@ -749,7 +749,7 @@ print(result['text'])
 ### Single package, optional peer deps
 
 ```
-bare-agent/
+bareagent/
   package.json
   index.js              — exports all components
   src/
@@ -778,7 +778,7 @@ bare-agent/
     jsonrpc.js          — ~80 lines (HTTP server)
     index.js            — exports all
   bin/
-    bare-agent.js       — CLI entry point for subprocess mode
+    bareagent.js       — CLI entry point for subprocess mode
   test/
     loop.test.js
     planner.test.js
@@ -789,7 +789,7 @@ bare-agent/
 
 ```json
 {
-  "name": "bare-agent",
+  "name": "bareagent",
   "version": "0.1.0",
   "license": "MIT",
   "dependencies": {},
@@ -832,7 +832,7 @@ Under 1000 lines for the complete stack including 3 LLM providers, 3 storage bac
 
 ---
 
-## 9. What bare-agent Does NOT Do
+## 9. What bareagent Does NOT Do
 
 To stay lightweight, these are explicitly out of scope:
 
@@ -856,7 +856,7 @@ To stay lightweight, these are explicitly out of scope:
 ### multis
 
 ```
-Current multis code          →  Replaced by bare-agent
+Current multis code          →  Replaced by bareagent
 ─────────────────────────────────────────────────────
 runAgentLoop() (handlers.js)  →  Loop
 resolveAgent() (handlers.js)  →  Router
@@ -866,12 +866,12 @@ Future checkpoints            →  Checkpoint
 definitions.js tools          →  Tool.define() sugar (same format)
 ```
 
-multis becomes: platform adapters (Telegram, Beeper) + tool implementations + config + bare-agent as the engine.
+multis becomes: platform adapters (Telegram, Beeper) + tool implementations + config + bareagent as the engine.
 
 ### Aurora
 
 ```
-Current Aurora code           →  Replaced by bare-agent
+Current Aurora code           →  Replaced by bareagent
 ─────────────────────────────────────────────────────
 Plan decomposition            →  Planner
 Task tracking                 →  StateMachine
@@ -959,14 +959,14 @@ Cross-language support and packaging.
 
 ```
 Deliver:
-  - bin/bare-agent.js (CLI entry)
+  - bin/bareagent.js (CLI entry)
   - transports/jsonrpc.js
   - router.js
   - README.md
   - package.json finalized
   - npm publish
 
-Milestone: `npx bare-agent serve --jsonl` works.
+Milestone: `npx bareagent serve --jsonl` works.
            Python/Go can consume via subprocess.
 ```
 
@@ -980,7 +980,7 @@ Milestone: `npx bare-agent serve --jsonl` works.
 2. **Zero required deps** — core must run on vanilla Node.js
 3. **Works in 10 lines** — minimal usage (Loop only) must be trivially simple
 4. **Works in 40 lines** — full usage (all components) must still be readable
-5. **multis can adopt it** — replace runAgentLoop + resolveAgent with bare-agent imports
+5. **multis can adopt it** — replace runAgentLoop + resolveAgent with bareagent imports
 6. **Aurora can adopt it** — replace plan decomposition + task tracking
 7. **Cross-language works** — Python subprocess consuming JSONL must be demonstrated
 8. **Every component works standalone** — Memory without Loop, Scheduler without Planner, etc.
@@ -989,7 +989,7 @@ Milestone: `npx bare-agent serve --jsonl` works.
 
 ## 13. npm Name — RESOLVED
 
-**`bare-agent@0.1.0`** — reserved on npm 2026-02-17 (maintainer: hamr0).
+**`bareagent@0.1.0`** — reserved on npm 2026-02-17 (maintainer: hamr0).
 
 Checked alternatives before reserving:
 
@@ -1001,7 +1001,7 @@ Checked alternatives before reserving:
 | `agentloop` | TAKEN | Real project, 18 deps — exactly the bloat we're replacing |
 | `micro-agent` | Available | Generic |
 | `agentic-core` | Available | Enterprise-sounding |
-| **`bare-agent`** | **RESERVED** | **Chosen — communicates the philosophy: bare metal, no bloat** |
+| **`bareagent`** | **RESERVED** | **Chosen — communicates the philosophy: bare metal, no bloat** |
 
 ---
 
@@ -1053,7 +1053,7 @@ The `chat()` method is ~15 lines on top of `run()`. Big adoption win for the sim
 
 **5. Logging.** Stream handles structured events, but what about debug logging? When something goes wrong, users need to see what the agent is doing.
 
-**Fix:** No logging library. Components accept an optional `debug: true` flag that writes to stderr (not stdout — stdout is for JSONL). `NODE_DEBUG=bare-agent` also works via built-in `util.debuglog`.
+**Fix:** No logging library. Components accept an optional `debug: true` flag that writes to stderr (not stdout — stdout is for JSONL). `NODE_DEBUG=bareagent` also works via built-in `util.debuglog`.
 
 ### Simplification opportunities
 
@@ -1066,7 +1066,7 @@ The `chat()` method is ~15 lines on top of `run()`. Big adoption win for the sim
 **Decision:** Flatten. All source files in `src/`. Providers are `src/provider-openai.js`, stores are `src/store-sqlite.js`. One directory, obvious naming.
 
 ```
-bare-agent/
+bareagent/
   package.json
   index.js
   src/
@@ -1344,7 +1344,7 @@ scheduler.start(async (job) => {
 
 ### POC 7: Full integration — multis migration (~3 hours)
 
-**Goal:** Replace multis `runAgentLoop()` with bare-agent Loop. Prove it works as a drop-in engine.
+**Goal:** Replace multis `runAgentLoop()` with bareagent Loop. Prove it works as a drop-in engine.
 
 **Build:**
 - Import `Loop` and `provider-anthropic` into multis
@@ -1353,17 +1353,17 @@ scheduler.start(async (job) => {
 
 **Test script:**
 - Send a message to multis via Telegram
-- Bot responds using bare-agent Loop instead of built-in loop
+- Bot responds using bareagent Loop instead of built-in loop
 - Tool calls work (exec, read_file, search_docs)
 - Memory still works (recent.json, capture)
 
 **Validates:**
-- bare-agent is actually usable as a library (not just in isolation)
+- bareagent is actually usable as a library (not just in isolation)
 - Provider interface handles real-world tool schemas
 - No regression in multis behavior
 
 **Success criteria:**
-- All existing multis tests pass with bare-agent Loop swapped in
+- All existing multis tests pass with bareagent Loop swapped in
 - Response quality is identical (same tools, same prompts)
 - No performance regression (latency within 10%)
 
@@ -1395,7 +1395,7 @@ scheduler.start(async (job) => {
 
 | Decision | Resolution | Rationale |
 |----------|-----------|-----------|
-| **Name** | `bare-agent` | Reserved on npm 2026-02-17. Communicates the philosophy — bare metal, no bloat. |
+| **Name** | `bareagent` | Reserved on npm 2026-02-17. Communicates the philosophy — bare metal, no bloat. |
 | **Repo** | Standalone GitHub repo | Separate project, own consumers, own versioning |
 | **TypeScript?** | Pure JS + JSDoc + `types.d.ts` | Zero build step, still get IDE support |
 | **Node.js version** | >= 18 | Wider compatibility, matches multis |

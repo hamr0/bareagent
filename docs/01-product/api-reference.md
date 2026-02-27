@@ -3,7 +3,7 @@
 ## Loop
 
 ```javascript
-const { Loop } = require('bare-agent');
+const { Loop } = require('bareagent');
 ```
 
 ### Constructor
@@ -61,7 +61,7 @@ Sets `_stopped` flag. Checked each iteration.
 ## Retry
 
 ```javascript
-const { Retry } = require('bare-agent');
+const { Retry } = require('bareagent');
 
 new Retry({
   maxAttempts: 3,
@@ -82,7 +82,7 @@ Wraps `fn()` with retry logic. Throws after exhaustion.
 ## Planner
 
 ```javascript
-const { Planner } = require('bare-agent');
+const { Planner } = require('bareagent');
 
 new Planner({
   provider,        // Required. Same interface as Loop's provider
@@ -102,7 +102,7 @@ new Planner({
 ## StateMachine
 
 ```javascript
-const { StateMachine } = require('bare-agent');
+const { StateMachine } = require('bareagent');
 
 new StateMachine({
   file: './tasks.json',  // Optional. null = in-memory only
@@ -128,7 +128,7 @@ Callback receives: `{ taskId, from, to, event, data }`
 ## Checkpoint
 
 ```javascript
-const { Checkpoint } = require('bare-agent');
+const { Checkpoint } = require('bareagent');
 
 new Checkpoint({
   tools: ['send_email', 'purchase'],  // Tool names requiring approval
@@ -149,7 +149,7 @@ new Checkpoint({
 ## Memory
 
 ```javascript
-const { Memory } = require('bare-agent');
+const { Memory } = require('bareagent');
 
 new Memory({
   store,  // Required. Object implementing store/search/get/delete
@@ -170,7 +170,7 @@ Options for search: `{ limit: 10 }`
 ## Scheduler
 
 ```javascript
-const { Scheduler } = require('bare-agent');
+const { Scheduler } = require('bareagent');
 
 new Scheduler({
   file: './jobs.json',  // Optional persistence
@@ -194,7 +194,7 @@ Job: `{ type: 'once'|'recurring', schedule: '2h'|'0 7 * * 1-5', action: string }
 ## Stream
 
 ```javascript
-const { Stream } = require('bare-agent');
+const { Stream } = require('bareagent');
 
 new Stream({
   transport: null,  // Object with write(event), e.g. JsonlTransport
@@ -215,21 +215,21 @@ All implement: `generate(messages, tools, options) -> { text, toolCalls, usage }
 ### OpenAI
 
 ```javascript
-const { OpenAI } = require('bare-agent/providers');
+const { OpenAI } = require('bareagent/providers');
 new OpenAI({ apiKey, model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' })
 ```
 
 ### Anthropic
 
 ```javascript
-const { Anthropic } = require('bare-agent/providers');
+const { Anthropic } = require('bareagent/providers');
 new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
 ```
 
 ### Ollama
 
 ```javascript
-const { Ollama } = require('bare-agent/providers');
+const { Ollama } = require('bareagent/providers');
 new Ollama({ model: 'llama3.2', url: 'http://localhost:11434' })
 ```
 
@@ -252,7 +252,7 @@ All implement: `store(content, metadata)`, `search(query, options)`, `get(id)`, 
 ### SQLiteStore
 
 ```javascript
-const { SQLite } = require('bare-agent/stores');
+const { SQLite } = require('bareagent/stores');
 new SQLite({ path: './agent.db' })
 ```
 
@@ -261,7 +261,7 @@ Peer dep: `better-sqlite3`. FTS5 + BM25 ranking. Porter stemmer. `close()` for s
 ### JsonFileStore
 
 ```javascript
-const { JsonFile } = require('bare-agent/stores');
+const { JsonFile } = require('bareagent/stores');
 new JsonFile({ path: './memory.json' })
 ```
 

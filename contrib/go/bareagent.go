@@ -1,4 +1,4 @@
-// Package bareagent provides a thin subprocess wrapper for bare-agent.
+// Package bareagent provides a thin subprocess wrapper for bareagent.
 // Communicates via JSONL over stdin/stdout. Zero external dependencies.
 package bareagent
 
@@ -25,7 +25,7 @@ type Event struct {
 	Ts   string         `json:"ts"`
 }
 
-// BareAgent wraps a bare-agent subprocess.
+// BareAgent wraps a bareagent subprocess.
 type BareAgent struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
@@ -33,9 +33,9 @@ type BareAgent struct {
 	OnEvent func(Event)
 }
 
-// New spawns a bare-agent subprocess with the given provider and options.
+// New spawns a bareagent subprocess with the given provider and options.
 func New(provider, model, url string) (*BareAgent, error) {
-	args := []string{"bare-agent", "--jsonl", "--provider", provider}
+	args := []string{"bareagent", "--jsonl", "--provider", provider}
 	if model != "" {
 		args = append(args, "--model", model)
 	}

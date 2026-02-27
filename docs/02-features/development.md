@@ -42,7 +42,7 @@ Integration tests skip gracefully when API keys are missing or Ollama is not run
 ## Project Structure
 
 ```
-bare-agent/
+bareagent/
   package.json         0 required deps, cron-parser optional, better-sqlite3 peer
   index.js             Main exports
   src/

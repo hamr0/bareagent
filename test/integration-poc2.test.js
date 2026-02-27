@@ -109,7 +109,7 @@ describe('Planner + Anthropic integration', { skip: !ANTHROPIC_API_KEY && 'ANTHR
 // ─── Planner + State + Loop ──────────────────────────────
 
 describe('Planner + StateMachine + Loop integration', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not set' }, () => {
-  const stateFile = '/tmp/bare-agent-poc2-state.json';
+  const stateFile = '/tmp/bareagent-poc2-state.json';
 
   afterEach(() => {
     try { unlinkSync(stateFile); } catch {}

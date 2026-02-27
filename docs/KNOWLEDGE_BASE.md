@@ -1,7 +1,7 @@
 # Knowledge Base
 
 ## Architecture
-3-layer design (orchestration/execution/actuation), 8 components + 3 providers + 2 stores + 1 tool set, ~1017 lines total. Components are independent and composable. Optional browsing capability via `barebrowse` (dynamic import, graceful fallback).
+3-layer design (orchestration/execution/actuation), 8 components + 3 providers + 2 stores + 2 tool sets, ~1017 lines total. Components are independent and composable. Optional browsing capability via `barebrowse` and mobile device control via `baremobile` (both dynamic import, graceful fallback).
 -> docs/architecture.md
 
 ## API Reference
@@ -21,7 +21,7 @@ Full project plan: component specs, data formats, usage profiles (minimal/medium
 -> docs/01-product/prd.md
 
 ## Blueprint
-Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots).
+Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI) and mobile strategy docs (library tools via `createMobileTools` for Android/iOS, CLI session via `baremobile`, Termux:API for on-device APIs).
 -> docs/00-context/blueprint.md
 
 ## Vision

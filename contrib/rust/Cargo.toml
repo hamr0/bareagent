@@ -2,7 +2,7 @@
 name = "bareagent"
 version = "0.1.0"
 edition = "2021"
-description = "Thin subprocess wrapper for bare-agent"
+description = "Thin subprocess wrapper for bareagent"
 license = "MIT"
 
 [dependencies]

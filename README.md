@@ -18,13 +18,13 @@ Lightweight enough to understand completely. Complete enough to not reinvent whe
 ## Quick start
 
 ```bash
-npm install bare-agent
+npm install bareagent
 ```
 
 **1. Give your AI assistant the integration guide**
 
 ```
-Read bareagent.context.md from node_modules/bare-agent/bareagent.context.md
+Read bareagent.context.md from node_modules/bareagent/bareagent.context.md
 ```
 
 This single file contains component selection, wiring recipes, API signatures, and gotchas — everything an agent needs to use the library correctly.
@@ -38,7 +38,7 @@ I need an agent that:
 - Retries failed steps twice
 - Streams progress as JSONL events
 
-Use bare-agent. The integration guide is in bareagent.context.md.
+Use bareagent. The integration guide is in bareagent.context.md.
 ```
 
 That's it. The context doc is structured for LLM consumption — your agent reads it once and knows how to wire every component.
@@ -46,8 +46,8 @@ That's it. The context doc is structured for LLM consumption — your agent read
 **Not sure what you need?** Paste this into any AI assistant:
 
 ```
-I want to build an agent using bare-agent. Read the integration guide at
-node_modules/bare-agent/bareagent.context.md, then ask me up to 5 questions
+I want to build an agent using bareagent. Read the integration guide at
+node_modules/bareagent/bareagent.context.md, then ask me up to 5 questions
 about what I need. Based on my answers, tell me which components to use
 and show me the wiring code.
 ```
@@ -73,20 +73,21 @@ Every piece works alone — take what you need, ignore the rest.
 | **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
 | **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `CircuitOpenError` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse`. Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows) |
+| **Mobile** | Android + iOS device control via `baremobile`. Same pattern: library tools (inline snapshots) or CLI session (disk-based). Dual platform, Termux on-device mode, Termux:API for SMS/calls/GPS/camera |
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely.
 
-**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing (optional) — library tools for inline results or CLI session mode for token-efficient disk-based snapshots.
+**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing, `baremobile` for mobile device control (both optional) — library tools for inline results or CLI session mode for token-efficient disk-based snapshots.
 
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing).
+**Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (mobile device control).
 
 ---
 
 ## Cross-language usage
 
-Not using Node.js? Spawn bare-agent as a subprocess from any language. Ready-made wrappers in [`contrib/`](contrib/README.md) for Python, Go, Rust, Ruby, and Java — copy one file, no package registry needed.
+Not using Node.js? Spawn bareagent as a subprocess from any language. Ready-made wrappers in [`contrib/`](contrib/README.md) for Python, Go, Rust, Ruby, and Java — copy one file, no package registry needed.
 
 ```python
 # Python — 3 lines to run an agent
@@ -131,18 +132,19 @@ All wrappers support optional event streaming for intermediate results. See [`co
 | Checkpoint | — | ✓ |
 | CLIPipe | ✓ | — |
 
-Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
+Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bareagent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
 
-For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/02-features/usage-guide.md)**. For error reference, see **[Error Guide](docs/02-features/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
+For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bareagent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/02-features/usage-guide.md)**. For error reference, see **[Error Guide](docs/02-features/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
 
 ## The bare ecosystem
 
 Three vanilla JS modules. Zero dependencies. Same API patterns.
 
-| | [**bareagent**](https://npmjs.com/package/bare-agent) | [**barebrowse**](https://npmjs.com/package/barebrowse) | [**baremobile**](https://npmjs.com/package/baremobile) |
+| | [**bareagent**](https://npmjs.com/package/bareagent) | [**barebrowse**](https://npmjs.com/package/barebrowse) | [**baremobile**](https://npmjs.com/package/baremobile) |
 |---|---|---|---|
-| **Does** | Gives agents a think→act loop | Gives agents a real browser | Gives agents an Android device |
+| **Does** | Gives agents a think→act loop | Gives agents a real browser | Gives agents a mobile device |
 | **How** | Goal in → coordinated actions out | URL in → pruned snapshot out | Screen in → pruned snapshot out |
+| **Platforms** | Any (Node.js ≥ 18) | Any browser (Chromium/Firefox) | Android + iOS (WDA) |
 | **Replaces** | LangChain, CrewAI, AutoGen | Playwright, Selenium, Puppeteer | Appium, Espresso, UIAutomator2 |
 | **Interfaces** | Library · CLI · subprocess | Library · CLI · MCP | Library · CLI · MCP |
 | **Solo or together** | Orchestrates both as tools | Works standalone | Works standalone |
@@ -150,9 +152,9 @@ Three vanilla JS modules. Zero dependencies. Same API patterns.
 **What you can build:**
 
 - **Headless automation** — scrape sites, fill forms, extract data, monitor pages on a schedule
-- **QA & testing** — automated test suites for web and Android apps without heavyweight frameworks
+- **QA & testing** — automated test suites for web and mobile apps (Android + iOS) without heavyweight frameworks
 - **Personal AI assistants** — chatbots that browse the web or control your phone on your behalf
-- **Remote device control** — manage Android devices over WiFi, including on-device via Termux
+- **Remote device control** — manage Android devices over WiFi, on-device via Termux, or iOS via USB
 - **Agentic workflows** — multi-step tasks where an AI plans, browses, and acts across web and mobile
 
 **Why this exists:** Most automation stacks ship 200MB of opinions before you write a line of code. These don't. Install, import, go.

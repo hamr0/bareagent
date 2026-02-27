@@ -1,6 +1,17 @@
 # Changelog
 
-All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
+All notable changes to bareagent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
+
+## [0.4.0] — 2026-02-27
+
+**BREAKING:** npm package renamed from `bare-agent` to `bareagent`. Aligns with bare ecosystem naming (`barebrowse`, `baremobile`).
+
+### Changed
+
+- **Package name** — `bare-agent` → `bareagent` everywhere: package.json, bin, require/import paths, CLI (`npx bareagent`), docs, contrib wrappers.
+- Update with `npm install bareagent@latest`. Old `require('bare-agent/...')` paths must change to `require('bareagent/...')`.
+
+---
 
 ## [0.3.6] — 2026-02-23
 
@@ -35,7 +46,7 @@ Docs-only release. No code changes.
 
 ### Added
 
-- **Cross-language SDK wrappers** (`contrib/`) — Tested, importable subprocess wrappers for Python, Go, Rust, Ruby, and Java. Each spawns `npx bare-agent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API across all 5 languages: constructor → `run(goal)` → `close()`. stdlib only where possible (Rust needs `serde_json`). See `contrib/README.md`.
+- **Cross-language SDK wrappers** (`contrib/`) — Tested, importable subprocess wrappers for Python, Go, Rust, Ruby, and Java. Each spawns `npx bareagent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API across all 5 languages: constructor → `run(goal)` → `close()`. stdlib only where possible (Rust needs `serde_json`). See `contrib/README.md`.
 
 ### Docs
 
@@ -80,7 +91,7 @@ Docs and integration improvements from multis eval. No code changes.
 ### Changed
 
 - Loop.run() throws by default on provider errors and maxRounds (was: silently returned `{ error }`).
-- `bare-agent` main export now includes `MaxRoundsError`.
+- `bareagent` main export now includes `MaxRoundsError`.
 
 ### Tests
 
@@ -107,8 +118,8 @@ Multi-agent resilience: typed errors, circuit breaker, fallback provider, jitter
 - All providers now throw `ProviderError` instead of plain `Error` on HTTP failures. Backward compatible (`instanceof Error` still works, `.status`/`.body` still accessible).
 - Loop wraps tool execution errors in `ToolError`.
 - Retry timeout throws `TimeoutError` instead of plain `Error`.
-- `bare-agent` main export now includes `CircuitBreaker` and all error classes.
-- `bare-agent/providers` now includes `Fallback`.
+- `bareagent` main export now includes `CircuitBreaker` and all error classes.
+- `bareagent/providers` now includes `Fallback`.
 
 ### Tests
 
@@ -133,7 +144,7 @@ Feedback fixes from Aurora's SOAR2 pipeline integration.
 
 - **CLIPipeProvider `systemPromptFlag`** — New constructor option to separate system messages from stdin and pass them as a CLI flag (e.g. `--system`). Fixes structured output breaking when `_formatPrompt()` flattens system messages into plaintext.
 - **`runPlan` `onWaveStart` callback** — `onWaveStart(waveNumber, steps)` fires before each wave executes, enabling consumer-side wave progress display (e.g. `[Wave 1: s1, s2]`).
-- **`bare-agent/transports` export** — New entry point exporting `{ JsonlTransport }`. Fixes `ERR_PACKAGE_PATH_NOT_EXPORTED` when importing JsonlTransport directly.
+- **`bareagent/transports` export** — New entry point exporting `{ JsonlTransport }`. Fixes `ERR_PACKAGE_PATH_NOT_EXPORTED` when importing JsonlTransport directly.
 
 ### Changed
 
@@ -167,8 +178,8 @@ Three new features filling gaps identified in the aurora evaluation.
 ### Changed
 
 - `Loop` constructor accepts optional `store` for `validate()` health check.
-- `CLIPipe` added to `bare-agent/providers` exports.
-- `runPlan` added to `bare-agent` main exports.
+- `CLIPipe` added to `bareagent/providers` exports.
+- `runPlan` added to `bareagent` main exports.
 
 ### Tests
 

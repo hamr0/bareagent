@@ -138,7 +138,7 @@ Full changelog from v0.1.0 through v0.3.2. Every version has Added/Changed/Fixed
 
 ### 4.2 Git tags + npm publish ✓
 
-Published on npm as `bare-agent`. Versions: 0.1.0, 0.1.1, 0.2.0, 0.2.1, 0.2.2, 0.3.0, 0.3.1, 0.3.2. Git tags pending push.
+Published on npm as `bareagent`. Versions: 0.1.0, 0.1.1, 0.2.0, 0.2.1, 0.2.2, 0.3.0, 0.3.1, 0.3.2. Git tags pending push.
 
 ### 4.3 Compatibility matrix ✓
 

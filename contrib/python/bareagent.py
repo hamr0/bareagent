@@ -1,4 +1,4 @@
-"""bare-agent Python wrapper — subprocess + JSONL over stdin/stdout."""
+"""bareagent Python wrapper — subprocess + JSONL over stdin/stdout."""
 
 import json
 import os
@@ -6,10 +6,10 @@ import subprocess
 
 
 class BareAgent:
-    """Thin wrapper that spawns bare-agent as a subprocess."""
+    """Thin wrapper that spawns bareagent as a subprocess."""
 
     def __init__(self, provider="openai", model=None, url=None):
-        cmd = ["npx", "bare-agent", "--jsonl", "--provider", provider]
+        cmd = ["npx", "bareagent", "--jsonl", "--provider", provider]
         if model:
             cmd += ["--model", model]
         if url:
@@ -61,7 +61,7 @@ class BareAgent:
 
 if __name__ == "__main__":
     agent = BareAgent(provider="openai", model="gpt-4o-mini")
-    print("Spawned bare-agent subprocess")
+    print("Spawned bareagent subprocess")
     result = agent.run("What is 2 + 2?")
     if result:
         print(f"Result: {result.get('text', result)}")

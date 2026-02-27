@@ -1,4 +1,4 @@
-# bare-agent
+# bareagent
 
 Lightweight, composable agent orchestration library. ~1800 lines, 0 required deps, MIT.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
@@ -23,16 +23,17 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
 Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse) — library tools for inline snapshots, CLI session (`npx barebrowse`) for token-efficient disk-based browsing
+Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS device control, library tools for inline snapshots, CLI session (`npx baremobile`) for disk-based snapshots, Termux:API for on-device Android APIs
 
 ## Exports
 
 | Entry point | Contents |
 |-------------|----------|
-| `bare-agent` | Components + error classes + CircuitBreaker |
-| `bare-agent/providers` | All providers including Fallback |
-| `bare-agent/stores` | SQLite + JsonFile |
-| `bare-agent/transports` | JsonlTransport |
-| `bare-agent/tools` | createBrowsingTools |
+| `bareagent` | Components + error classes + CircuitBreaker |
+| `bareagent/providers` | All providers including Fallback |
+| `bareagent/stores` | SQLite + JsonFile |
+| `bareagent/transports` | JsonlTransport |
+| `bareagent/tools` | createBrowsingTools, createMobileTools |
 
 ## Commands
 
