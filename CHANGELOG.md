@@ -11,6 +11,10 @@ All notable changes to bareagent are documented here. Format: [Keep a Changelog]
 - **Package name** — `bare-agent` → `bareagent` everywhere: package.json, bin, require/import paths, CLI (`npx bareagent`), docs, contrib wrappers.
 - Update with `npm install bareagent@latest`. Old `require('bare-agent/...')` paths must change to `require('bareagent/...')`.
 
+### Added
+
+- **MobileTools** (`tools/mobile.js`) — 17 tools for Android + iOS device control via baremobile. Snapshot/tap/type/scroll/swipe/launch/press/back/home/screenshot + Android-only intent/tapXY/tapGrid/grid + iOS-only unlock + cross-platform waitForText/waitForState. Dual platform via `platform` option. Auto-snapshot after actions. Exported via `bareagent/tools`.
+
 ---
 
 ## [0.3.6] — 2026-02-23
