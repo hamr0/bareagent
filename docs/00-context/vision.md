@@ -165,7 +165,7 @@ RELIABILITY
     │     When there's no API, only a web UI.
     │     Fragile — breaks when website changes.
     │
-    │  5. UI automation (baremobile/ADB/WDA/macOS accessibility)
+    │  5. UI automation (ADB/DroidClaw/macOS accessibility)
     │     Tap phone screens, click desktop apps.
     │     When there's no API, no CLI, no web version.
     │     Most fragile — breaks on any UI update.

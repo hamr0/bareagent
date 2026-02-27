@@ -1,13 +1,13 @@
 # Cross-language SDK Wrappers
 
-Thin subprocess wrappers for using bareagent from Python, Go, Rust, Ruby, and Java. Each spawns `npx bareagent --jsonl` and communicates via JSONL over stdin/stdout.
+Thin subprocess wrappers for using bare-agent from Python, Go, Rust, Ruby, and Java. Each spawns `npx bare-agent --jsonl` and communicates via JSONL over stdin/stdout.
 
-**No package registry publishing** — copy the file into your project or reference it from `node_modules/bareagent/contrib/`.
+**No package registry publishing** — copy the file into your project or reference it from `node_modules/bare-agent/contrib/`.
 
 ## Prerequisites
 
 - Node.js >= 18 installed
-- `npm install bareagent` (or `npx` will fetch it)
+- `npm install bare-agent` (or `npx` will fetch it)
 - API key in environment: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or Ollama running locally
 
 ## Protocol
@@ -148,7 +148,7 @@ All wrappers share the same interface pattern:
 
 | Method | Description |
 |--------|-------------|
-| Constructor | `BareAgent(provider, model, opts)` — spawns `npx bareagent --jsonl` |
+| Constructor | `BareAgent(provider, model, opts)` — spawns `npx bare-agent --jsonl` |
 | `run(goal)` | Send goal string, block until result. Returns `{text, usage, error}` |
 | `run(messages)` | Send messages array (Python, Ruby) or separate method (Go, Rust) |
 | `on_event(cb)` | Optional callback for intermediate JSONL events |

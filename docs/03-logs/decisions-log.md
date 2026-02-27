@@ -4,9 +4,9 @@ Significant design decisions and their rationale.
 
 ---
 
-## 2026-02-17: Package name — `bareagent`
+## 2026-02-17: Package name — `bare-agent`
 
-Checked alternatives (`microagent`, `agent-core`, `agentloop` — all taken or bloated). `bareagent` communicates the philosophy: bare metal, no bloat. Reserved on npm as `bareagent@0.1.0`.
+Checked alternatives (`microagent`, `agent-core`, `agentloop` — all taken or bloated). `bare-agent` communicates the philosophy: bare metal, no bloat. Reserved on npm as `bare-agent@0.1.0`.
 
 ## 2026-02-17: Cut Router and Tool.define from v0.1
 

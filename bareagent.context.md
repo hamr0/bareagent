@@ -10,15 +10,15 @@
 bareagent is a lightweight agent orchestration library (~1700 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, and provider fallback. All components are independent — use one, use all, or bring your own.
 
 ```
-npm install bareagent
+npm install bare-agent
 ```
 
 Five entry points:
-- `require('bareagent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError
-- `require('bareagent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
-- `require('bareagent/stores')` — SQLite (FTS5), JsonFile
-- `require('bareagent/transports')` — JsonlTransport
-- `require('bareagent/tools')` — createBrowsingTools, createMobileTools
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError
+- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
+- `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
+- `require('bare-agent/transports')` — JsonlTransport
+- `require('bare-agent/tools')` — createBrowsingTools
 
 ## Which components do I need?
 
@@ -44,17 +44,14 @@ Five entry points:
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
-| Control a mobile device (Android/iOS) | createMobileTools + Loop |
-| Control a mobile device (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
-| Use on-device Android APIs (SMS, calls, GPS, camera) | Termux:API via `baremobile/src/termux-api.js` |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
 ## Minimal wiring: Loop + Provider + Tool
 
 ```javascript
-const { Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
 
 const provider = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -97,9 +94,9 @@ const result = await loop.validate(tools);
 ## Wiring with Memory
 
 ```javascript
-const { Loop, Memory } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
-const { SQLite } = require('bareagent/stores');
+const { Loop, Memory } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { SQLite } = require('bare-agent/stores');
 
 const store = new SQLite({ path: './agent-memory.db' });
 const memory = new Memory({ store });
@@ -120,7 +117,7 @@ const loop = new Loop({
 ## Wiring with Checkpoint (human approval)
 
 ```javascript
-const { Loop, Checkpoint } = require('bareagent');
+const { Loop, Checkpoint } = require('bare-agent');
 
 const checkpoint = new Checkpoint({
   tools: ['send_email', 'purchase'],  // these tools require approval
@@ -137,7 +134,7 @@ const loop = new Loop({ provider, checkpoint });
 ## Wiring with Scheduler
 
 ```javascript
-const { Scheduler } = require('bareagent');
+const { Scheduler } = require('bare-agent');
 
 const scheduler = new Scheduler({
   file: './jobs.json',   // persist across restarts
@@ -164,7 +161,7 @@ scheduler.start(async (job) => {
 ## Wiring with Planner + StateMachine
 
 ```javascript
-const { Planner, StateMachine, Loop } = require('bareagent');
+const { Planner, StateMachine, Loop } = require('bare-agent');
 
 const planner = new Planner({ provider });
 const state = new StateMachine({ file: './tasks.json' });
@@ -190,7 +187,7 @@ for (const step of steps) {
 ## Wiring with runPlan (parallel execution)
 
 ```javascript
-const { Planner, runPlan, StateMachine } = require('bareagent');
+const { Planner, runPlan, StateMachine } = require('bare-agent');
 
 const planner = new Planner({ provider });
 const steps = await planner.plan('Book a trip to Berlin');
@@ -289,7 +286,7 @@ All error classes extend `Error` — `instanceof Error` always works. The `retry
 
 ## Patterns, not features
 
-These are deliberately NOT in bareagent. Don't look for them — build them from existing primitives.
+These are deliberately NOT in bare-agent. Don't look for them — build them from existing primitives.
 
 | Pattern | Not built in because | How to do it |
 |---|---|---|
@@ -335,15 +332,12 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
-12. **JsonlTransport must be imported from `bareagent/transports`** — Not from `bareagent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
 13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (13 tools: browse, goto, snapshot, click, type, press, scroll, select, screenshot, back, forward, drag, upload). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
-14. **Mobile tools require `close()`** — `createMobileTools()` connects to an Android/iOS device (15+ tools: snapshot, tap, type, press, scroll, swipe, long_press, launch, back, home, screenshot, intent, tap_xy, tap_grid, grid + wait tools). Always call `close()` in a `finally` block. Returns `null` if `baremobile` is not installed. Refs reset every snapshot — never cache them. UI needs 500ms-2s settle after actions; `mobile_launch` auto-waits 2s.
-15. **Mobile snapshots are slow** — uiautomator dump takes 1-5s. Don't snapshot in a tight loop. Use `mobile_wait_text` or `mobile_wait_state` instead of repeated snapshot + check.
-16. **iOS mobile tools are QA-only** — USB required on Linux, WDA cert expires every 7 days (re-sign with `baremobile ios resign`). No intents, no grid/tapGrid. Limited `press()` — only home, volumeup, volumedown.
 
 ## Cross-language SDKs
 
-Tested, importable wrappers for Python, Go, Rust, Ruby, and Java in `contrib/`. Each spawns `npx bareagent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API: constructor → `run(goal)` → `close()`.
+Tested, importable wrappers for Python, Go, Rust, Ruby, and Java in `contrib/`. Each spawns `npx bare-agent --jsonl` and communicates via JSONL over stdin/stdout. Consistent API: constructor → `run(goal)` → `close()`.
 
 ```python
 # Python — contrib/python/bareagent.py (stdlib only)
@@ -361,8 +355,8 @@ See `contrib/README.md` for all 5 languages and protocol reference.
 ### Recipe 1: Planner → runPlan (main use case)
 
 ```javascript
-const { Planner, runPlan, StateMachine, Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
+const { Planner, runPlan, StateMachine, Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
 
 const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
 const loop = new Loop({ provider });
@@ -390,8 +384,8 @@ const results = await runPlan(steps, async (step) => {
 ### Recipe 2: Loop + CLIPipe with systemPromptFlag
 
 ```javascript
-const { Loop } = require('bareagent');
-const { CLIPipe } = require('bareagent/providers');
+const { Loop } = require('bare-agent');
+const { CLIPipe } = require('bare-agent/providers');
 
 // Without systemPromptFlag: system messages become "System: ..." in stdin (breaks structured output)
 // With systemPromptFlag: system content passed via --system flag, only user/assistant in stdin
@@ -411,8 +405,8 @@ console.log(result.text);
 ### Recipe 3: CircuitBreaker + Fallback + Retry (resilient multi-provider)
 
 ```javascript
-const { Loop, Retry, CircuitBreaker } = require('bareagent');
-const { OpenAI, Anthropic, Fallback } = require('bareagent/providers');
+const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { OpenAI, Anthropic, Fallback } = require('bare-agent/providers');
 
 const cb = new CircuitBreaker({
   threshold: 3,
@@ -436,9 +430,9 @@ const loop = new Loop({
 ### Recipe 4: Stream + JsonlTransport
 
 ```javascript
-const { Loop, Stream } = require('bareagent');
-const { JsonlTransport } = require('bareagent/transports');
-const { OpenAI } = require('bareagent/providers');
+const { Loop, Stream } = require('bare-agent');
+const { JsonlTransport } = require('bare-agent/transports');
+const { OpenAI } = require('bare-agent/providers');
 
 // JSONL events to stdout — pipe to any consumer
 const stream = new Stream({ transport: new JsonlTransport() });
@@ -484,7 +478,7 @@ const result = await loop.run([{ role: 'user', content: msg }], tools);
 ### Recipe 6: Checkpoint on a chat platform
 
 ```javascript
-const { Checkpoint } = require('bareagent');
+const { Checkpoint } = require('bare-agent');
 
 const pendingApprovals = new Map(); // chatId → resolve function
 
@@ -509,9 +503,9 @@ function onMessage(chatId, text) {
 ### Recipe 7: Loop + Browsing Tools
 
 ```javascript
-const { Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
-const { createBrowsingTools } = require('bareagent/tools');
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createBrowsingTools } = require('bare-agent/tools');
 
 const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
 const browsing = await createBrowsingTools();
@@ -578,120 +572,3 @@ npx barebrowse close
 **Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click`, `type`, `drag`, `upload`, and other ref-based commands.
 
 **Key insight:** Don't read every snapshot. Take snapshots freely, but only read the `.yml` file at decision points where you need to choose what to click or verify page content.
-
-### Recipe 8: Loop + Mobile Tools (Android)
-
-```javascript
-const { Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
-const { createMobileTools } = require('bareagent/tools');
-
-const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
-const mobile = await createMobileTools(); // auto-detect Android device
-if (!mobile) throw new Error('baremobile not installed');
-
-const loop = new Loop({ provider });
-try {
-  const result = await loop.run(
-    [{ role: 'user', content: 'Open Settings and turn on Bluetooth' }],
-    mobile.tools
-  );
-  console.log(result.text);
-} finally {
-  await mobile.close();
-}
-```
-
-**Available tools (Android):** `mobile_snapshot`, `mobile_tap`, `mobile_type`, `mobile_press`, `mobile_scroll`, `mobile_swipe`, `mobile_long_press`, `mobile_launch`, `mobile_back`, `mobile_home`, `mobile_screenshot`, `mobile_intent`, `mobile_tap_xy`, `mobile_tap_grid`, `mobile_grid`, `mobile_wait_text`, `mobile_wait_state`.
-
-**Available tools (iOS):** Same core set minus `mobile_intent`, `mobile_tap_xy`, `mobile_tap_grid`, `mobile_grid`. Adds `mobile_unlock`.
-
-Action tools auto-return a fresh snapshot so the LLM always sees the result.
-
-### Recipe 8b: Loop + Mobile Tools (iOS)
-
-```javascript
-const { createMobileTools } = require('bareagent/tools');
-
-const mobile = await createMobileTools({ platform: 'ios' });
-if (!mobile) throw new Error('baremobile not installed');
-
-// Same Loop pattern — tools have the same names and shapes
-const result = await loop.run(
-  [{ role: 'user', content: 'Open Preferences and check WiFi status' }],
-  mobile.tools
-);
-```
-
-**Key differences from Android:** Bundle IDs instead of package names (`com.apple.Preferences` not `com.android.settings`). No intents — use `mobile_launch`. `mobile_press` limited to home/volumeup/volumedown. USB required.
-
-### Recipe 8c: CLI Mobile (token-efficient)
-
-Two mobile strategies — pick based on your use case:
-
-| | Library tools (Recipe 8) | CLI session (this recipe) |
-|---|---|---|
-| **How** | `createMobileTools()` → Loop tools | `npx baremobile` CLI commands |
-| **Snapshots** | Inline in tool results (conversation context) | Written to `.baremobile/*.yml` on disk |
-| **Token cost** | Higher — every snapshot in LLM context | Lower — agent reads files only at decision points |
-| **Best for** | Single interactions, simple taps | Multi-step workflows, app testing, token-constrained envs |
-
-**CLI workflow pattern:**
-
-```bash
-# 1. Start session (auto-detect device)
-npx baremobile open
-
-# 2. Launch an app
-npx baremobile launch com.android.settings
-
-# 3. Take a snapshot → writes .baremobile/screen-*.yml
-npx baremobile snapshot
-
-# 4. Agent reads the .yml file, finds [ref=N] markers
-
-# 5. Tap an element
-npx baremobile tap 4
-
-# 6. Snapshot again
-npx baremobile snapshot
-
-# 7. Close session
-npx baremobile close
-```
-
-**CLI commands:** `open`, `close`, `status`, `snapshot`, `screenshot`, `tap`, `tap-xy`, `tap-grid`, `type`, `press`, `scroll`, `swipe`, `long-press`, `launch`, `intent`, `back`, `home`, `wait-text`, `wait-state`, `grid`, `logcat`.
-
-**iOS CLI:** `npx baremobile open --platform=ios`. Same commands, bundle IDs instead of packages. Setup: `npx baremobile setup`.
-
-### Recipe 8d: Termux:API (on-device Android APIs)
-
-For agents running on the phone itself via Termux. Direct Android API access — no screen control needed.
-
-```javascript
-// Import Termux:API directly (not through createMobileTools)
-const api = await import('baremobile/src/termux-api.js');
-
-if (await api.isAvailable()) {
-  // SMS
-  await api.smsSend('5551234', 'Hello from the agent!');
-  const inbox = await api.smsList({ limit: 5, type: 'inbox' });
-
-  // Location
-  const loc = await api.location({ provider: 'network' });
-
-  // Clipboard
-  await api.clipboardSet('copied by agent');
-  const text = await api.clipboardGet();
-
-  // Notifications, torch, vibrate, battery, contacts, wifi...
-  await api.notify('Agent', 'Task complete', { sound: true });
-  const battery = await api.batteryStatus();
-}
-```
-
-**Termux:API functions:** `smsSend`, `smsList`, `call`, `location`, `cameraPhoto`, `clipboardGet`, `clipboardSet`, `contactList`, `notify`, `batteryStatus`, `volumeGet`, `volumeSet`, `wifiInfo`, `torch`, `vibrate`, `isAvailable`.
-
-**Combine with Termux ADB** for full autonomous phone agent: screen control (snapshot/tap) via `createMobileTools({ termux: true })` + device APIs via Termux:API.
-
-**Gotchas:** Termux:API requires both the `termux-api` package AND the Termux:API Android app (from F-Droid). Commands are blocking — `location()` waits for GPS fix, `cameraPhoto()` blocks until capture. Some functions need real hardware (SIM, GPS).

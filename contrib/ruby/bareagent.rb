@@ -1,4 +1,4 @@
-# bareagent Ruby wrapper -- subprocess + JSONL over stdin/stdout.
+# bare-agent Ruby wrapper -- subprocess + JSONL over stdin/stdout.
 # stdlib only: open3, json.
 
 require "open3"
@@ -7,10 +7,10 @@ require "json"
 class BareAgent
   attr_writer :on_event
 
-  # Spawn a bareagent subprocess.
+  # Spawn a bare-agent subprocess.
   #   BareAgent.new(provider: "openai", model: "gpt-4o-mini")
   def initialize(provider: "openai", model: nil, url: nil)
-    cmd = ["npx", "bareagent", "--jsonl", "--provider", provider]
+    cmd = ["npx", "bare-agent", "--jsonl", "--provider", provider]
     cmd += ["--model", model] if model
     cmd += ["--url", url] if url
     @stdin, @stdout, @stderr, @wait_thr = Open3.popen3(*cmd)
@@ -50,7 +50,7 @@ end
 
 if __FILE__ == $PROGRAM_NAME
   agent = BareAgent.new(provider: "openai", model: "gpt-4o-mini")
-  puts "Spawned bareagent subprocess"
+  puts "Spawned bare-agent subprocess"
   result = agent.run("What is 2 + 2?")
   if result
     puts "Result: #{result['text'] || result}"

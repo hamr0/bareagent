@@ -1,10 +1,10 @@
 # Error Reference
 
-Every error thrown or rejected by bareagent is prefixed with `[ComponentName]`. Use this page to look up what went wrong and how to fix it.
+Every error thrown or rejected by bare-agent is prefixed with `[ComponentName]`. Use this page to look up what went wrong and how to fix it.
 
 ## Typed Error Hierarchy
 
-bareagent provides typed error classes for programmatic error handling. All extend `Error`.
+bare-agent provides typed error classes for programmatic error handling. All extend `Error`.
 
 ```
 Error
@@ -26,7 +26,7 @@ Error
 | `MaxRoundsError` | Loop exceeded `maxRounds` without final response | `false` |
 | `ValidationError` | Input validation failures | `false` |
 
-**Import:** `const { ProviderError, CircuitOpenError } = require('bareagent');`
+**Import:** `const { ProviderError, CircuitOpenError } = require('bare-agent');`
 
 **Usage:** `try { ... } catch (err) { if (err instanceof ProviderError && err.status === 429) { /* rate limited */ } }`
 

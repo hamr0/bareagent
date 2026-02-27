@@ -1,5 +1,5 @@
 {
-  "name": "bareagent",
+  "name": "bare-agent",
   "version": "0.4.0",
   "files": [
     "index.js",
@@ -16,7 +16,7 @@
   },
   "main": "index.js",
   "bin": {
-    "bareagent": "bin/cli.js"
+    "bare-agent": "bin/cli.js"
   },
   "exports": {
     ".": "./index.js",

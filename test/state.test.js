@@ -111,7 +111,7 @@ describe('StateMachine', () => {
   });
 
   describe('file persistence', () => {
-    const testFile = '/tmp/bareagent-state-test.json';
+    const testFile = '/tmp/bare-agent-state-test.json';
 
     afterEach(() => {
       try { unlinkSync(testFile); } catch {}

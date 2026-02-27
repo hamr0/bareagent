@@ -1,18 +1,18 @@
-# bareagent — Customer Guide
+# bare-agent — Customer Guide
 
 > Pick what you need, ignore the rest. Every component works alone.
 
 ---
 
-## How to consume bareagent
+## How to consume bare-agent
 
 Three ways, depending on your stack:
 
 | Mode | For whom | How it works |
 |------|----------|-------------|
-| **npm import** | Node.js / TypeScript apps | `require('bareagent')` — use classes directly |
+| **npm import** | Node.js / TypeScript apps | `require('bare-agent')` — use classes directly |
 | **Subprocess + JSONL** | Python, Go, Rust, Ruby, anything | Spawn process, read/write JSON lines via stdin/stdout |
-| **JSON-RPC over HTTP** | Networked / remote agents | `bareagent serve --port 3100` — any HTTP client |
+| **JSON-RPC over HTTP** | Networked / remote agents | `bare-agent serve --port 3100` — any HTTP client |
 
 All three modes expose the same capabilities. The protocol is the API.
 
@@ -23,30 +23,30 @@ All three modes expose the same capabilities. The protocol is the API.
 ### Install
 
 ```bash
-npm install bareagent
+npm install bare-agent
 ```
 
 ### Import what you need
 
 ```javascript
 // Just the loop
-const { Loop } = require('bareagent');
+const { Loop } = require('bare-agent');
 
 // Loop + memory + checkpoint
-const { Loop, Memory, Checkpoint } = require('bareagent');
+const { Loop, Memory, Checkpoint } = require('bare-agent');
 
 // Providers (separate import path)
-const { OpenAI, Anthropic, Ollama } = require('bareagent/providers');
+const { OpenAI, Anthropic, Ollama } = require('bare-agent/providers');
 
 // Storage backends (separate import path)
-const { SQLite, JSONFile } = require('bareagent/stores');
+const { SQLite, JSONFile } = require('bare-agent/stores');
 ```
 
 ### Simplest possible agent — 5 lines
 
 ```javascript
-const { Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
@@ -109,7 +109,7 @@ Use `run()` when embedding in an existing app that manages state. Use `chat()` f
 ### Human-in-the-loop — Checkpoint
 
 ```javascript
-const { Loop, Checkpoint } = require('bareagent');
+const { Loop, Checkpoint } = require('bare-agent');
 
 const checkpoint = new Checkpoint({
   // Which tools require approval before execution
@@ -141,8 +141,8 @@ The transport is yours — Telegram, Slack, Discord, CLI readline, WebSocket, an
 ### Persistent memory — Memory + Store
 
 ```javascript
-const { Loop, Memory } = require('bareagent');
-const { SQLite } = require('bareagent/stores');
+const { Loop, Memory } = require('bare-agent');
+const { SQLite } = require('bare-agent/stores');
 
 const memory = new Memory({ store: new SQLite('./agent.db') });
 
@@ -172,7 +172,7 @@ const loop = new Loop({
 ### Multi-step goals — Planner + StateMachine
 
 ```javascript
-const { Loop, Planner, StateMachine } = require('bareagent');
+const { Loop, Planner, StateMachine } = require('bare-agent');
 
 const provider = new Anthropic({ apiKey: '...' });
 const planner = new Planner({ provider });
@@ -202,12 +202,12 @@ const loop = new Loop({ provider, planner, state });
 await loop.runGoal('Book a Berlin trip for Tuesday', tools);
 ```
 
-**Sequential vs parallel execution:** The Planner produces a DAG. Steps with no dependencies can run concurrently. Steps with `dependsOn` wait. You control the execution strategy — bareagent gives you the graph.
+**Sequential vs parallel execution:** The Planner produces a DAG. Steps with no dependencies can run concurrently. Steps with `dependsOn` wait. You control the execution strategy — bare-agent gives you the graph.
 
 ### Scheduled tasks — Scheduler
 
 ```javascript
-const { Scheduler } = require('bareagent');
+const { Scheduler } = require('bare-agent');
 
 const scheduler = new Scheduler({ file: './jobs.json' });
 
@@ -237,7 +237,7 @@ scheduler.start(async (job) => {
 ### Observability — Stream
 
 ```javascript
-const { Loop, Stream } = require('bareagent');
+const { Loop, Stream } = require('bare-agent');
 
 const stream = new Stream({ transport: 'jsonl' });
 
@@ -263,7 +263,7 @@ checkpoint:ask, checkpoint:reply
 ### Resilience — Retry
 
 ```javascript
-const { Retry } = require('bareagent');
+const { Retry } = require('bare-agent');
 
 const retry = new Retry({
   maxAttempts: 3,
@@ -282,12 +282,12 @@ const loop = new Loop({ provider, retry });
 
 ## 2. Subprocess + JSONL (any language)
 
-For non-Node.js projects. Spawn bareagent as a child process, communicate via JSON lines on stdin/stdout.
+For non-Node.js projects. Spawn bare-agent as a child process, communicate via JSON lines on stdin/stdout.
 
 ### Start the subprocess
 
 ```bash
-npx bareagent --jsonl --provider openai --model gpt-4o-mini
+npx bare-agent --jsonl --provider openai --model gpt-4o-mini
 ```
 
 ### Protocol
@@ -318,7 +318,7 @@ import os
 class BareAgent:
     def __init__(self, provider='openai', model='gpt-4o-mini'):
         self.proc = subprocess.Popen(
-            ['npx', 'bareagent', '--jsonl',
+            ['npx', 'bare-agent', '--jsonl',
              '--provider', provider, '--model', model],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -365,7 +365,7 @@ import (
 )
 
 func main() {
-    cmd := exec.Command("npx", "bareagent", "--jsonl",
+    cmd := exec.Command("npx", "bare-agent", "--jsonl",
         "--provider", "openai", "--model", "gpt-4o-mini")
     stdin, _ := cmd.StdinPipe()
     stdout, _ := cmd.StdoutPipe()
@@ -399,7 +399,7 @@ func main() {
 
 Tested, importable wrappers for **Python, Go, Rust, Ruby, and Java** are in [`contrib/`](../../contrib/README.md). Each follows the same pattern:
 
-1. Spawn `npx bareagent --jsonl`
+1. Spawn `npx bare-agent --jsonl`
 2. Write JSON to stdin
 3. Read JSON lines from stdout
 4. Parse events, act on `result` or `error`
@@ -413,7 +413,7 @@ Copy the file into your project — no package registry needed. See `contrib/REA
 For apps that need a persistent, remotely accessible agent server.
 
 ```bash
-bareagent serve --port 3100 --provider anthropic --model claude-haiku-4-5-20251001
+bare-agent serve --port 3100 --provider anthropic --model claude-haiku-4-5-20251001
 ```
 
 ### Request
@@ -465,7 +465,7 @@ generate(messages, tools, options) → { text, toolCalls, usage }
 
 ```javascript
 // OpenAI (+ any OpenAI-compatible endpoint)
-const { OpenAI } = require('bareagent/providers');
+const { OpenAI } = require('bare-agent/providers');
 new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   model: 'gpt-4o-mini',
@@ -473,14 +473,14 @@ new OpenAI({
 });
 
 // Anthropic (native API)
-const { Anthropic } = require('bareagent/providers');
+const { Anthropic } = require('bare-agent/providers');
 new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   model: 'claude-haiku-4-5-20251001',
 });
 
 // Ollama (local, no API key)
-const { Ollama } = require('bareagent/providers');
+const { Ollama } = require('bare-agent/providers');
 new Ollama({
   model: 'llama3.2',
   url: 'http://localhost:11434',
@@ -628,7 +628,7 @@ No logging library. Two mechanisms:
 const loop = new Loop({ provider, debug: true });
 
 // 2. Environment variable
-// NODE_DEBUG=bareagent node your-app.js
+// NODE_DEBUG=bare-agent node your-app.js
 ```
 
 Debug output goes to stderr. JSONL events go to stdout. They never mix.
@@ -637,19 +637,19 @@ Debug output goes to stderr. JSONL events go to stdout. They never mix.
 
 ## 10. Patterns, Not Features
 
-bareagent deliberately leaves certain things out of the framework. Not because they're unimportant — but because they're application logic that varies wildly between use cases. Baking them in would mean picking one opinion and forcing it on everyone.
+bare-agent deliberately leaves certain things out of the framework. Not because they're unimportant — but because they're application logic that varies wildly between use cases. Baking them in would mean picking one opinion and forcing it on everyone.
 
-Instead, bareagent gives you composable primitives. Below are common patterns people ask about, with recipes showing how to build them from what's already there.
+Instead, bare-agent gives you composable primitives. Below are common patterns people ask about, with recipes showing how to build them from what's already there.
 
 ### Multi-agent orchestration
 
-**Why it's not built in:** What most frameworks call "multi-agent" is persona routing — pick a system prompt + tool subset based on the task. That's application logic. Adding it to bareagent would mean opinionating on routing strategies, handoff protocols, and shared state — the complexity bloat bareagent exists to avoid.
+**Why it's not built in:** What most frameworks call "multi-agent" is persona routing — pick a system prompt + tool subset based on the task. That's application logic. Adding it to bare-agent would mean opinionating on routing strategies, handoff protocols, and shared state — the complexity bloat bare-agent exists to avoid.
 
 **How to do it:** Create multiple Loop instances with different configs. Your app decides which one handles each message.
 
 ```javascript
-const { Loop } = require('bareagent');
-const { OpenAI } = require('bareagent/providers');
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
 
 const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -695,8 +695,8 @@ if (needsCodeHelp(researchResult)) {
 **Shared state** — use a common Memory/store instance:
 
 ```javascript
-const { Memory } = require('bareagent');
-const { SQLite } = require('bareagent/stores');
+const { Memory } = require('bare-agent');
+const { SQLite } = require('bare-agent/stores');
 
 // Both agents share the same memory
 const sharedMemory = new Memory({ store: new SQLite('./shared.db') });
@@ -810,7 +810,7 @@ rawProvider.generate = rateLimited(rawProvider.generate.bind(rawProvider), 10);
 **How to do it:** Stream is already a hook system. Subscribe to events and react.
 
 ```javascript
-const { Loop, Stream } = require('bareagent');
+const { Loop, Stream } = require('bare-agent');
 
 const stream = new Stream();
 
@@ -861,7 +861,7 @@ const wrappedTools = tools.map(t => withHooks(t, {
 **How to do it:** Scheduler with a recurring job. The difference between heartbeat and cron is specificity: cron runs a defined action, heartbeat asks the LLM to decide what needs attention.
 
 ```javascript
-const { Loop, Scheduler } = require('bareagent');
+const { Loop, Scheduler } = require('bare-agent');
 
 const scheduler = new Scheduler({ file: './jobs.json' });
 
@@ -894,7 +894,7 @@ Start with specific cron jobs. If you find yourself creating the same ones repea
 **What's built in:** Scheduler already supports cron. It uses `cron-parser` (peer dep) for cron expressions and has built-in relative scheduling (`5s`, `30m`, `2h`, `1d`).
 
 ```javascript
-const { Scheduler } = require('bareagent');
+const { Scheduler } = require('bare-agent');
 
 const scheduler = new Scheduler({ file: './jobs.json' });
 
@@ -976,7 +976,7 @@ This is the universal integration pattern — every app that has tools needing c
 **How to do it:** Pending approvals Map + reply interception.
 
 ```javascript
-const { Loop, Checkpoint } = require('bareagent');
+const { Loop, Checkpoint } = require('bare-agent');
 
 // Pending approvals — keyed by chatId (or any identifier)
 const pendingApprovals = new Map();
@@ -1020,7 +1020,7 @@ The pattern works for any platform — swap `platform.send` for your Telegram/Sl
 
 ---
 
-## 11. What bareagent does NOT do
+## 11. What bare-agent does NOT do
 
 | Not included | Why | Use instead |
 |-------------|-----|-------------|
@@ -1028,8 +1028,7 @@ The pattern works for any platform — swap `platform.send` for your Telegram/Sl
 | Authentication | Every app has different auth | Wrap Checkpoint with your auth |
 | Tool implementations | Actuation is user-provided | Your APIs, MCP servers, CLI commands |
 | Multi-tenant isolation | Platform concern | Build on top with scope filtering |
-| Browser automation | Separate concern, optional | `barebrowse` via `createBrowsingTools` or CLI |
-| Mobile automation | Separate concern, optional | `baremobile` via `createMobileTools` or CLI |
+| Browser automation | Heavy, separate concern | Playwright/Puppeteer as a tool |
 | Prompt engineering | Model-specific, changes fast | Override system prompts yourself |
 
-bareagent provides the brain. You provide the hands.
+bare-agent provides the brain. You provide the hands.

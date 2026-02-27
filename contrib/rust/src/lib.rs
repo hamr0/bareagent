@@ -1,4 +1,4 @@
-//! bareagent Rust wrapper — subprocess + JSONL over stdin/stdout.
+//! bare-agent Rust wrapper — subprocess + JSONL over stdin/stdout.
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -33,7 +33,7 @@ pub struct Event {
     pub ts: Option<String>,
 }
 
-/// Thin wrapper that spawns bareagent as a subprocess.
+/// Thin wrapper that spawns bare-agent as a subprocess.
 pub struct BareAgent {
     child: Child,
     reader: BufReader<std::process::ChildStdout>,
@@ -41,10 +41,10 @@ pub struct BareAgent {
 }
 
 impl BareAgent {
-    /// Spawn a new bareagent subprocess.
+    /// Spawn a new bare-agent subprocess.
     pub fn new(provider: &str, model: Option<&str>, url: Option<&str>) -> std::io::Result<Self> {
         let mut args = vec![
-            "bareagent".into(),
+            "bare-agent".into(),
             "--jsonl".into(),
             "--provider".into(),
             provider.into(),
@@ -135,7 +135,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // requires npx + bareagent + API key
+    #[ignore] // requires npx + bare-agent + API key
     fn self_test() {
         let mut agent = BareAgent::new("openai", Some("gpt-4o-mini"), None).unwrap();
         agent.on_event = Some(Box::new(|e| {

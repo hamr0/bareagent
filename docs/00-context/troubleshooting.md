@@ -108,7 +108,7 @@ Valid transitions:
 No logging library. Two mechanisms:
 
 1. Stream events: attach a subscriber to see everything the Loop does
-2. stderr debug: `NODE_DEBUG=bareagent node your-app.js`
+2. stderr debug: `NODE_DEBUG=bare-agent node your-app.js`
 
 Debug output goes to stderr. JSONL events go to stdout. They never mix.
 
