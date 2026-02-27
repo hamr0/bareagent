@@ -21,7 +21,7 @@ Full project plan: component specs, data formats, usage profiles (minimal/medium
 -> docs/01-product/prd.md
 
 ## Blueprint
-Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots).
+Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots) and mobile tools strategy docs (library tools via `createMobileTools` and CLI session mode via `baremobile` CLI for Android + iOS device control).
 -> docs/00-context/blueprint.md
 
 ## Vision

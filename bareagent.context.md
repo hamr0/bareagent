@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.3.0 | Node.js >= 18 | 0 required deps | MIT
+> v0.4.0 | Node.js >= 18 | 0 required deps | MIT
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -18,7 +18,7 @@ Five entry points:
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
-- `require('bare-agent/tools')` — createBrowsingTools
+- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools
 
 ## Which components do I need?
 
@@ -44,6 +44,8 @@ Five entry points:
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
+| Control Android/iOS devices | createMobileTools + Loop |
+| Control mobile (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -334,6 +336,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
 13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (13 tools: browse, goto, snapshot, click, type, press, scroll, select, screenshot, back, forward, drag, upload). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
+14. **Mobile tools require `close()`** — `createMobileTools()` connects to a device. Always call `close()` in a `finally` block. Returns `null` if `baremobile` is not installed. Action tools auto-return a snapshot (unlike browsing tools where you call snapshot separately). Refs reset every snapshot — never cache them.
 
 ## Cross-language SDKs
 
@@ -572,3 +575,32 @@ npx barebrowse close
 **Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click`, `type`, `drag`, `upload`, and other ref-based commands.
 
 **Key insight:** Don't read every snapshot. Take snapshots freely, but only read the `.yml` file at decision points where you need to choose what to click or verify page content.
+
+### Recipe 8: Loop + Mobile Tools
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createMobileTools } = require('bare-agent/tools');
+
+const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
+
+// Android (default)
+const mobile = await createMobileTools();
+// iOS: await createMobileTools({ platform: 'ios' })
+// Termux on-device: await createMobileTools({ termux: true })
+if (!mobile) throw new Error('baremobile not installed');
+
+const loop = new Loop({ provider });
+try {
+  const result = await loop.run(
+    [{ role: 'user', content: 'Open Settings and turn on Bluetooth' }],
+    mobile.tools
+  );
+  console.log(result.text);
+} finally {
+  await mobile.close(); // always close — releases device connection
+}
+```
+
+Mobile tools follow the observe-act pattern: action tools auto-return a fresh snapshot so the LLM sees the result immediately. Tools: `mobile_snapshot`, `mobile_tap`, `mobile_type`, `mobile_press`, `mobile_scroll`, `mobile_swipe`, `mobile_long_press`, `mobile_launch`, `mobile_back`, `mobile_home`, `mobile_screenshot`, `mobile_tap_xy`, `mobile_find_text`, `mobile_wait_text`, `mobile_wait_state`. Android-only: `mobile_intent`, `mobile_tap_grid`, `mobile_grid`. iOS-only: `mobile_unlock`.

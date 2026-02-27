@@ -173,6 +173,19 @@ async function createMobileTools(opts = {}) {
         return buf.toString('base64');
       },
     },
+    {
+      name: 'mobile_tap_xy',
+      description: 'Tap by pixel coordinates on the mobile screen. Use when elements lack refs. Returns updated snapshot.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'number', description: 'X coordinate' },
+          y: { type: 'number', description: 'Y coordinate' },
+        },
+        required: ['x', 'y'],
+      },
+      execute: async ({ x, y }) => actionAndSnapshot((page) => page.tapXY(x, y)),
+    },
   ];
 
   // Android-only tools
@@ -190,19 +203,6 @@ async function createMobileTools(opts = {}) {
           required: ['action'],
         },
         execute: async ({ action, extras }) => actionAndSnapshot((page) => page.intent(action, extras || {})),
-      },
-      {
-        name: 'mobile_tap_xy',
-        description: 'Tap by pixel coordinates on the mobile screen. Use when elements lack refs. Returns updated snapshot.',
-        parameters: {
-          type: 'object',
-          properties: {
-            x: { type: 'number', description: 'X coordinate' },
-            y: { type: 'number', description: 'Y coordinate' },
-          },
-          required: ['x', 'y'],
-        },
-        execute: async ({ x, y }) => actionAndSnapshot((page) => page.tapXY(x, y)),
       },
       {
         name: 'mobile_tap_grid',
@@ -244,6 +244,24 @@ async function createMobileTools(opts = {}) {
       execute: async ({ passcode }) => actionAndSnapshot((page) => page.unlock(passcode)),
     });
   }
+
+  // Find tools (both platforms, no device call — reads refMap from last snapshot)
+  tools.push({
+    name: 'mobile_find_text',
+    description: 'Find an interactive element by visible text or accessibility label. Searches the refMap from the last snapshot — no device call. Returns the ref number or null if not found.',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text or label substring to search for' },
+      },
+      required: ['text'],
+    },
+    execute: async ({ text }) => {
+      const page = await getPage();
+      const ref = page.findByText(text);
+      return ref !== null && ref !== undefined ? ref : null;
+    },
+  });
 
   // Wait tools (both platforms)
   tools.push(

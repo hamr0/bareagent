@@ -23,6 +23,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
 Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse) — library tools for inline snapshots, CLI session (`npx barebrowse`) for token-efficient disk-based browsing
+Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS device control via snapshot/tap/type pattern
 
 ## Exports
 
@@ -32,7 +33,7 @@ Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse) — library too
 | `bare-agent/providers` | All providers including Fallback |
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
-| `bare-agent/tools` | createBrowsingTools |
+| `bare-agent/tools` | createBrowsingTools, createMobileTools |
 
 ## Commands
 

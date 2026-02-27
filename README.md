@@ -73,14 +73,15 @@ Every piece works alone — take what you need, ignore the rest.
 | **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
 | **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `CircuitOpenError` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse`. Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows) |
+| **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely.
 
-**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing (optional) — library tools for inline results or CLI session mode for token-efficient disk-based snapshots.
+**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing, `baremobile` for Android + iOS device control (both optional) — library tools for inline results or CLI session mode for token-efficient disk-based snapshots.
 
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing).
+**Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control).
 
 ---
 
@@ -141,9 +142,9 @@ Three vanilla JS modules. Zero dependencies. Same API patterns.
 
 | | [**bareagent**](https://npmjs.com/package/bare-agent) | [**barebrowse**](https://npmjs.com/package/barebrowse) | [**baremobile**](https://npmjs.com/package/baremobile) |
 |---|---|---|---|
-| **Does** | Gives agents a think→act loop | Gives agents a real browser | Gives agents an Android device |
+| **Does** | Gives agents a think→act loop | Gives agents a real browser | Gives agents Android + iOS devices |
 | **How** | Goal in → coordinated actions out | URL in → pruned snapshot out | Screen in → pruned snapshot out |
-| **Replaces** | LangChain, CrewAI, AutoGen | Playwright, Selenium, Puppeteer | Appium, Espresso, UIAutomator2 |
+| **Replaces** | LangChain, CrewAI, AutoGen | Playwright, Selenium, Puppeteer | Appium, Espresso, XCUITest |
 | **Interfaces** | Library · CLI · subprocess | Library · CLI · MCP | Library · CLI · MCP |
 | **Solo or together** | Orchestrates both as tools | Works standalone | Works standalone |
 

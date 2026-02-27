@@ -449,7 +449,8 @@ All components implemented and validated end-to-end.
 | `bin/cli.js` | 65 | ✅ implemented |
 | `src/scheduler.js` | 107 | ✅ implemented |
 | `tools/browse.js` | 17 | ✅ implemented |
-| `src/tools.js` | 5 | ✅ implemented |
+| `tools/mobile.js` | 314 | ✅ implemented |
+| `src/tools.js` | 6 | ✅ implemented |
 
 ### Browsing Tools
 
@@ -465,6 +466,23 @@ Two strategies for web browsing, both powered by `barebrowse` (optional dep):
 - Snapshots written to `.barebrowse/*.yml` on disk — agent reads only when needed
 - Lower token cost for multi-step flows (snapshots not in conversation context)
 - Best for: multi-page workflows, research tasks, token-constrained environments
+
+### Mobile Tools
+
+Two strategies for Android + iOS device control, both powered by `baremobile` (optional dep):
+
+**Library tools** (`createMobileTools` via `bare-agent/tools`):
+- Returns tool objects compatible with Loop — 15 shared + 3 Android-only + 1 iOS-only
+- Action tools auto-return a fresh snapshot (unlike browsing tools where you call snapshot separately)
+- Shared: `mobile_snapshot`, `mobile_tap`, `mobile_type`, `mobile_press`, `mobile_scroll`, `mobile_swipe`, `mobile_long_press`, `mobile_launch`, `mobile_back`, `mobile_home`, `mobile_screenshot`, `mobile_tap_xy`, `mobile_find_text`, `mobile_wait_text`, `mobile_wait_state`
+- Android-only: `mobile_intent`, `mobile_tap_grid`, `mobile_grid`
+- iOS-only: `mobile_unlock`
+- Best for: simple device interactions within an agent loop
+
+**CLI session** (`baremobile` CLI):
+- Session-based commands: `open`, `snapshot`, `tap <ref>`, `type <ref> <text>`, `close`
+- Snapshots written to `.baremobile/*.yml` on disk — agent reads only when needed
+- Best for: multi-step device workflows, token-constrained environments
 | **Implemented total** | **1039** | |
 | **Target was** | **~820** | over by ~200 lines (CLI arg parsing, scheduler re-entry guard, FTS triggers) |
 
