@@ -44,6 +44,7 @@ Five entry points:
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
+| Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
 | Control Android/iOS devices | createMobileTools + Loop |
 | Control mobile (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
 
@@ -525,6 +526,17 @@ try {
   await browsing.close(); // always close — releases browser resources
 }
 ```
+
+**Privacy assessment:** If `wearehere` is installed (`npm install wearehere`), an 18th tool `assess` is automatically available. It scans any URL for privacy risks and returns a compact JSON:
+
+```javascript
+// The assess tool is included in browsing.tools automatically
+// Agent can call it like any other tool:
+// assess({ url: "https://example.com" })
+// Returns: { site, score (0-100), risk, recommendation, concerns, categories }
+```
+
+Categories: cookies, network trackers, hidden tracking elements, dark patterns, data brokers, device fingerprinting, stored data, form surveillance, link tracking, terms of service. Score thresholds: 0-19 low, 20-39 moderate, 40-69 high, 70+ critical.
 
 ### Recipe 7b: CLI Browsing (token-efficient)
 
