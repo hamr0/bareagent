@@ -2,6 +2,19 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.4.2] — 2026-03-11
+
+### Changed
+
+- **`barebrowse` optional dep** bumped from `^0.2.0` to `^0.5.0` — picks up 17 browsing tools (was 13): added hover, tabs, switchTab, pdf, plus optional assess (privacy scan via `wearehere`).
+
+### Docs
+
+- `bareagent.context.md` — Gotcha #13 updated with full 17-tool list, version bumped to v0.4.2.
+- `docs/00-context/blueprint.md` — Browsing Tools section updated with complete tool list and auto-snapshot behavior.
+
+---
+
 ## [0.4.1] — 2026-02-27
 
 ### Added

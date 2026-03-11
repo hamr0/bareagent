@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.4.0 | Node.js >= 18 | 0 required deps | MIT
+> v0.4.2 | Node.js >= 18 | 0 required deps | MIT
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -335,7 +335,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
-13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (13 tools: browse, goto, snapshot, click, type, press, scroll, select, screenshot, back, forward, drag, upload). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
+13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (17 tools: browse, goto, snapshot, click, type, press, scroll, select, hover, back, forward, drag, upload, tabs, switchTab, pdf, screenshot, plus assess if `wearehere` is installed). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
 14. **Mobile tools require `close()`** — `createMobileTools()` connects to a device. Always call `close()` in a `finally` block. Returns `null` if `baremobile` is not installed. Action tools auto-return a snapshot (unlike browsing tools where you call snapshot separately). Refs reset every snapshot — never cache them.
 
 ## Cross-language SDKs

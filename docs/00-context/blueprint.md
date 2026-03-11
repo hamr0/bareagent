@@ -457,8 +457,8 @@ All components implemented and validated end-to-end.
 Two strategies for web browsing, both powered by `barebrowse` (optional dep):
 
 **Library tools** (`createBrowsingTools` via `bare-agent/tools`):
-- Returns tool objects (`navigate`, `click`, `type`, `snapshot`, `close`) compatible with Loop
-- Snapshots returned inline as tool results — simple but higher token cost for multi-step flows
+- Returns 17 tool objects compatible with Loop: browse, goto, snapshot, click, type, press, scroll, select, hover, back, forward, drag, upload, tabs, switchTab, pdf, screenshot (plus assess if `wearehere` installed)
+- Action tools auto-return a fresh snapshot (300ms settle). Non-action tools (browse, snapshot, tabs, pdf, screenshot) return their own output.
 - Best for: single-page reads, simple interactions
 
 **CLI session** (`barebrowse` CLI — `npx barebrowse`):
