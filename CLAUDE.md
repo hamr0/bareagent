@@ -7,7 +7,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true by default) |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true by default, cost estimation built-in) |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |

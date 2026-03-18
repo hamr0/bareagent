@@ -29,12 +29,12 @@ ORCHESTRATION          EXECUTION              ACTUATION
 
 ## What's implemented
 
-### Loop (`src/loop.js` — 127 lines)
+### Loop (`src/loop.js` — 157 lines)
 
 The core think → act → observe cycle. Everything else is optional scaffolding around this.
 
 **Interface:**
-- `run(messages, tools, options)` → `{ text, toolCalls, usage, error }` — stateless
+- `run(messages, tools, options)` → `{ text, toolCalls, usage, cost, error }` — stateless
 - `chat(text, tools, options)` → same — stateful, tracks conversation history
 - `stop()` → abort mid-loop
 
@@ -47,6 +47,7 @@ The core think → act → observe cycle. Everything else is optional scaffoldin
 - `stop()`: sets flag, checked each iteration — no race conditions
 - System prompt: prepended as `role: 'system'` message
 - Never throws — all errors returned in `result.error`
+- Cost estimation: each result includes `cost` (estimated USD) based on `provider.model` and token usage. Accumulates across rounds. Pricing map in `COST_PER_1K` covers OpenAI + Anthropic; unknown models use a default average. Also emitted in `loop:done` stream events.
 
 **Optional integrations (wired via constructor):**
 - `checkpoint` — pauses before tool execution, asks human, aborts on "no"
@@ -433,7 +434,7 @@ All components implemented and validated end-to-end.
 
 | File | Lines | Status |
 |------|-------|--------|
-| `src/loop.js` | 127 | ✅ implemented |
+| `src/loop.js` | 157 | ✅ implemented |
 | `src/retry.js` | 45 | ✅ implemented |
 | `src/provider-openai.js` | 83 | ✅ implemented |
 | `src/provider-anthropic.js` | 130 | ✅ implemented |

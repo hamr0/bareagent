@@ -1,13 +1,13 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.4.2 | Node.js >= 18 | 0 required deps | MIT
+> v0.4.3 | Node.js >= 18 | 0 required deps | MIT
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~1700 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, and provider fallback. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (~1800 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, and provider fallback. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent
@@ -39,6 +39,7 @@ Five entry points:
 | Retry individual plan steps | runPlan({ stepRetry }) |
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
+| Track cost per run | Automatic — `result.cost` and `loop:done` event |
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError, MaxRoundsError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
@@ -77,8 +78,8 @@ const result = await loop.run(
   [{ role: 'user', content: 'What is the weather in Berlin?' }],
   tools
 );
-// result: { text: "The weather in Berlin is 22°C and sunny.", toolCalls: [], usage: {...}, error: null }
-// Throws on error by default. Use try/catch or pass throwOnError: false for result.error pattern.
+// result: { text: "The weather in Berlin is 22°C and sunny.", toolCalls: [], usage: {...}, cost: 0.00045, error: null }
+// cost = estimated USD based on model + token usage. Throws on error by default.
 ```
 
 ## Health check with validate()
@@ -231,6 +232,8 @@ new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 ```
 
 All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens).
+
+**Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. Pricing covers OpenAI and Anthropic models; unknown models use a default average. To adjust rates, edit `COST_PER_1K` at the top of `src/loop.js`.
 
 ## Store options
 

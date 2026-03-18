@@ -1,13 +1,13 @@
 {
   "name": "bare-agent",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "files": [
     "index.js",
     "src/",
     "bin/",
     "tools/"
   ],
-  "description": "Lightweight, composable agent orchestration. ~1700 lines, 0 required deps.",
+  "description": "Lightweight, composable agent orchestration. ~1800 lines, 0 required deps.",
   "license": "MIT",
   "author": "hamr0",
   "repository": {

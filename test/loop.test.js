@@ -503,6 +503,95 @@ describe('Loop', () => {
     });
   });
 
+  describe('cost estimation', () => {
+    it('returns cost estimate for known model', async () => {
+      const provider = {
+        model: 'gpt-4o-mini',
+        async generate() {
+          return { text: 'Hello', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } };
+        },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      assert.equal(typeof result.cost, 'number');
+      // gpt-4o-mini: 1000 * 0.00015/1000 + 500 * 0.0006/1000 = 0.00015 + 0.0003 = 0.00045
+      assert.ok(Math.abs(result.cost - 0.00045) < 0.0001);
+    });
+
+    it('uses default pricing for unknown model', async () => {
+      const provider = {
+        model: 'some-custom-model',
+        async generate() {
+          return { text: 'Hello', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 1000 } };
+        },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      assert.equal(typeof result.cost, 'number');
+      // _default: 1000 * 0.002/1000 + 1000 * 0.008/1000 = 0.002 + 0.008 = 0.01
+      assert.ok(Math.abs(result.cost - 0.01) < 0.001);
+    });
+
+    it('accumulates cost across rounds', async () => {
+      const provider = {
+        model: 'gpt-4o-mini',
+        async generate(messages) {
+          if (messages.some(m => m.role === 'tool')) {
+            return { text: 'Done', toolCalls: [], usage: { inputTokens: 500, outputTokens: 200 } };
+          }
+          return {
+            text: '',
+            toolCalls: [{ id: 'call_1', name: 'test', arguments: {} }],
+            usage: { inputTokens: 300, outputTokens: 100 },
+          };
+        },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.run(
+        [{ role: 'user', content: 'Hi' }],
+        [{ name: 'test', execute: async () => 'ok' }]
+      );
+
+      // Round 1: 300*0.00015/1000 + 100*0.0006/1000 = 0.000045 + 0.00006 = 0.000105
+      // Round 2: 500*0.00015/1000 + 200*0.0006/1000 = 0.000075 + 0.00012 = 0.000195
+      // Total: 0.0003
+      assert.ok(result.cost > 0);
+      assert.ok(Math.abs(result.cost - 0.0003) < 0.0001);
+    });
+
+    it('includes cost in loop:done stream event', async () => {
+      const events = [];
+      const stream = { emit(event) { events.push(event); } };
+      const provider = {
+        model: 'gpt-4o-mini',
+        async generate() {
+          return { text: 'Hello', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } };
+        },
+      };
+      const loop = new Loop({ provider, stream });
+      await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      const doneEvent = events.find(e => e.type === 'loop:done');
+      assert.ok(doneEvent);
+      assert.equal(typeof doneEvent.data.cost, 'number');
+      assert.ok(doneEvent.data.cost > 0);
+    });
+
+    it('returns zero cost when provider has no model', async () => {
+      const provider = {
+        async generate() {
+          return { text: 'Hello', toolCalls: [], usage: { inputTokens: 100, outputTokens: 50 } };
+        },
+      };
+      const loop = new Loop({ provider });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      assert.equal(result.cost, 0);
+    });
+  });
+
   describe('tool validation', () => {
     const provider = mockProvider([
       { text: 'ok', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } },

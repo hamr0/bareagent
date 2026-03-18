@@ -2,6 +2,33 @@
 
 const { ToolError, MaxRoundsError } = require('./errors');
 
+// Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
+// Last updated: 2026-03-18. Source: public provider pricing pages.
+const COST_PER_1K = {
+  // OpenAI
+  'gpt-4o': { in: 0.0025, out: 0.01 },
+  'gpt-4o-mini': { in: 0.00015, out: 0.0006 },
+  'gpt-4.1': { in: 0.002, out: 0.008 },
+  'gpt-4.1-mini': { in: 0.0004, out: 0.0016 },
+  'gpt-4.1-nano': { in: 0.0001, out: 0.0004 },
+  'o3-mini': { in: 0.0011, out: 0.0044 },
+  // Anthropic
+  'claude-sonnet-4-20250514': { in: 0.003, out: 0.015 },
+  'claude-haiku-4-5-20251001': { in: 0.0008, out: 0.004 },
+  'claude-opus-4-20250514': { in: 0.015, out: 0.075 },
+  // Fallback average across popular models (~$0.002 in, ~$0.008 out per 1K)
+  '_default': { in: 0.002, out: 0.008 },
+};
+
+function estimateCost(model, usage) {
+  if (!usage || !model) return null;
+  const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
+  return (
+    ((usage.inputTokens || 0) * rates.in +
+      (usage.outputTokens || 0) * rates.out) / 1000
+  );
+}
+
 class Loop {
   /**
    * @param {object} options
@@ -68,6 +95,7 @@ class Loop {
     this.stream?.emit({ type: 'loop:start', data: { messageCount: msgs.length } });
 
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
+    let totalCost = 0;
 
     for (let round = 0; round < this.maxRounds; round++) {
       if (this._stopped) break;
@@ -80,17 +108,20 @@ class Loop {
         this.stream?.emit({ type: 'loop:error', data: { error: err.message, round } });
         this.onError?.(err);
         if (this.throwOnError) throw err;
-        return { text: '', toolCalls: [], usage: lastUsage, error: err.message };
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message };
       }
 
       lastUsage = result.usage || lastUsage;
+      const model = this.provider.model || null;
+      const roundCost = estimateCost(model, lastUsage);
+      if (roundCost !== null) totalCost += roundCost;
 
       // No tool calls — LLM gave a final text response
       if (!result.toolCalls || result.toolCalls.length === 0) {
         this.stream?.emit({ type: 'loop:text', data: { text: result.text } });
         this.onText?.(result.text);
-        this.stream?.emit({ type: 'loop:done', data: { text: result.text, usage: lastUsage } });
-        return { text: result.text, toolCalls: [], usage: lastUsage, error: null };
+        this.stream?.emit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null };
       }
 
       // Execute tool calls
@@ -149,9 +180,9 @@ class Loop {
 
     // maxRounds exceeded
     const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
-    this.stream?.emit({ type: 'loop:done', data: { text: '', warning } });
+    this.stream?.emit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
     if (this.throwOnError) throw new MaxRoundsError(warning);
-    return { text: '', toolCalls: [], usage: lastUsage, error: warning };
+    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning };
   }
 
   /**

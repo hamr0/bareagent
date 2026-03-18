@@ -11,7 +11,7 @@
 
 ```
 
-**Agent orchestration in ~1700 lines. Zero required deps. MIT license.**
+**Agent orchestration in ~1800 lines. Zero required deps. MIT license.**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents.
 
@@ -60,7 +60,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
