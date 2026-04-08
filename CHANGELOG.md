@@ -2,6 +2,27 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-04-08
+
+### Added
+
+- **MCP Bridge** (`src/mcp-bridge.js`) — Auto-discover MCP servers from IDE configs (Claude Code, Cursor, Claude Desktop), connect via stdio JSON-RPC, and expose their tools as standard bareagent tools. Zero deps.
+  - First run discovers servers, writes `.mcp-bridge.json` with all tools set to `"allow"`. Edit the file to `"deny"` individual tools. Changes survive refresh.
+  - TTL-based refresh (default 24h) re-discovers servers, adds new tools as `"allow"`, preserves existing deny entries.
+  - `policy` option for runtime arg-dependent checks (e.g., block writes to `/etc` but allow `/tmp`).
+  - `systemContext` string for LLM awareness — tells the agent what tools are available and what's restricted.
+  - Concurrent tool call routing via JSON-RPC ID matching. Tested with real servers under load.
+  - Escalating process cleanup (SIGTERM → SIGKILL) prevents zombie processes.
+- New export: `bare-agent/mcp` → `createMCPBridge`, `discoverServers`.
+
+### Tests
+
+- 20 new unit tests (`test/mcp-bridge.test.js`): discovery, file-based governance, deny preservation on refresh, tool shape, concurrent routing, crash recovery, init timeout, malformed output, policy, systemContext.
+- 5 new integration tests (`test/integration-mcp-bridge.test.js`): real barebrowse connection, tool execution, concurrent calls, deny filtering.
+- Mock MCP server (`test/fixtures/mock-mcp-server.js`) for deterministic testing.
+
+---
+
 ## [0.4.3] — 2026-03-18
 
 ### Added

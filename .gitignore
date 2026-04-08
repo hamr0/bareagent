@@ -3,3 +3,5 @@ node_modules/
 *.log
 .env
 contrib/python/__pycache__/
+.barebrowse/
+.mcp-bridge.json

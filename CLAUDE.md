@@ -19,6 +19,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
 | JsonlTransport | src/transport-jsonl.js | JSONL output to writable stream (pipe-friendly) |
 | Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError |
+| MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools (deny/policy filtering) |
 
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
@@ -34,6 +35,7 @@ Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
 | `bare-agent/tools` | createBrowsingTools, createMobileTools |
+| `bare-agent/mcp` | createMCPBridge, discoverServers |
 
 ## Commands
 

@@ -29,12 +29,12 @@
 
 ```bash
 # Unit tests only (fast, no API keys needed)
-node --test test/errors.test.js test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js test/provider-clipipe.test.js test/run-plan.test.js test/circuit-breaker.test.js test/provider-fallback.test.js
+node --test test/errors.test.js test/retry.test.js test/loop.test.js test/providers.test.js test/planner.test.js test/state.test.js test/checkpoint.test.js test/memory.test.js test/stream.test.js test/scheduler.test.js test/provider-clipipe.test.js test/run-plan.test.js test/circuit-breaker.test.js test/provider-fallback.test.js test/mcp-bridge.test.js
 
 # Integration tests (requires API keys + Ollama running)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \
 ANTHROPIC_API_KEY=$(pass amr/claude_api | head -1) \
-node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js
+node --test test/integration.test.js test/integration-poc2.test.js test/integration-poc3.test.js test/integration-poc4.test.js test/integration-poc5.test.js test/integration-poc6.test.js test/integration-mcp-bridge.test.js
 
 # E2E tests (requires OPENAI_API_KEY)
 OPENAI_API_KEY=$(pass amr/openai_api | head -1) \

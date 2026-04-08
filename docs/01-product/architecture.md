@@ -16,6 +16,7 @@ Lightweight, composable agent orchestration. ~1017 lines, 0 required deps, MIT.
 index.js           Main exports (Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry)
 src/providers.js   Re-exports: OpenAI, Anthropic, Ollama
 src/stores.js      Re-exports: SQLite, JsonFile
+src/mcp.js         Re-exports: createMCPBridge, discoverServers
 ```
 
 All source in `src/`, flat structure with prefix naming.
@@ -155,6 +156,7 @@ SQLiteStore: WAL mode, FTS5 triggers for index sync, query words quoted and OR'd
 "."          -> index.js       (Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry)
 "./providers" -> src/providers.js (OpenAI, Anthropic, Ollama)
 "./stores"    -> src/stores.js    (SQLite, JsonFile)
+"./mcp"       -> src/mcp.js       (createMCPBridge, discoverServers)
 ```
 
 CLI: `bin/cli.js` -- subprocess JSONL entry point. Reads JSON from stdin, streams events to stdout.

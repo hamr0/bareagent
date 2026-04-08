@@ -24,6 +24,10 @@ Full project plan: component specs, data formats, usage profiles (minimal/medium
 Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots) and mobile tools strategy docs (library tools via `createMobileTools` and CLI session mode via `baremobile` CLI for Android + iOS device control).
 -> docs/00-context/blueprint.md
 
+## MCP Bridge
+Auto-discover MCP servers from IDE configs, expose as bareagent tools. Config discovery, deny/policy filtering, concurrent routing, lifecycle management. Zero deps.
+-> docs/02-features/usage-guide.md (section 11)
+
 ## Vision
 First-principles analysis of agent orchestration: what components exist, what a personal assistant actually needs, why frameworks are overcomplicated.
 -> docs/00-context/vision.md

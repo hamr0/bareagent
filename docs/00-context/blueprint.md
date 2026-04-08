@@ -19,6 +19,7 @@ ORCHESTRATION          EXECUTION              ACTUATION
                                                Built-in (optional):
                                                  barebrowse (library tools)
                                                  barebrowse (CLI session)
+                                                 MCP Bridge (any MCP server)
 ```
 
 **Providers:** OpenAI ✅ | Anthropic ✅ | Ollama ✅

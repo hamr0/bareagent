@@ -1020,7 +1020,110 @@ The pattern works for any platform — swap `platform.send` for your Telegram/Sl
 
 ---
 
-## 11. What bare-agent does NOT do
+## 11. MCP Bridge — use any MCP server as a tool
+
+Auto-discover MCP servers from your IDE configs and use them as bareagent tools. Zero manual wiring.
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createMCPBridge } = require('bare-agent/mcp');
+
+const bridge = await createMCPBridge();
+// Discovers servers from:
+//   .mcp.json (project)
+//   ~/.mcp.json (home)
+//   ~/.claude/mcp_servers.json (Claude Code)
+//   ~/.config/Claude/claude_desktop_config.json (Claude Desktop)
+//   ~/.cursor/mcp.json (Cursor)
+
+console.log(bridge.tools.map(t => t.name));
+// → ['barebrowse_goto', 'barebrowse_snapshot', 'baremobile_tap', ...]
+
+const loop = new Loop({
+  provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+});
+
+const result = await loop.run(
+  [{ role: 'user', content: 'Go to news.ycombinator.com and summarize the top stories' }],
+  bridge.tools,
+);
+
+await bridge.close(); // kills all server processes
+```
+
+### How governance works
+
+First run discovers servers from IDE configs and writes `.mcp-bridge.json` with all tools set to `"allow"`:
+
+```json
+{
+  "discovered": "2026-04-08T09:41:00Z",
+  "ttl": "24h",
+  "servers": {
+    "barebrowse": {
+      "command": "node",
+      "args": ["/path/to/mcp-server.js"],
+      "tools": {
+        "browse": "allow",
+        "goto": "allow",
+        "upload": "allow",
+        "drag": "allow"
+      }
+    }
+  }
+}
+```
+
+To restrict tools, edit the file — change `"allow"` to `"deny"`:
+
+```json
+"upload": "deny",
+"drag": "deny"
+```
+
+Next run respects your changes. Denied tools are excluded — the LLM never sees them. Refresh (TTL expiry or `refresh: true`) re-discovers servers but preserves your deny entries.
+
+### Options
+
+```javascript
+const bridge = await createMCPBridge({
+  servers: ['barebrowse'],           // limit to specific servers (omit for all)
+  timeout: 20000,                    // per-server init timeout (default: 15s)
+  refresh: true,                     // force re-discovery regardless of TTL
+  policy: async (server, tool, args) => {
+    // runtime arg-dependent checks (on top of file-based allow/deny)
+    if (tool === 'write_file' && args.path?.startsWith('/etc')) {
+      return 'Cannot write to /etc';
+    }
+    return true;
+  },
+});
+```
+
+### File-based deny vs runtime policy
+
+- **File (`"deny"` in `.mcp-bridge.json`)** — removes tools at list time. The LLM never sees them. Edit the file, no code changes needed.
+- **`policy` function** — gates at call time based on arguments. Use for context-dependent rules (allow writes to some paths but not others).
+
+### systemContext — LLM awareness
+
+The bridge generates a `systemContext` string describing available and restricted tools. Pass it to the Loop's system prompt so the agent knows its constraints:
+
+```javascript
+const loop = new Loop({
+  provider,
+  system: `You are a helpful assistant.\n\n${bridge.systemContext}`,
+});
+```
+
+### Tool naming
+
+MCP tools are namespaced as `{server}_{tool}` to avoid collisions. `barebrowse`'s `goto` becomes `barebrowse_goto`. `baremobile`'s `snapshot` becomes `baremobile_snapshot`.
+
+---
+
+## 12. What bare-agent does NOT do
 
 | Not included | Why | Use instead |
 |-------------|-----|-------------|
