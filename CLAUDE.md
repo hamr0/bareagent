@@ -7,7 +7,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, Loop-level `policy` + `audit` gate every tool call, fail-safe verdict semantics, durable audit flush) |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, Loop-level `policy(tool, args, ctx)` + `audit` gate every tool call, fail-safe verdict, durable audit flush, `maxCost` runaway cap, unified `loop:error`+`onError` for every silent-ish failure) |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
@@ -18,7 +18,8 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | Retry | src/retry.js | Backoff with jitter for async functions |
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
 | JsonlTransport | src/transport-jsonl.js | JSONL output to writable stream (pipe-friendly) |
-| Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError |
+| Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError, MaxCostError |
+| Policy helpers | src/policy.js | pathAllowlist, commandAllowlist, combinePolicies — composable predicates for Loop({ policy }) |
 | MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools. Static allow/deny via .mcp-bridge.json. Runtime policy moved to Loop-level in v0.6.0 |
 
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
@@ -36,6 +37,7 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
 | `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools |
+| `bare-agent/policy` | pathAllowlist, commandAllowlist, combinePolicies |
 | `bare-agent/mcp` | createMCPBridge, discoverServers |
 
 ## Commands

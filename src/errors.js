@@ -49,6 +49,12 @@ class MaxRoundsError extends BareAgentError {
   }
 }
 
+class MaxCostError extends BareAgentError {
+  constructor(message, opts = {}) {
+    super(message || 'Loop exceeded maximum cost cap', { code: 'MAX_COST', retryable: false, ...opts });
+  }
+}
+
 module.exports = {
   BareAgentError,
   ProviderError,
@@ -57,4 +63,5 @@ module.exports = {
   ValidationError,
   CircuitOpenError,
   MaxRoundsError,
+  MaxCostError,
 };

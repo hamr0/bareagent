@@ -18,6 +18,7 @@ const {
   ValidationError,
   CircuitOpenError,
   MaxRoundsError,
+  MaxCostError,
 } = require('./src/errors');
 
 module.exports = {
@@ -38,4 +39,5 @@ module.exports = {
   ValidationError,
   CircuitOpenError,
   MaxRoundsError,
+  MaxCostError,
 };

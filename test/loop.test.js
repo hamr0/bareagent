@@ -838,4 +838,194 @@ describe('Loop', () => {
       fs.unlinkSync(auditPath);
     });
   });
+
+  // --- v0.7.0: policy ctx, maxCost, unified errors ---
+
+  describe('policy ctx (per-caller routing)', () => {
+    it('forwards options.ctx to the policy closure', async () => {
+      const seen = [];
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({
+        provider,
+        policy: async (name, args, ctx) => { seen.push(ctx); return true; },
+      });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool], { ctx: { userId: 42, role: 'admin' } });
+      assert.deepEqual(seen[0], { userId: 42, role: 'admin' });
+    });
+
+    it('policy can branch on ctx to allow/deny per caller', async () => {
+      const policy = async (name, args, ctx) => {
+        if (ctx?.isOwner) return true;
+        return 'Denied: owner only';
+      };
+      const provider = (capture) => ({
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+          }
+          capture.toolMsg = messages.find(m => m.role === 'tool')?.content;
+          return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      });
+
+      const captureOwner = {};
+      const loop1 = new Loop({ provider: provider(captureOwner), policy });
+      await loop1.run([{ role: 'user', content: 'x' }], [weatherTool], { ctx: { isOwner: true } });
+      assert.match(captureOwner.toolMsg, /22/); // got the weather result
+
+      const captureUser = {};
+      const loop2 = new Loop({ provider: provider(captureUser), policy });
+      await loop2.run([{ role: 'user', content: 'x' }], [weatherTool], { ctx: { isOwner: false } });
+      assert.match(captureUser.toolMsg, /owner only/);
+    });
+  });
+
+  describe('maxCost', () => {
+    const { MaxCostError } = require('../src/errors');
+
+    it('throws MaxCostError when cost exceeds cap', async () => {
+      // High-cost model that blows the cap on the first round
+      const provider = {
+        model: 'claude-opus-4-20250514',
+        async generate() {
+          return {
+            text: '',
+            toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }],
+            usage: { inputTokens: 100000, outputTokens: 50000 },
+          };
+        },
+      };
+      const loop = new Loop({ provider, maxCost: 0.01 });
+      await assert.rejects(
+        () => loop.run([{ role: 'user', content: 'x' }], [weatherTool]),
+        (err) => {
+          assert.ok(err instanceof MaxCostError);
+          assert.match(err.message, /cost.*exceeded cap/);
+          return true;
+        }
+      );
+    });
+
+    it('respects throwOnError: false and returns error string', async () => {
+      const provider = {
+        model: 'claude-opus-4-20250514',
+        async generate() {
+          return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 100000, outputTokens: 50000 } };
+        },
+      };
+      const loop = new Loop({ provider, maxCost: 0.01, throwOnError: false });
+      const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.match(result.error, /exceeded cap/);
+    });
+
+    it('does not fire when cost stays under the cap', async () => {
+      const provider = mockProvider([
+        { text: 'done', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } },
+      ]);
+      const loop = new Loop({ provider, maxCost: 10 });
+      const result = await loop.run([{ role: 'user', content: 'x' }]);
+      assert.equal(result.text, 'done');
+    });
+  });
+
+  describe('unified error surfacing', () => {
+    it('callback throw in onToolCall fires onError but does not break the loop', async () => {
+      const errors = [];
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({
+        provider,
+        onToolCall: () => { throw new Error('listener broke'); },
+        onError: (err, meta) => errors.push({ err: err.message, meta }),
+      });
+      const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.equal(result.text, 'ok');
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].err, 'listener broke');
+      assert.equal(errors[0].meta.source, 'callback:onToolCall');
+    });
+
+    it('stream listener throw is isolated', async () => {
+      const badStream = { emit: () => { throw new Error('stream broke'); } };
+      const errors = [];
+      const provider = mockProvider([
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({
+        provider,
+        stream: badStream,
+        onError: (err) => errors.push(err.message),
+      });
+      const result = await loop.run([{ role: 'user', content: 'x' }]);
+      // Loop completes despite stream errors
+      assert.equal(result.text, 'ok');
+      assert.ok(errors.length > 0, 'onError should have been called');
+    });
+  });
+
+  describe('Checkpoint timeout', () => {
+    const { Checkpoint } = require('../src/checkpoint');
+
+    it('Checkpoint.ask rejects with TimeoutError when reply never arrives', async () => {
+      const cp = new Checkpoint({
+        tools: ['x'],
+        send: async () => {},
+        waitForReply: () => new Promise(() => {}), // never resolves
+        timeout: 80,
+      });
+      await assert.rejects(
+        () => cp.ask('?'),
+        (err) => {
+          assert.match(err.message, /no reply within 80ms/);
+          return true;
+        }
+      );
+    });
+
+    it('Loop catches Checkpoint timeout and auto-denies the tool call', async () => {
+      const cp = new Checkpoint({
+        tools: ['get_weather'],
+        send: async () => {},
+        waitForReply: () => new Promise(() => {}),
+        timeout: 60,
+      });
+      let capturedToolMsg = null;
+      const errors = [];
+      const provider = {
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+          }
+          capturedToolMsg = messages.find(m => m.role === 'tool' && m.tool_call_id === 'c1')?.content;
+          return { text: 'ack', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      };
+      const loop = new Loop({
+        provider,
+        checkpoint: cp,
+        onError: (err, meta) => errors.push(meta.source),
+      });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.match(capturedToolMsg, /Checkpoint failed.*no reply/);
+      assert.ok(errors.includes('checkpoint'));
+    });
+
+    it('timeout=0 disables the timeout (backwards compat)', async () => {
+      const cp = new Checkpoint({
+        tools: ['x'],
+        send: async () => {},
+        waitForReply: async () => 'yes',
+        timeout: 0,
+      });
+      const reply = await cp.ask('?');
+      assert.equal(reply, 'yes');
+    });
+  });
 });

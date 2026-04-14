@@ -60,7 +60,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run. Loop-level `policy` + `audit` gate every tool call (native, MCP, browsing, mobile, user-defined) through one hook, JSONL audit to disk |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run. Loop-level `policy(toolName, args, ctx)` + `audit` gate every tool call (native, MCP, browsing, mobile, user-defined) through one hook — `ctx` is a per-call opaque blob for multi-tenant routing. `maxCost` cap catches runaway loops before they burn budget. Unified `loop:error` + `onError` surface every previously silent failure (audit write, callback throw, Checkpoint timeout) |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
@@ -71,7 +71,8 @@ Every piece works alone — take what you need, ignore the rest.
 | **Checkpoint** | Human approval gate. You provide the transport — terminal, Telegram, Slack, whatever |
 | **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |
 | **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
-| **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `CircuitOpenError` |
+| **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `MaxCostError`, `CircuitOpenError`, `ValidationError` |
+| **Policy helpers** | `pathAllowlist`, `commandAllowlist`, `combinePolicies` — composable predicates for `Loop({ policy })`. Home expansion, deny-wins, short-circuit combinator, argv-based safe allowlists. `require('bare-agent/policy')` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
 | **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
 | **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |

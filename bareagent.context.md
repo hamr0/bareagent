@@ -20,6 +20,7 @@ Five entry points:
 - `require('bare-agent/transports')` — JsonlTransport
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools
 - `require('bare-agent/mcp')` — createMCPBridge, discoverServers
+- `require('bare-agent/policy')` — pathAllowlist, commandAllowlist, combinePolicies
 
 ## Which components do I need?
 
@@ -53,6 +54,11 @@ Five entry points:
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
 | Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
 | Gate every tool call with one policy hook | Loop({ policy }) |
+| Route policy decisions per user / tenant / chat | Loop({ policy }) + `loop.run(msgs, tools, { ctx })` |
+| Cap total USD spend per run | Loop({ maxCost: 0.50 }) — throws `MaxCostError` |
+| Compose path + command allowlists without boilerplate | `bare-agent/policy` helpers |
+| Auto-deny Checkpoint prompts that never get a reply | Checkpoint({ timeout: 300000 }) |
+| Get one hook for every silent-ish failure | Loop({ onError }) + `loop:error` stream events |
 | Audit every tool call to JSONL | Loop({ audit: './audit.jsonl' }) |
 | Send messages across WhatsApp/iMessage/Signal/Discord/Slack/Telegram | createMCPBridge + beeperbox |
 
@@ -173,6 +179,129 @@ const loop = new Loop({
 - File is created on first write, appended to on subsequent writes. No rotation, no size cap — operational concerns are the user's responsibility.
 
 **Same policy covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all pass through the same `Loop.run()` dispatch and hit the same `policy` function. The `.mcp-bridge.json` allow/deny file still controls **which** MCP tools are exposed to the Loop in the first place; `policy` handles arg-dependent runtime decisions on top of that.
+
+### Per-caller governance with ctx (multi-user, multi-tenant)
+
+Real autonomous agents serve more than one user. The policy signature accepts a third arg `ctx` — an opaque blob you pass per-call via `loop.run(msgs, tools, { ctx })`. Bareagent forwards it unchanged; you define the shape.
+
+```javascript
+const policy = async (toolName, args, ctx) => {
+  if (isHardDenied(toolName, args)) return 'hard-denied';   // nobody, ever
+  if (ctx?.isOwner) return true;                             // owner: anything not hard-denied
+  if (ctx?.adminGroupIds?.has(ctx.senderId)) return adminPolicy(toolName, args);
+  return userPolicy(toolName, args);                         // everyone else: narrow
+};
+
+const loop = new Loop({ provider, policy });
+
+// Per-request: pass ctx; the same closure routes on it
+await loop.run(messages, tools, {
+  ctx: { senderId, chatId, isOwner, adminGroupIds },
+});
+```
+
+One Loop, one policy closure, one audit file — but per-user routing. No need to rebuild the Loop per request, no closure gymnastics. Multi-tenant agents are a one-liner.
+
+### Cost caps (`maxCost`) — the runaway catch
+
+Pair `maxCost` with your policy to make autonomous agents safe to leave running. The cap is checked after every round; when cumulative estimated USD exceeds it, the Loop throws `MaxCostError` (or returns `{error}` with `throwOnError: false`).
+
+```javascript
+const { Loop, MaxCostError } = require('bare-agent');
+
+const loop = new Loop({
+  provider,
+  maxCost: 0.50,   // USD — hard cap on accumulated cost per run()
+});
+
+try {
+  await loop.run(messages, tools);
+} catch (err) {
+  if (err instanceof MaxCostError) {
+    console.warn(`Agent stopped — cost ${err.context.cost} exceeded cap ${err.context.maxCost}`);
+    // pager, Slack alert, human review
+  }
+}
+```
+
+**Why cost cap instead of rate limiting?** A rate limiter caps tool calls per minute — hostile to legitimate long-running research tasks. A cost cap caps the thing you actually care about (money) and catches the same runaway-loop failure mode (retry storms, infinite tool loops) because those burn tokens and hit the cap. Ship this, not per-minute throttles.
+
+### Policy helpers — compose instead of hand-rolling
+
+`bare-agent/policy` ships three small building blocks so you don't write path-startsWith logic with your own home-expansion bugs:
+
+```javascript
+const { pathAllowlist, commandAllowlist, combinePolicies } = require('bare-agent/policy');
+
+const policy = combinePolicies(
+  pathAllowlist({
+    allow: ['~/Documents', '~/Projects', '/tmp'],
+    deny: ['/etc', '/var', '/usr'],
+    toolNames: ['shell_read', 'shell_grep'],
+  }),
+  commandAllowlist({
+    allow: ['ls', 'cat', 'grep', 'ps', 'df', 'git', 'node'],
+    deny: ['rm', 'sudo', 'dd', 'mkfs'],
+    toolName: 'shell_run',   // gates argv[0] — injection-proof
+  }),
+  async (toolName, args, ctx) => {
+    if (!ctx?.isOwner && toolName === 'shell_run') return 'Owner only';
+    return true;
+  },
+);
+
+const loop = new Loop({ provider, policy });
+```
+
+- **`pathAllowlist`** — home expansion, path normalization, deny-wins, optional per-tool gating via `toolNames`.
+- **`commandAllowlist`** — gates `argv[0]` for `shell_run` (safe) or `command.split(/\s+/)[0]` for `shell_exec` (documented caveat: bypassable via shell metacharacters).
+- **`combinePolicies(...)`** — short-circuit combinator. First non-`true` verdict wins. Forwards `ctx` down the chain so every step sees the same caller context.
+
+Each helper returns an async function matching the policy contract, so they compose freely with your own closures.
+
+### Checkpoint timeout — no silent hangs
+
+`Checkpoint.waitForReply()` is async and used to hang forever if the user never replied. As of v0.7.0, Checkpoint accepts a `timeout` option (default 5 minutes). On expiry it throws `TimeoutError`; the Loop catches it, auto-denies the tool call with reason `"Checkpoint failed: ... auto-denied"`, and routes the error through `loop:error` + `onError`.
+
+```javascript
+const checkpoint = new Checkpoint({
+  tools: ['send_email', 'shell_exec'],
+  send: async (q) => await platform.send(chatId, q),
+  waitForReply: async () => await waitForChatReply(chatId),
+  timeout: 10 * 60 * 1000,  // 10 minutes (default is 5)
+});
+
+const loop = new Loop({ provider, checkpoint });
+```
+
+Set `timeout: 0` to opt out and keep the old "hang forever" behaviour.
+
+### Unified error surfacing — three hooks, one principle
+
+*No silent failures.* Every previously-silent failure path in bareagent now routes through one of three operator hooks:
+
+| Hook | Use for | Fires on |
+|---|---|---|
+| `audit: './audit.jsonl'` | Forensic replay, compliance, billing | Every tool decision with result/reason/error |
+| `stream` + a transport | Live telemetry (Datadog, Sentry, Loki) | Every loop event including new `loop:error` |
+| `onError(err, { source, ...meta })` | Pager-style alerts (one function, one-liner) | Provider errors, audit failures, callback throws, Checkpoint timeouts, stream listener exceptions, cost-cap breaches |
+
+```javascript
+const loop = new Loop({
+  provider,
+  policy,
+  audit: './audit.jsonl',
+  stream,
+  onError: (err, meta) => {
+    // Fires for every silent-ish failure with { source, ...extra }
+    // source ∈ {'provider', 'audit:write', 'audit:serialize', 'callback:onToolCall',
+    //           'callback:onText', 'checkpoint', 'stream', 'cost-cap'}
+    pager.send({ level: 'warn', source: meta.source, err: err.message });
+  },
+});
+```
+
+If you run bareagent headless, **wire at least `onError` and either `audit` or `stream`**. Otherwise you are flying blind.
 
 ## Wiring with Checkpoint (human approval)
 

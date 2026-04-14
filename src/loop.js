@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
-const { ToolError, MaxRoundsError } = require('./errors');
+const { ToolError, MaxRoundsError, MaxCostError } = require('./errors');
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
 // Last updated: 2026-03-18. Source: public provider pricing pages.
@@ -62,9 +62,48 @@ class Loop {
     }
     this.policy = options.policy || null;
     this.audit = options.audit || null;
+    this.maxCost = typeof options.maxCost === 'number' && options.maxCost > 0 ? options.maxCost : null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
     this._auditInFlight = new Set();
+  }
+
+  // Unified error emitter — every silent-ish failure path routes through here so
+  // operators see audit writes, callback throws, checkpoint timeouts, stream listener
+  // errors in one place: loop:error stream event + onError callback.
+  _reportError(source, err, extra = {}) {
+    const message = err?.message || String(err);
+    this._safeEmit({ type: 'loop:error', data: { source, error: message, ...extra } });
+    if (this.onError) {
+      try {
+        this.onError(err, { source, ...extra });
+      } catch (cbErr) {
+        console.warn(`[Loop] onError callback threw: ${cbErr.message}`);
+      }
+    }
+  }
+
+  // Swallow-proof stream emit: a throwing listener must not corrupt Loop state.
+  _safeEmit(event) {
+    if (!this.stream) return;
+    try {
+      this.stream.emit(event);
+    } catch (err) {
+      console.warn(`[Loop] stream listener threw on ${event.type}: ${err.message}`);
+      if (this.onError && event.type !== 'loop:error') {
+        try { this.onError(err, { source: 'stream', eventType: event.type }); } catch { /* swallow */ }
+      }
+    }
+  }
+
+  // Fire a user callback without letting its throw kill the loop.
+  _safeCall(name, fn, ...args) {
+    if (!fn) return;
+    try {
+      fn(...args);
+    } catch (err) {
+      this._reportError(`callback:${name}`, err);
+    }
   }
 
   // Append one JSONL record. Returns nothing (fire-and-forget for callers)
@@ -75,11 +114,11 @@ class Loop {
     try {
       line = JSON.stringify(record) + '\n';
     } catch (err) {
-      console.warn(`[Loop] audit serialize failed: ${err.message}`);
+      this._reportError('audit:serialize', err, { tool: record?.tool });
       return;
     }
     const p = fs.promises.appendFile(this.audit, line)
-      .catch(err => console.warn(`[Loop] audit write failed: ${err.message}`))
+      .catch(err => this._reportError('audit:write', err, { tool: record?.tool }))
       .finally(() => this._auditInFlight.delete(p));
     this._auditInFlight.add(p);
   }
@@ -104,6 +143,7 @@ class Loop {
   async run(messages, tools = [], options = {}) {
     this._stopped = false;
     const system = options.system || this.system;
+    const ctx = options.ctx || null; // per-run opaque blob forwarded to policy
     const msgs = system
       ? [{ role: 'system', content: system }, ...messages]
       : [...messages];
@@ -125,7 +165,7 @@ class Loop {
       }
     }
 
-    this.stream?.emit({ type: 'loop:start', data: { messageCount: msgs.length } });
+    this._safeEmit({ type: 'loop:start', data: { messageCount: msgs.length } });
 
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
@@ -138,8 +178,7 @@ class Loop {
         const generate = () => this.provider.generate(msgs, tools, options);
         result = this.retry ? await this.retry.call(generate) : await generate();
       } catch (err) {
-        this.stream?.emit({ type: 'loop:error', data: { error: err.message, round } });
-        this.onError?.(err);
+        this._reportError('provider', err, { round });
         await this.flush();
         if (this.throwOnError) throw err;
         return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message };
@@ -150,12 +189,22 @@ class Loop {
       const roundCost = estimateCost(model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
 
+      // Cost cap — fail fast before the next round costs more money.
+      if (this.maxCost !== null && totalCost > this.maxCost) {
+        const msg = `[Loop] cost ${totalCost.toFixed(4)} exceeded cap ${this.maxCost.toFixed(4)} after round ${round + 1}`;
+        const err = new MaxCostError(msg, { context: { cost: totalCost, maxCost: this.maxCost, round } });
+        this._reportError('cost-cap', err, { cost: totalCost, maxCost: this.maxCost });
+        await this.flush();
+        if (this.throwOnError) throw err;
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: msg };
+      }
+
       // No tool calls — LLM gave a final text response
       if (!result.toolCalls || result.toolCalls.length === 0) {
-        this.stream?.emit({ type: 'loop:text', data: { text: result.text } });
-        this.onText?.(result.text);
+        this._safeEmit({ type: 'loop:text', data: { text: result.text } });
+        this._safeCall('onText', this.onText, result.text);
         await this.flush();
-        this.stream?.emit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
+        this._safeEmit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
         return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null };
       }
 
@@ -177,34 +226,44 @@ class Loop {
         if (!tool) {
           const errMsg = `[Loop] Unknown tool: ${tc.name}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
-          this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
+          this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
           continue;
         }
 
         // Checkpoint — ask for approval before executing
         if (this.checkpoint?.shouldAsk(tc.name, tc.arguments)) {
-          this.stream?.emit({ type: 'checkpoint:ask', data: { tool: tc.name, args: tc.arguments } });
-          const reply = await this.checkpoint.ask(
-            `Approve ${tc.name}(${JSON.stringify(tc.arguments)})?`,
-            { tool: tc.name, args: tc.arguments }
-          );
-          this.stream?.emit({ type: 'checkpoint:reply', data: { reply } });
+          this._safeEmit({ type: 'checkpoint:ask', data: { tool: tc.name, args: tc.arguments } });
+          let reply;
+          try {
+            reply = await this.checkpoint.ask(
+              `Approve ${tc.name}(${JSON.stringify(tc.arguments)})?`,
+              { tool: tc.name, args: tc.arguments }
+            );
+          } catch (err) {
+            // Checkpoint errors (e.g. timeout, transport failure) auto-deny and
+            // get reported via loop:error + onError. The loop never hangs silently.
+            this._reportError('checkpoint', err, { tool: tc.name });
+            msgs.push({ role: 'tool', tool_call_id: tc.id, content: `[Loop] Checkpoint failed: ${err.message}. Action auto-denied.` });
+            continue;
+          }
+          this._safeEmit({ type: 'checkpoint:reply', data: { reply } });
           if (!reply || reply.toLowerCase() === 'no' || reply.toLowerCase() === 'n') {
             msgs.push({ role: 'tool', tool_call_id: tc.id, content: 'User denied this action.' });
             continue;
           }
         }
 
-        this.stream?.emit({ type: 'loop:tool_call', data: { tool: tc.name, args: tc.arguments } });
-        this.onToolCall?.(tc.name, tc.arguments);
+        this._safeEmit({ type: 'loop:tool_call', data: { tool: tc.name, args: tc.arguments } });
+        this._safeCall('onToolCall', this.onToolCall, tc.name, tc.arguments);
 
         // Policy check — runs before execute. Fail-safe: only verdict === true allows;
         // anything else (false, string, undefined, object, throw) denies. A string verdict
-        // is used verbatim as the deny reason.
+        // is used verbatim as the deny reason. `ctx` (opaque blob passed via
+        // loop.run(msgs, tools, { ctx })) is forwarded as the third arg for per-caller gating.
         if (this.policy) {
           let verdict;
           try {
-            verdict = await this.policy(tc.name, tc.arguments);
+            verdict = await this.policy(tc.name, tc.arguments, ctx);
           } catch (err) {
             verdict = `[Loop] policy error: ${err.message}`;
           }
@@ -213,7 +272,7 @@ class Loop {
               ? verdict
               : `[Loop] Tool "${tc.name}" denied by policy`;
             msgs.push({ role: 'tool', tool_call_id: tc.id, content: reason });
-            this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, denied: true, reason } });
+            this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, denied: true, reason } });
             this._writeAudit({
               ts: new Date().toISOString(),
               tool: tc.name,
@@ -231,7 +290,7 @@ class Loop {
           const toolResult = this.retry ? await this.retry.call(execute) : await execute();
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
-          this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
+          this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
           this._writeAudit({
             ts: new Date().toISOString(),
             tool: tc.name,
@@ -244,7 +303,7 @@ class Loop {
           const toolErr = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
           const errMsg = `[Loop] Tool error: ${toolErr.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
-          this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
+          this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
           this._writeAudit({
             ts: new Date().toISOString(),
             tool: tc.name,
@@ -260,7 +319,7 @@ class Loop {
     // maxRounds exceeded
     const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
     await this.flush();
-    this.stream?.emit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
+    this._safeEmit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
     if (this.throwOnError) throw new MaxRoundsError(warning);
     return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning };
   }

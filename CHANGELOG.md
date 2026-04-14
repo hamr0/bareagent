@@ -2,6 +2,62 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.7.0] — 2026-04-14
+
+Foundations for autonomous agents: per-caller policy routing, cost caps, Checkpoint safety, composable policy helpers, and a discipline pass eliminating silent failures.
+
+### Added
+
+- **Per-caller policy ctx.** `policy(toolName, args, ctx)` — the third arg is an opaque blob forwarded from `loop.run(messages, tools, { ctx })`. Consumers define the shape (`{ userId, isOwner, tenantId, ... }`); bareagent just forwards. Lets one policy closure route per-user without rebuilding the Loop per request. Multi-tenant agents are now a one-liner.
+- **`Loop({ maxCost })` + `MaxCostError`.** Accumulated cost cap enforced after every round. Throws (or returns `error`) as soon as the cap is exceeded. Primary safety rail against runaway loops — kicks in before budget damage rather than after. `MaxCostError` exported from both `bare-agent` and `bare-agent/errors`.
+- **`Checkpoint({ timeout })`.** Default 5 minutes. If `waitForReply` doesn't resolve within the timeout, Checkpoint throws `TimeoutError` instead of hanging forever. The Loop catches it, auto-denies the tool call with reason `"Checkpoint failed: ... auto-denied"`, and routes the error through `loop:error` + `onError`. Set `timeout: 0` to disable.
+- **`bare-agent/policy` entry point** — new exports: `pathAllowlist`, `commandAllowlist`, `combinePolicies`. Composable predicates matching the policy contract. Lift 60+ lines of boilerplate out of every consumer. Path helper expands `~`, normalizes paths, rejects under denied roots, enforces allowlist prefixes, optional per-tool gating. Command helper inspects `argv[0]` for `shell_run` (injection-proof) or `command.split(/\s+/)[0]` for `shell_exec` (with documented caveat). Combinator short-circuits on first non-true verdict and forwards `ctx` down the chain.
+
+### Changed
+
+- **Unified error surfacing — discipline pass.** Every previously silent failure now routes through one hook:
+  - Audit write / serialize failures → `loop:error` stream event + `onError(err, { source: 'audit:write' })`
+  - `onToolCall` / `onText` / user callback throws → `loop:error` + `onError(err, { source: 'callback:<name>' })`, loop continues
+  - Stream listener throws → caught, logged via `onError(err, { source: 'stream', eventType })`, loop continues
+  - Checkpoint timeout / transport failure → caught, tool auto-denied with reason, `loop:error` + `onError(err, { source: 'checkpoint' })`
+  - Provider errors → already routed through `loop:error`; now also fire `onError` with `{ source: 'provider', round }`
+- **`Loop._safeEmit`, `_safeCall`, `_reportError`** — three internal helpers wrap every emit/callback site. No more bare `this.stream?.emit(...)` or `this.onError?.(err)` — all go through the helpers, which guarantee no silent swallows.
+- **Checkpoint.ask** — now races `waitForReply` against a timer. Clears timer on resolution. Rejects with `TimeoutError` on expiry.
+
+### Philosophy
+
+- **Three observability hooks, one principle.** Every failure now lands in exactly one of three places and the library has no other silent paths:
+  - `audit` JSONL for forensic replay (every tool decision, durable)
+  - `stream` for live telemetry (`loop:error`, `loop:tool_call`, etc. — wire JsonlTransport or your own)
+  - `onError` for pager-style alerts (one function, fires on every silent-ish failure)
+- **Per-caller ctx is the default case.** Multi-user autonomous agents are the norm, not an exception. The third arg makes that foundational instead of a closure hack.
+- **Cost caps are the primary runaway catch.** Rate limiters were considered and rejected — they fight legitimate long-running loop agents. A cost cap catches the same failure mode with a metric users actually care about.
+
+### Tests
+
+- 110/110 passing (48 loop + 22 shell-tools + 17 policy-helpers + 23 checkpoint).
+- New: `test/policy-helpers.test.js` (23 tests) covering pathAllowlist, commandAllowlist, combinePolicies including short-circuit semantics, ctx forwarding, `~` expansion, deny-wins, relative path resolution, argv vs shell-string gating.
+- New: 4 describe blocks in `test/loop.test.js`:
+  - `policy ctx` — forwards ctx, branches on it for owner vs user routing
+  - `maxCost` — throws MaxCostError over cap, respects throwOnError, no false positives under cap
+  - `unified error surfacing` — callback throws fire onError without breaking loop, stream listener throws isolated
+  - `Checkpoint timeout` — ask rejects with TimeoutError, Loop catches and auto-denies, timeout=0 disables
+
+### Docs
+
+- `bareagent.context.md` — new "Per-caller governance with ctx" section, "Cost caps with maxCost" section, "Checkpoint timeout" note, `bare-agent/policy` recipe.
+- `README.md` — Loop row updated for ctx+maxCost, Errors row adds MaxCostError.
+- `CLAUDE.md` — Loop row, new Policy helpers row, bare-agent/policy entry point.
+- `CHANGELOG.md` — this entry.
+
+### Migration from v0.6.x
+
+- **Zero-config upgrade** if you don't use `policy`, `maxCost`, or `Checkpoint({ timeout })`. Existing behaviour preserved.
+- **Policy closures** can now accept a third `ctx` arg but are not required to — old `(toolName, args)` signatures work unchanged.
+- **Checkpoint** gains a 5-minute default timeout. If you rely on `waitForReply` hanging indefinitely, set `timeout: 0` explicitly.
+
+---
+
 ## [0.6.2] — 2026-04-14
 
 Post-review patch fixing correctness, security, and migration findings from the v0.6.0 + v0.6.1 code review. No API additions beyond `shell_run` and `loop.flush()`; behaviour tightened across the board.
