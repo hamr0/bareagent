@@ -7,7 +7,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true by default, cost estimation built-in) |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, Loop-level `policy` + `audit` gate every tool call, fail-safe verdict semantics, durable audit flush) |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
@@ -19,12 +19,13 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
 | JsonlTransport | src/transport-jsonl.js | JSONL output to writable stream (pipe-friendly) |
 | Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError |
-| MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools (deny/policy filtering) |
+| MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools. Static allow/deny via .mcp-bridge.json. Runtime policy moved to Loop-level in v0.6.0 |
 
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
 Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse) — library tools for inline snapshots, CLI session (`npx barebrowse`) for token-efficient disk-based browsing
 Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS device control via snapshot/tap/type pattern
+Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_run (execFile argv), shell_exec (raw shell). Cross-platform pure Node, no external binaries
 
 ## Exports
 
@@ -34,7 +35,7 @@ Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS
 | `bare-agent/providers` | All providers including Fallback |
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
-| `bare-agent/tools` | createBrowsingTools, createMobileTools |
+| `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools |
 | `bare-agent/mcp` | createMCPBridge, discoverServers |
 
 ## Commands

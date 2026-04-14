@@ -18,7 +18,8 @@ Five entry points:
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
-- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools
+- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools
+- `require('bare-agent/mcp')` — createMCPBridge, discoverServers
 
 ## Which components do I need?
 
@@ -48,6 +49,12 @@ Five entry points:
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
 | Control Android/iOS devices | createMobileTools + Loop |
 | Control mobile (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
+| Read files, list directories, run shell commands, grep | createShellTools + Loop({ policy }) |
+| Auto-discover MCP servers from IDE configs | createMCPBridge |
+| Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
+| Gate every tool call with one policy hook | Loop({ policy }) |
+| Audit every tool call to JSONL | Loop({ audit: './audit.jsonl' }) |
+| Send messages across WhatsApp/iMessage/Signal/Discord/Slack/Telegram | createMCPBridge + beeperbox |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -117,6 +124,55 @@ const loop = new Loop({
   system: `Use this context:\n${context}`,
 });
 ```
+
+## Wiring with governance (policy + audit)
+
+Every tool call (native, MCP, browsing, mobile, user-defined) flows through `Loop.run()`. The `policy` option gates each call before execute; the `audit` option writes one JSONL line per call to disk. One hook covers every tool in the agent.
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+
+const loop = new Loop({
+  provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+  policy: async (toolName, args) => {
+    if (toolName === 'shell_exec') {
+      const base = args.command.trim().split(/\s+/)[0];
+      if (!['ls', 'cat', 'grep', 'ps', 'df'].includes(base)) {
+        return `Denied: ${base} is not in the allowlist for this agent.`;
+      }
+    }
+    if (toolName === 'beeperbox_send_message' && args.chat_id?.includes('finance')) {
+      return 'Finance chats are read-only for this agent.';
+    }
+    return true;
+  },
+  audit: './audit.jsonl',
+});
+```
+
+**Policy return values:**
+
+| Return | Effect |
+|---|---|
+| `true` | Tool executes normally. |
+| `false` | Tool call aborted. Generic `[Loop] Tool "X" denied by policy` returned to the LLM as tool result — it can reason around the refusal. |
+| `string` | Same as `false`, but the string is returned verbatim. Use this to give the LLM an actionable reason. |
+| throws | Treated as a deny. The thrown message becomes the reason. Loop continues. |
+| omitted | Allow-all (existing behaviour). |
+
+**Audit file format** — one JSON object per line, append-only:
+
+```json
+{"ts":"2026-04-13T12:34:56.789Z","tool":"shell_exec","args":{"command":"ls /tmp"},"decision":"allow","result":"foo\nbar","durationMs":12}
+{"ts":"2026-04-13T12:34:57.123Z","tool":"shell_exec","args":{"command":"rm -rf /"},"decision":"deny","reason":"Denied: rm is not in the allowlist"}
+{"ts":"2026-04-13T12:34:58.000Z","tool":"shell_exec","args":{"command":"nonexistent"},"decision":"allow","error":"Command failed"}
+```
+
+- Writes are async and best-effort — an audit write failure logs a warning and never aborts the tool call.
+- File is created on first write, appended to on subsequent writes. No rotation, no size cap — operational concerns are the user's responsibility.
+
+**Same policy covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all pass through the same `Loop.run()` dispatch and hit the same `policy` function. The `.mcp-bridge.json` allow/deny file still controls **which** MCP tools are exposed to the Loop in the first place; `policy` handles arg-dependent runtime decisions on top of that.
 
 ## Wiring with Checkpoint (human approval)
 
@@ -619,3 +675,173 @@ try {
 ```
 
 Mobile tools follow the observe-act pattern: action tools auto-return a fresh snapshot so the LLM sees the result immediately. Tools: `mobile_snapshot`, `mobile_tap`, `mobile_type`, `mobile_press`, `mobile_scroll`, `mobile_swipe`, `mobile_long_press`, `mobile_launch`, `mobile_back`, `mobile_home`, `mobile_screenshot`, `mobile_tap_xy`, `mobile_find_text`, `mobile_wait_text`, `mobile_wait_state`. Android-only: `mobile_intent`, `mobile_tap_grid`, `mobile_grid`. iOS-only: `mobile_unlock`.
+
+### Recipe 8b: Loop + Shell Tools (cross-platform primitives)
+
+`createShellTools()` returns three pure-Node tools that work identically on linux, macOS, and Windows — no external binaries, no platform detection.
+
+| Tool | Purpose |
+|---|---|
+| `shell_read` | Read a file (utf8, 256KB cap) or list a directory (tab-separated). `~` expands to home. |
+| `shell_grep` | JavaScript regex search across files. Walks directories, skips binary files, returns `{hits: [{file, line, text}], truncated, fileCount}`. |
+| `shell_run` | Run a command with an **argv array** via `child_process.execFile` (no shell, no metacharacter interpretation). Returns `{stdout, stderr, code, timedOut}`. **Use this when you need a policy allowlist.** |
+| `shell_exec` | Run a raw shell command string via `/bin/sh -c` (or `cmd.exe`). Returns the same shape. **Shell metacharacters are interpreted — naive allowlists are bypassable.** Use only when you genuinely need shell features (pipes, redirects, globs). |
+
+**Zero baked-in allowlist.** The library ships the primitives; gating is the agent author's job via `Loop({ policy })`.
+
+> **⚠️ `shell_exec` injection caveat.** `"ls"` passes a base-command allowlist like `args.command.split(/\s+/)[0]`, but so does `"ls;rm -rf /tmp/x"` — the shell runs both. **A base-command allowlist is NOT safe for `shell_exec`.** For policy-gated use, prefer `shell_run({argv})` and allow-list on `args.argv[0]` — there is no shell in that path, so metacharacters are just literal argument bytes. Use `shell_exec` only when the agent needs pipes/redirects/globs, and gate it at a higher level (human approval, narrow intent).
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createShellTools } = require('bare-agent/tools');
+
+const { tools } = createShellTools();
+
+const loop = new Loop({
+  provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' }),
+  policy: async (name, args) => {
+    // Safe: argv[0] is a literal binary name, no shell between LLM and kernel.
+    if (name === 'shell_run') {
+      const allow = ['ls', 'cat', 'grep', 'ps', 'df', 'uname', 'node', 'git'];
+      if (!allow.includes(args.argv?.[0])) return `Denied: ${args.argv?.[0]} is not in the allowlist.`;
+    }
+    // Deny shell_exec entirely for this agent — use shell_run for allow-listed commands.
+    if (name === 'shell_exec') return 'shell_exec is disabled for this agent. Use shell_run with an argv array instead.';
+    if (name === 'shell_read' || name === 'shell_grep') {
+      const p = (args.path || '').replace(/^~/, process.env.HOME || '');
+      if (!p.startsWith('/home/') && !p.startsWith('/tmp/')) return 'Path outside allowed roots.';
+    }
+    return true;
+  },
+  audit: './shell-audit.jsonl',
+});
+
+const result = await loop.run(
+  [{ role: 'user', content: 'What is in /tmp and how many README files are there under /home/me/code?' }],
+  tools,
+);
+```
+
+**Allowlist is platform-specific on purpose.** `ls`/`cat`/`grep` work on linux and macOS, `dir`/`type`/`findstr` on Windows. The primitives are cross-platform; the *policy you write* picks the commands appropriate for your OS. The library stays out of that decision.
+
+**Why JavaScript regex for `shell_grep` instead of shelling out to `grep`/`rg`:** pure-Node means no dependency on external binaries being installed, identical behaviour on Windows, and governance covers the implementation (no hidden `child_process.spawn` bypassing the Loop policy).
+
+### Recipe 9: Loop + MCP Bridge (auto-discover + governance)
+
+`createMCPBridge` reads MCP server definitions from standard IDE config locations (`.mcp.json`, `~/.mcp.json`, `~/.claude/mcp_servers.json`, `~/.config/Claude/claude_desktop_config.json`, `~/.cursor/mcp.json`), spawns each server over stdio, lists its tools, and returns a ready-to-use bareagent tool array. Any MCP-speaking server is consumable — zero glue code per server.
+
+```javascript
+const { Loop } = require('bare-agent');
+const { OpenAI } = require('bare-agent/providers');
+const { createMCPBridge } = require('bare-agent/mcp');
+
+const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
+
+const bridge = await createMCPBridge();
+// bridge = { tools, servers, denied, systemContext, errors, close }
+
+const loop = new Loop({
+  provider,
+  system: bridge.systemContext, // tells the LLM which tools exist and which are restricted
+});
+
+try {
+  const result = await loop.run(
+    [{ role: 'user', content: 'Summarise my unread messages.' }],
+    bridge.tools,
+  );
+  console.log(result.text);
+} finally {
+  await bridge.close(); // always close — kills spawned MCP subprocesses
+}
+```
+
+**Governance via `.mcp-bridge.json`.** On first run, the bridge writes `.mcp-bridge.json` in the cwd listing every discovered server and tool with permission `"allow"`. Edit any entry to `"deny"` and the tool is dropped from the next run's tool array; the LLM sees it listed in `systemContext` as restricted, with instructions not to retry it. Re-discovery happens automatically after TTL expiry (default `24h`, settable via `ttl` field in the file).
+
+```json
+{
+  "discovered": "2026-04-13T12:00:00.000Z",
+  "ttl": "24h",
+  "servers": {
+    "beeperbox": {
+      "command": "docker",
+      "args": ["exec", "-i", "beeperbox", "node", "/opt/mcp/server.js", "--stdio"],
+      "tools": {
+        "list_inbox": "allow",
+        "read_chat": "allow",
+        "send_message": "deny",
+        "archive_chat": "allow"
+      }
+    }
+  }
+}
+```
+
+**Runtime policy (arg-dependent checks).** Static allow/deny in the file handles coarse-grained permissions. For checks that depend on arguments (e.g. deny `send_message` only when `chat_id` matches a specific group), wire a `policy` closure into the Loop — it covers MCP tools, native tools, and user-defined tools uniformly:
+
+```javascript
+const bridge = await createMCPBridge();
+
+const loop = new Loop({
+  provider,
+  system: bridge.systemContext,
+  policy: async (toolName, args) => {
+    if (toolName === 'beeperbox_send_message' && args.chat_id?.includes('finance')) {
+      return 'Blocked: finance chats are read-only for this agent.';
+    }
+    return true;
+  },
+});
+```
+
+MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `send_message`). Return value semantics match the "Wiring with governance" section above: only `true` allows, anything else denies.
+
+> **v0.6.0 migration:** `createMCPBridge({ policy })` was removed. Runtime policy is Loop-level now, not mcp-bridge-level. Passing `policy` to `createMCPBridge` throws with a migration message.
+
+**Options:**
+
+| Option | Default | Purpose |
+|---|---|---|
+| `bridgePath` | `./.mcp-bridge.json` | Override the config file location |
+| `configPaths` | IDE defaults | Custom list of config files to scan |
+| `servers` | all discovered | Limit to a subset by name |
+| `timeout` | `15000` | Per-server init timeout in ms |
+| `refresh` | `false` | Force re-discovery regardless of TTL |
+
+### Recipe 10: beeperbox — multi-messenger reach via MCP bridge
+
+[beeperbox](https://github.com/hamr0/beeperbox) is a headless Beeper Desktop in Docker that exposes an MCP server on stdio and HTTP. Wiring it into bareagent is a two-step process: drop its launch command into any MCP config file, then call `createMCPBridge`. No beeperbox-specific code in bareagent.
+
+**Step 1** — add beeperbox to `.mcp.json` in your project root (or any of the IDE-standard locations):
+
+```json
+{
+  "mcpServers": {
+    "beeperbox": {
+      "command": "docker",
+      "args": ["exec", "-i", "beeperbox", "node", "/opt/mcp/server.js", "--stdio"]
+    }
+  }
+}
+```
+
+**Step 2** — use the bridge as in Recipe 9. beeperbox tools are namespaced `beeperbox_*`:
+
+```javascript
+const bridge = await createMCPBridge({ servers: ['beeperbox'] });
+const loop = new Loop({ provider, system: bridge.systemContext });
+
+try {
+  await loop.run(
+    [{ role: 'user', content: 'Check my WhatsApp unread and reply to Sara that I\'ll call her at 5.' }],
+    bridge.tools,
+  );
+} finally {
+  await bridge.close();
+}
+```
+
+beeperbox exposes 10 semantic tools covering every Beeper-connected bridge (WhatsApp, iMessage, Signal, Telegram, Discord, Slack, Messenger, Instagram, LinkedIn, Google Messages, Matrix): `list_accounts`, `list_inbox`, `list_unread`, `get_chat`, `read_chat`, `search_messages`, `send_message`, `note_to_self`, `react_to_message`, `archive_chat`. See [beeperbox.context.md](https://github.com/hamr0/beeperbox/blob/main/beeperbox.context.md) for full tool signatures, schemas, and network slugs.
+
+**Least-privilege pattern:** beeperbox tokens have a read-only mode (Beeper Desktop → Settings → Developers → uncheck "Allow sensitive actions"). Combine a read-only token with `.mcp-bridge.json` deny entries on `send_message` / `archive_chat` for defence-in-depth — token scope enforced server-side, allow/deny enforced client-side before the LLM ever sees the tool.

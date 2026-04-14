@@ -194,21 +194,15 @@ function unwrapContent(content) {
 
 // --- Tool wrapping ---
 
-function wrapTools(serverName, mcpTools, rpc, policy) {
+// Runtime arg-dependent policy has moved to Loop-level (new Loop({ policy })).
+// mcp-bridge retains only the static .mcp-bridge.json allow/deny filter below —
+// that decides which tools are exposed to the Loop in the first place.
+function wrapTools(serverName, mcpTools, rpc) {
   return mcpTools.map(t => ({
     name: `${serverName}_${t.name}`,
     description: t.description || '',
     parameters: t.inputSchema || { type: 'object', properties: {} },
     execute: async (args) => {
-      if (policy) {
-        const verdict = await policy(serverName, t.name, args);
-        if (verdict === false || typeof verdict === 'string') {
-          const reason = typeof verdict === 'string'
-            ? verdict
-            : `[GOVERNANCE] Tool "${serverName}_${t.name}" is not permitted by policy. Do not retry this tool.`;
-          throw new ToolError(reason, { context: { server: serverName, tool: t.name } });
-        }
-      }
       const result = await rpc('tools/call', { name: t.name, arguments: args });
       if (result.isError) {
         throw new ToolError(unwrapContent(result.content) || 'MCP tool error', {
@@ -327,11 +321,17 @@ function buildSystemContext(servers, tools, denied) {
  * @param {string[]} [opts.configPaths] - IDE config paths for discovery.
  * @param {string[]} [opts.servers] - Limit to these server names.
  * @param {number} [opts.timeout=15000] - Per-server init timeout in ms.
- * @param {Function} [opts.policy] - Async function(serverName, toolName, args) for runtime arg-dependent checks.
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
  * @returns {Promise<{tools: Array, servers: string[], systemContext: string, denied: Array, close: Function}>}
  */
 async function createMCPBridge(opts = {}) {
+  if ('policy' in opts) {
+    throw new Error(
+      '[MCP Bridge] The `policy` option was removed in v0.6.0. Runtime arg-dependent policy is now Loop-level: ' +
+      'pass `policy` to `new Loop({ policy })` instead — it gates MCP tools identically to native tools. ' +
+      'The static allow/deny filter in .mcp-bridge.json is unchanged.'
+    );
+  }
   const bridgePath = opts.bridgePath || DEFAULT_BRIDGE_PATH();
   const timeout = opts.timeout || 15000;
 
@@ -411,7 +411,7 @@ async function createMCPBridge(opts = {}) {
 
       // Only wrap tools that are allowed in config
       const allowed = mcpTools.filter(t => allowedToolNames.includes(t.name));
-      const wrapped = wrapTools(name, allowed, client.rpc, opts.policy);
+      const wrapped = wrapTools(name, allowed, client.rpc);
 
       tools.push(...wrapped);
       children.push(client.child);

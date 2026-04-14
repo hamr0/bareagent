@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('node:fs');
 const { ToolError, MaxRoundsError } = require('./errors');
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
@@ -39,6 +40,8 @@ class Loop {
    * @param {object} [options.retry] - Retry instance for backoff on failures.
    * @param {object} [options.stream] - Stream instance for event emission.
    * @param {object} [options.store] - Store instance for validate() health check.
+   * @param {Function} [options.policy] - Async (toolName, args) => true|false|string. Deny returns the string (or a generic message) to the LLM as tool result.
+   * @param {string} [options.audit] - File path for JSONL audit log. Each tool call appends one line: {ts, tool, args, decision, result|reason|error, durationMs}.
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
    */
   constructor(options = {}) {
@@ -54,8 +57,38 @@ class Loop {
     this.onError = options.onError || null;
     this.throwOnError = options.throwOnError !== undefined ? options.throwOnError : true;
     this.store = options.store || null;
+    if (options.policy != null && typeof options.policy !== 'function') {
+      throw new Error('[Loop] options.policy must be a function (toolName, args) => true | false | string');
+    }
+    this.policy = options.policy || null;
+    this.audit = options.audit || null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
+    this._auditInFlight = new Set();
+  }
+
+  // Append one JSONL record. Returns nothing (fire-and-forget for callers)
+  // but tracks the in-flight promise so `flush()` and the end of `run()` can await it.
+  _writeAudit(record) {
+    if (!this.audit) return;
+    let line;
+    try {
+      line = JSON.stringify(record) + '\n';
+    } catch (err) {
+      console.warn(`[Loop] audit serialize failed: ${err.message}`);
+      return;
+    }
+    const p = fs.promises.appendFile(this.audit, line)
+      .catch(err => console.warn(`[Loop] audit write failed: ${err.message}`))
+      .finally(() => this._auditInFlight.delete(p));
+    this._auditInFlight.add(p);
+  }
+
+  // Await any in-flight audit writes. Safe to call multiple times; resolves immediately
+  // when no writes are pending. Called automatically at the end of each `run()`.
+  async flush() {
+    if (this._auditInFlight.size === 0) return;
+    await Promise.all([...this._auditInFlight]);
   }
 
   /**
@@ -107,6 +140,7 @@ class Loop {
       } catch (err) {
         this.stream?.emit({ type: 'loop:error', data: { error: err.message, round } });
         this.onError?.(err);
+        await this.flush();
         if (this.throwOnError) throw err;
         return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message };
       }
@@ -120,6 +154,7 @@ class Loop {
       if (!result.toolCalls || result.toolCalls.length === 0) {
         this.stream?.emit({ type: 'loop:text', data: { text: result.text } });
         this.onText?.(result.text);
+        await this.flush();
         this.stream?.emit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
         return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null };
       }
@@ -163,23 +198,68 @@ class Loop {
         this.stream?.emit({ type: 'loop:tool_call', data: { tool: tc.name, args: tc.arguments } });
         this.onToolCall?.(tc.name, tc.arguments);
 
+        // Policy check — runs before execute. Fail-safe: only verdict === true allows;
+        // anything else (false, string, undefined, object, throw) denies. A string verdict
+        // is used verbatim as the deny reason.
+        if (this.policy) {
+          let verdict;
+          try {
+            verdict = await this.policy(tc.name, tc.arguments);
+          } catch (err) {
+            verdict = `[Loop] policy error: ${err.message}`;
+          }
+          if (verdict !== true) {
+            const reason = typeof verdict === 'string'
+              ? verdict
+              : `[Loop] Tool "${tc.name}" denied by policy`;
+            msgs.push({ role: 'tool', tool_call_id: tc.id, content: reason });
+            this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, denied: true, reason } });
+            this._writeAudit({
+              ts: new Date().toISOString(),
+              tool: tc.name,
+              args: tc.arguments,
+              decision: 'deny',
+              reason,
+            });
+            continue;
+          }
+        }
+
+        const startedAt = Date.now();
         try {
           const execute = () => tool.execute(tc.arguments);
           const toolResult = this.retry ? await this.retry.call(execute) : await execute();
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
+          this._writeAudit({
+            ts: new Date().toISOString(),
+            tool: tc.name,
+            args: tc.arguments,
+            decision: 'allow',
+            result: content,
+            durationMs: Date.now() - startedAt,
+          });
         } catch (err) {
           const toolErr = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
           const errMsg = `[Loop] Tool error: ${toolErr.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this.stream?.emit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
+          this._writeAudit({
+            ts: new Date().toISOString(),
+            tool: tc.name,
+            args: tc.arguments,
+            decision: 'allow',
+            error: toolErr.message,
+            durationMs: Date.now() - startedAt,
+          });
         }
       }
     }
 
     // maxRounds exceeded
     const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
+    await this.flush();
     this.stream?.emit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
     if (this.throwOnError) throw new MaxRoundsError(warning);
     return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning };

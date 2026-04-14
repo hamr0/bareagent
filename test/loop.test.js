@@ -647,4 +647,195 @@ describe('Loop', () => {
       assert.equal(result.text, 'ok');
     });
   });
+
+  // --- Governance: policy + audit (v0.6) ---
+
+  describe('policy', () => {
+    const fs = require('node:fs');
+    const { join } = require('node:path');
+    const { tmpdir } = require('node:os');
+
+    it('policy:true allows the tool to execute', async () => {
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'Berlin' } }], usage: { inputTokens: 10, outputTokens: 5 } },
+        { text: 'done', toolCalls: [], usage: { inputTokens: 20, outputTokens: 5 } },
+      ]);
+      const calls = [];
+      const loop = new Loop({
+        provider,
+        policy: async (name, args) => { calls.push([name, args]); return true; },
+      });
+      const result = await loop.run([{ role: 'user', content: 'weather' }], [weatherTool]);
+      assert.equal(result.text, 'done');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0][0], 'get_weather');
+    });
+
+    it('policy:string denies and feeds the reason back to the LLM', async () => {
+      let capturedToolMsg = null;
+      const provider = {
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'Berlin' } }], usage: { inputTokens: 10, outputTokens: 5 } };
+          }
+          capturedToolMsg = messages.find(m => m.role === 'tool' && m.tool_call_id === 'c1')?.content;
+          return { text: 'understood', toolCalls: [], usage: { inputTokens: 20, outputTokens: 5 } };
+        },
+      };
+      const loop = new Loop({
+        provider,
+        policy: async () => 'Berlin is restricted for this agent.',
+      });
+      const result = await loop.run([{ role: 'user', content: 'weather' }], [weatherTool]);
+      assert.equal(result.text, 'understood');
+      assert.equal(capturedToolMsg, 'Berlin is restricted for this agent.');
+    });
+
+    it('policy:false denies with a generic message', async () => {
+      let capturedToolMsg = null;
+      const provider = {
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+          }
+          capturedToolMsg = messages.find(m => m.role === 'tool')?.content;
+          return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      };
+      const loop = new Loop({ provider, policy: async () => false });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.match(capturedToolMsg, /denied by policy/);
+    });
+
+    it('policy that throws is treated as a deny', async () => {
+      let capturedToolMsg = null;
+      const provider = {
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+          }
+          capturedToolMsg = messages.find(m => m.role === 'tool')?.content;
+          return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      };
+      const loop = new Loop({ provider, policy: async () => { throw new Error('boom'); } });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.match(capturedToolMsg, /policy error: boom/);
+    });
+
+    it('policy returning undefined denies (fail-safe)', async () => {
+      let capturedToolMsg = null;
+      const provider = {
+        async generate(messages) {
+          const round = messages.filter(m => m.role === 'assistant' && m.tool_calls).length;
+          if (round === 0) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+          }
+          capturedToolMsg = messages.find(m => m.role === 'tool')?.content;
+          return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      };
+      // No explicit return — resolves to undefined. Spec says only `true` allows; undefined = deny.
+      const loop = new Loop({ provider, policy: async () => { /* forgot to return */ } });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.match(capturedToolMsg, /denied by policy/);
+    });
+
+    it('non-function policy option is rejected in the constructor', () => {
+      const provider = mockProvider([]);
+      assert.throws(
+        () => new Loop({ provider, policy: true }),
+        { message: /policy must be a function/ }
+      );
+      assert.throws(
+        () => new Loop({ provider, policy: 'allow' }),
+        { message: /policy must be a function/ }
+      );
+    });
+
+    it('omitting policy preserves existing behaviour (allow-all)', async () => {
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'X' } }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({ provider });
+      const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      assert.equal(result.text, 'ok');
+    });
+  });
+
+  describe('audit', () => {
+    const fs = require('node:fs');
+    const { join } = require('node:path');
+    const { tmpdir } = require('node:os');
+
+    function tmpAuditPath() {
+      return join(tmpdir(), `bareagent-audit-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
+    }
+
+    function readJsonl(path) {
+      return fs.readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    }
+
+    it('writes an allow record with result and durationMs', async () => {
+      const auditPath = tmpAuditPath();
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'Berlin' } }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({ provider, audit: auditPath });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      // Loop.run() awaits flush() before returning — no sleep needed.
+      const lines = readJsonl(auditPath);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0].tool, 'get_weather');
+      assert.equal(lines[0].decision, 'allow');
+      assert.ok(lines[0].result);
+      assert.equal(typeof lines[0].durationMs, 'number');
+      assert.ok(lines[0].ts);
+      fs.unlinkSync(auditPath);
+    });
+
+    it('writes a deny record with reason', async () => {
+      const auditPath = tmpAuditPath();
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({
+        provider,
+        policy: async () => 'nope',
+        audit: auditPath,
+      });
+      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+      const lines = readJsonl(auditPath);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0].decision, 'deny');
+      assert.equal(lines[0].reason, 'nope');
+      fs.unlinkSync(auditPath);
+    });
+
+    it('writes an allow record with error when the tool throws', async () => {
+      const auditPath = tmpAuditPath();
+      const failingTool = {
+        name: 'fail_tool',
+        parameters: { type: 'object', properties: {} },
+        execute: async () => { throw new Error('boom'); },
+      };
+      const provider = mockProvider([
+        { text: '', toolCalls: [{ id: 'c1', name: 'fail_tool', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+      ]);
+      const loop = new Loop({ provider, audit: auditPath });
+      await loop.run([{ role: 'user', content: 'x' }], [failingTool]);
+      const lines = readJsonl(auditPath);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0].decision, 'allow');
+      assert.equal(lines[0].error, 'boom');
+      fs.unlinkSync(auditPath);
+    });
+  });
 });

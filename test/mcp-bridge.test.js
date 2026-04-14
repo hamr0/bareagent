@@ -241,32 +241,20 @@ describe('createMCPBridge', () => {
     }
   });
 
-  it('policy blocks at execute time (arg-dependent)', async () => {
-    const bridge = await createMCPBridge({
-      configPaths: [configPath],
-      bridgePath,
-      timeout: 5000,
-      policy: async (server, tool, args) => {
-        if (tool === 'write_file' && args?.path?.startsWith('/etc')) return false;
+  it('createMCPBridge throws if legacy `policy` option is passed (v0.6.0 migration)', async () => {
+    await assert.rejects(
+      () => createMCPBridge({
+        configPaths: [configPath],
+        bridgePath,
+        timeout: 5000,
+        policy: async () => false,
+      }),
+      (err) => {
+        assert.match(err.message, /policy.*removed in v0\.6\.0/i);
+        assert.match(err.message, /Loop/);
         return true;
-      },
-    });
-    try {
-      // Allowed args
-      const r = await bridge.tools.find(t => t.name === 'mock_write_file').execute({ path: '/tmp/ok.txt', content: 'hi' });
-      assert.equal(r, 'wrote 2 chars to /tmp/ok.txt');
-
-      // Denied args
-      await assert.rejects(
-        () => bridge.tools.find(t => t.name === 'mock_write_file').execute({ path: '/etc/passwd', content: 'x' }),
-        (err) => {
-          assert.ok(err.message.includes('GOVERNANCE') || err.message.includes('Policy denied'));
-          return true;
-        }
-      );
-    } finally {
-      await bridge.close();
-    }
+      }
+    );
   });
 
   it('handles server crash mid-call', async () => {

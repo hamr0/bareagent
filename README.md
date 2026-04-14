@@ -60,7 +60,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run. Loop-level `policy` + `audit` gate every tool call (native, MCP, browsing, mobile, user-defined) through one hook, JSONL audit to disk |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
@@ -74,7 +74,8 @@ Every piece works alone — take what you need, ignore the rest.
 | **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `CircuitOpenError` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
 | **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
-| **MCP Bridge** | Auto-discover MCP servers from IDE configs (Claude Code, Cursor, etc.), expose as bareagent tools. Allow/deny filtering, policy functions, `systemContext` for LLM awareness. Zero deps |
+| **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |
+| **MCP Bridge** | Auto-discover MCP servers from IDE configs (Claude Code, Cursor, etc.), expose as bareagent tools. Static allow/deny via `.mcp-bridge.json`, `systemContext` for LLM awareness. Runtime policy lives in `Loop({ policy })` — one hook for MCP + native tools alike. Zero deps |
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely.
 

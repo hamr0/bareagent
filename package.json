@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.5.0",
+  "version": "0.6.2",
   "files": [
     "index.js",
     "src/",
