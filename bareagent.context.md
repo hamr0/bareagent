@@ -7,7 +7,7 @@
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~1800 lines). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, and provider fallback. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (~2.6K lines of core, zero required deps). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, provider fallback, Loop-level governance (policy + audit + cost caps), cross-platform shell tools, and an MCP bridge. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent

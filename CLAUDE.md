@@ -1,6 +1,6 @@
 # bare-agent
 
-Lightweight, composable agent orchestration library. ~1800 lines, 0 required deps, MIT.
+Lightweight, composable agent orchestration library for autonomous agents. ~2.6K lines core, 0 required deps, MIT.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
 
 ## Components

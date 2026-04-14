@@ -11,7 +11,7 @@
 
 ```
 
-**Agent orchestration in ~1800 lines. Zero required deps. MIT license.**
+**Agent orchestration in ~2.6K lines of core. Zero required deps. MIT license.**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents.
 
@@ -60,7 +60,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Throws on error by default. Returns estimated USD cost per run. Loop-level `policy(toolName, args, ctx)` + `audit` gate every tool call (native, MCP, browsing, mobile, user-defined) through one hook — `ctx` is a per-call opaque blob for multi-tenant routing. `maxCost` cap catches runaway loops before they burn budget. Unified `loop:error` + `onError` surface every previously silent failure (audit write, callback throw, Checkpoint timeout) |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Returns estimated USD cost per run. Governance built in: `policy(tool, args, ctx)` gates every tool call (native, MCP, browsing, mobile) through one hook with per-caller `ctx` routing. `audit` writes a JSONL decision log. `maxCost` catches runaway loops. `onError` + `loop:error` surface every silent-ish failure (audit write, callback throw, Checkpoint timeout) |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |

@@ -7,7 +7,7 @@
     "bin/",
     "tools/"
   ],
-  "description": "Lightweight, composable agent orchestration. ~1800 lines, 0 required deps.",
+  "description": "Lightweight, composable agent orchestration for autonomous agents. Loop policy + audit, cost caps, cross-platform shell tools, MCP bridge. ~2.6K lines core, 0 required deps.",
   "license": "MIT",
   "author": "hamr0",
   "repository": {
