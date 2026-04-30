@@ -255,6 +255,7 @@ const gate = new Gate({
   bash:   { allow: ['ls', 'cat', 'grep', 'ps', 'df'] },          // argv[0] allowlist
   audit:  { path: './audit.jsonl' },
   humanChannel: async (event) => ({ decision: 'deny' }),         // wire to your UI
+  // humanChannelTimeoutMs: 60_000,                                // optional (bareguard ≥0.3) — timeout-deny if your channel hangs
 });
 await gate.init();
 
@@ -328,7 +329,7 @@ For arg-aware filtering (e.g. drop `send_message` only when chat_id matches a sp
 - **`humanChannel`** (bareguard) — fires for *policy-driven* asks/halts (budget about to overrun, content rule wants a confirm, halt-severity event needs ack). One callback, one place to wire your UI.
 - **`Checkpoint`** (bareagent) — fires for *always-prompt* flows that aren't policy-driven (e.g. "always confirm before sending an email", regardless of who or why). Stays for that case.
 
-Both can route to the same underlying chat / terminal / Slack helper.
+Both can route to the same underlying chat / terminal / Slack helper. Both also support a deadline so a hung UI can't pin the agent forever — bareguard ≥0.3 takes `humanChannelTimeoutMs` (timeout always denies, never allow), bareagent's Checkpoint takes `timeout` (default 5 min, throws → auto-deny).
 
 ### Checkpoint timeout — no silent hangs
 
