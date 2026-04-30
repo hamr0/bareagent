@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Loop } = require('../src/loop');
-const { MaxRoundsError, ProviderError } = require('../src/errors');
+const { ProviderError } = require('../src/errors');
 
 // Mock provider that returns scripted responses
 function mockProvider(responses) {
@@ -163,29 +163,6 @@ describe('Loop', () => {
     assert.equal(result.error, null);
   });
 
-  it('stops after maxRounds', async () => {
-    // Provider always requests tool calls — should hit maxRounds
-    const provider = {
-      async generate() {
-        return {
-          text: '',
-          toolCalls: [{ id: 'call_x', name: 'get_weather', arguments: { city: 'Berlin' } }],
-          usage: { inputTokens: 5, outputTokens: 5 },
-        };
-      },
-    };
-
-    const loop = new Loop({ provider, maxRounds: 3 });
-    await assert.rejects(
-      () => loop.run([{ role: 'user', content: 'Loop forever' }], [weatherTool]),
-      (err) => {
-        assert.ok(err instanceof MaxRoundsError);
-        assert.ok(err.message.includes('3 rounds'));
-        return true;
-      }
-    );
-  });
-
   it('stops mid-loop when stop() is called', async () => {
     let callCount = 0;
     const provider = {
@@ -199,7 +176,7 @@ describe('Loop', () => {
       },
     };
 
-    const loop = new Loop({ provider, maxRounds: 10, throwOnError: false });
+    const loop = new Loop({ provider, throwOnError: false });
     // Stop after first round
     loop.onToolCall = () => loop.stop();
 
@@ -292,22 +269,6 @@ describe('Loop', () => {
     assert.equal(result.text, '');
   });
 
-  it('throwOnError: false returns error on maxRounds', async () => {
-    const provider = {
-      async generate() {
-        return {
-          text: '',
-          toolCalls: [{ id: 'call_x', name: 'get_weather', arguments: { city: 'Berlin' } }],
-          usage: { inputTokens: 5, outputTokens: 5 },
-        };
-      },
-    };
-    const loop = new Loop({ provider, maxRounds: 2, throwOnError: false });
-    const result = await loop.run([{ role: 'user', content: 'Loop' }], [weatherTool]);
-    assert.ok(result.error);
-    assert.ok(result.error.includes('2 rounds'));
-  });
-
   it('throws original ProviderError instance', async () => {
     const original = new ProviderError('rate limited', { status: 429 });
     const provider = {
@@ -319,27 +280,6 @@ describe('Loop', () => {
       (err) => {
         assert.strictEqual(err, original);
         assert.ok(err instanceof ProviderError);
-        return true;
-      }
-    );
-  });
-
-  it('MaxRoundsError has code MAX_ROUNDS', async () => {
-    const provider = {
-      async generate() {
-        return {
-          text: '',
-          toolCalls: [{ id: 'call_x', name: 'get_weather', arguments: { city: 'Berlin' } }],
-          usage: { inputTokens: 5, outputTokens: 5 },
-        };
-      },
-    };
-    const loop = new Loop({ provider, maxRounds: 1 });
-    await assert.rejects(
-      () => loop.run([{ role: 'user', content: 'Loop' }], [weatherTool]),
-      (err) => {
-        assert.equal(err.code, 'MAX_ROUNDS');
-        assert.equal(err.retryable, false);
         return true;
       }
     );
@@ -767,79 +707,7 @@ describe('Loop', () => {
     });
   });
 
-  describe('audit', () => {
-    const fs = require('node:fs');
-    const { join } = require('node:path');
-    const { tmpdir } = require('node:os');
-
-    function tmpAuditPath() {
-      return join(tmpdir(), `bareagent-audit-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
-    }
-
-    function readJsonl(path) {
-      return fs.readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
-    }
-
-    it('writes an allow record with result and durationMs', async () => {
-      const auditPath = tmpAuditPath();
-      const provider = mockProvider([
-        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'Berlin' } }], usage: { inputTokens: 1, outputTokens: 1 } },
-        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
-      ]);
-      const loop = new Loop({ provider, audit: auditPath });
-      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
-      // Loop.run() awaits flush() before returning — no sleep needed.
-      const lines = readJsonl(auditPath);
-      assert.equal(lines.length, 1);
-      assert.equal(lines[0].tool, 'get_weather');
-      assert.equal(lines[0].decision, 'allow');
-      assert.ok(lines[0].result);
-      assert.equal(typeof lines[0].durationMs, 'number');
-      assert.ok(lines[0].ts);
-      fs.unlinkSync(auditPath);
-    });
-
-    it('writes a deny record with reason', async () => {
-      const auditPath = tmpAuditPath();
-      const provider = mockProvider([
-        { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
-        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
-      ]);
-      const loop = new Loop({
-        provider,
-        policy: async () => 'nope',
-        audit: auditPath,
-      });
-      await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
-      const lines = readJsonl(auditPath);
-      assert.equal(lines.length, 1);
-      assert.equal(lines[0].decision, 'deny');
-      assert.equal(lines[0].reason, 'nope');
-      fs.unlinkSync(auditPath);
-    });
-
-    it('writes an allow record with error when the tool throws', async () => {
-      const auditPath = tmpAuditPath();
-      const failingTool = {
-        name: 'fail_tool',
-        parameters: { type: 'object', properties: {} },
-        execute: async () => { throw new Error('boom'); },
-      };
-      const provider = mockProvider([
-        { text: '', toolCalls: [{ id: 'c1', name: 'fail_tool', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
-        { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
-      ]);
-      const loop = new Loop({ provider, audit: auditPath });
-      await loop.run([{ role: 'user', content: 'x' }], [failingTool]);
-      const lines = readJsonl(auditPath);
-      assert.equal(lines.length, 1);
-      assert.equal(lines[0].decision, 'allow');
-      assert.equal(lines[0].error, 'boom');
-      fs.unlinkSync(auditPath);
-    });
-  });
-
-  // --- v0.7.0: policy ctx, maxCost, unified errors ---
+  // --- v0.7.0+ (audit + maxCost moved to bareguard in v0.8.0) ---
 
   describe('policy ctx (per-caller routing)', () => {
     it('forwards options.ctx to the policy closure', async () => {
@@ -881,54 +749,6 @@ describe('Loop', () => {
       const loop2 = new Loop({ provider: provider(captureUser), policy });
       await loop2.run([{ role: 'user', content: 'x' }], [weatherTool], { ctx: { isOwner: false } });
       assert.match(captureUser.toolMsg, /owner only/);
-    });
-  });
-
-  describe('maxCost', () => {
-    const { MaxCostError } = require('../src/errors');
-
-    it('throws MaxCostError when cost exceeds cap', async () => {
-      // High-cost model that blows the cap on the first round
-      const provider = {
-        model: 'claude-opus-4-20250514',
-        async generate() {
-          return {
-            text: '',
-            toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }],
-            usage: { inputTokens: 100000, outputTokens: 50000 },
-          };
-        },
-      };
-      const loop = new Loop({ provider, maxCost: 0.01 });
-      await assert.rejects(
-        () => loop.run([{ role: 'user', content: 'x' }], [weatherTool]),
-        (err) => {
-          assert.ok(err instanceof MaxCostError);
-          assert.match(err.message, /cost.*exceeded cap/);
-          return true;
-        }
-      );
-    });
-
-    it('respects throwOnError: false and returns error string', async () => {
-      const provider = {
-        model: 'claude-opus-4-20250514',
-        async generate() {
-          return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 100000, outputTokens: 50000 } };
-        },
-      };
-      const loop = new Loop({ provider, maxCost: 0.01, throwOnError: false });
-      const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
-      assert.match(result.error, /exceeded cap/);
-    });
-
-    it('does not fire when cost stays under the cap', async () => {
-      const provider = mockProvider([
-        { text: 'done', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } },
-      ]);
-      const loop = new Loop({ provider, maxCost: 10 });
-      const result = await loop.run([{ role: 'user', content: 'x' }]);
-      assert.equal(result.text, 'done');
     });
   });
 

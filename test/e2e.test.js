@@ -192,7 +192,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
 
       const loop = new Loop({
         provider,
-        maxRounds: 5,
+
         checkpoint,
         retry,
         stream,
@@ -294,7 +294,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
 
     const loop = new Loop({
       provider,
-      maxRounds: 5,
+
       checkpoint,
       stream,
       throwOnError: false,
@@ -373,7 +373,7 @@ describe('E2E Composition Tests', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not
 
       const loop = new Loop({
         provider,
-        maxRounds: 3,
+
         stream,
         throwOnError: false,
         system: context ? `Context:\n${context}` : undefined,

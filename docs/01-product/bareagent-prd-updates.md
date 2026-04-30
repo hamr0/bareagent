@@ -1,10 +1,10 @@
 # bareagent — Product Requirements Document (PRD)
 
-**Status:** Draft v0.3 (implementation-ready, post-orchestration + MCP design)
+**Status:** v0.4 — landed in bareagent v0.8.0 (2026-04-30). bareguard is now a hard dep at `^0.1.1`. The §9 extraction is done; tense throughout reflects "extracted", not "extracting".
 **Owner:** hamr0
-**Last updated:** 2026-04-25
-**Language:** Node.js (JavaScript), ESM, target Node 20 LTS+
-**Sibling spec:** `bareguard-prd.md`
+**Last updated:** 2026-04-30
+**Language:** Node.js (JavaScript), CJS at the public surface; bareguard is ESM and consumed via the `wireGate` adapter without bareagent importing it directly.
+**Sibling spec:** unified bareguard PRD v0.6 (the v0.5 amendments doc was folded in and deleted upstream).
 
 > **For future Claude (implementation note):** This document is written as an
 > implementation-ready spec. §3 says what bareagent IS. §4 says what bareagent
@@ -160,10 +160,12 @@ bareagent.
 - Every spawn is a subprocess. No shared memory between agents.
 - Every defer is a JSONL append. No internal queue.
 
-## 9. What is being EXTRACTED to bareguard
+## 9. What was EXTRACTED to bareguard (v0.8.0, shipped 2026-04-30)
 
-These currently live in bareagent and are moving out. Each becomes a
-primitive in bareguard. bareagent imports and calls; it does not own.
+These previously lived in bareagent and have moved out. Each is now a
+primitive in bareguard. bareagent does not import bareguard directly — the
+`wireGate(gate)` adapter (`bare-agent/bareguard`) takes a user-constructed
+`Gate` and returns the policy closure + tool wrapper that integrate it.
 
 | Currently in bareagent                              | Moves to bareguard                     | Notes                                                                                  |
 | --------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------- |
@@ -191,41 +193,42 @@ pre-publish review fixes — `gate.allows(string)` overload, `_truncated`
 audit boolean, missing-`humanChannel` WARN, removal of `Gate.fromConfig`).
 This is what mechanically goes away from bareagent v(next).
 
-**`src/loop.js`** — the bulk of the change is here:
+**`src/loop.js`** — the bulk of the change happened here:
 
-| Currently in `loop.js` | Action in v(next) | Notes |
-| --- | --- | --- |
-| Constructor option `maxRounds` (default 5) + the `for (let round = 0; round < this.maxRounds; round++)` loop bound + the `MaxRoundsError` throw at line ~319 | **Replace** with `gate.check()` returning halt at `limits.maxTurns`. The Loop's outer iteration becomes "loop until gate halts or LLM emits final." | Loop never exits with `MaxRoundsError` itself; bareguard's halt decision is what stops the loop. Re-export the old `MaxRoundsError` symbol from `bare-agent/errors` as a proxy to keep instanceof checks working in dependent code. |
-| Constructor option `maxCost` + the `if (this.maxCost !== null && totalCost > this.maxCost) { ... new MaxCostError(...) }` block at line ~193 | **Remove.** Cost is tracked via `gate.record(action, { costUsd, tokens })`; halt fires from `bareguard.budget.maxCostUsd`. | Same re-export pattern for `MaxCostError`. |
-| Constructor option `audit` (file path) + `_writeAudit`, `_auditInFlight`, `_appendAuditAsync` methods (lines ~64–135) | **Remove.** bareguard owns the audit log entirely. Pass the path via `audit.path` in the gate config or `BAREGUARD_AUDIT_PATH` env var. | Bareagent's old audit format becomes a subset of bareguard's `phase: "record"` lines. The new lines also carry `severity`, `parent_run_id`, `spawn_depth` — strict superset, no breaking change to log consumers that ignored unknown fields. |
-| Constructor option `policy` + the `if (this.policy) { ... verdict = await this.policy(tc.name, tc.arguments, ctx) ... }` block at line ~263 | **Keep the option for backward-compat; document the bareguard adapter as the recommended wiring.** | New canonical wiring: `policy: async (toolName, args, ctx) => (await gate.check({ type: toolName, args, _ctx: ctx })).outcome === 'allow'`. Document in `bareagent.context.md` § "Wiring with bareguard". |
-
-**`src/policy.js`** — the helper module (`pathAllowlist`, `commandAllowlist`, `combinePolicies`):
-
-| Symbol | Action in v(next) |
+| Was in `loop.js` (v0.7.0) | Done in v0.8.0 |
 | --- | --- |
-| `pathAllowlist(...)` | Re-export as a thin shim that returns a function whose body calls `gate.check({ type: ..., path: ... })` against a `Gate` configured with `fs.readScope` / `fs.writeScope` / `fs.deny`. Mark deprecated. |
-| `commandAllowlist(...)` | Re-export as a shim around `gate.check({ type: 'shell_run', cmd: argv.join(' ') })` against a `Gate` configured with `bash.allow` + `bash.denyPatterns`. Mark deprecated. |
-| `combinePolicies(...)` | Stays — composing predicate functions is a generic helper, not duplication of bareguard. |
+| Constructor option `maxRounds` (default 5) + the `for (let round = 0; round < this.maxRounds; round++)` loop bound + the `MaxRoundsError` throw at line ~319 | **Removed.** Replaced with internal `HARD_ROUND_LIMIT = 100` safety net (not configurable, not a public option). Real iteration bounds come from `new Gate({ limits: { maxTurns: N } })` and surface as `[HALT: limits.maxTurns]` deny strings via the policy adapter. |
+| Constructor option `maxCost` + the cost-cap block at line ~193 | **Removed.** Move to `new Gate({ budget: { maxCostUsd: N } })`. Halt surfaces as `[HALT: budget.maxCostUsd]` deny string. |
+| Constructor option `audit` (file path) + `_writeAudit` / `_auditInFlight` / `flush()` methods (lines ~64–135) | **Removed.** bareguard owns the audit log entirely. Pass the path via `new Gate({ audit: { path } })` or `BAREGUARD_AUDIT_PATH`. The audit shape changes from bareagent's flat `{ts, tool, args, decision, result, durationMs}` to bareguard's richer per-phase records carrying `severity`, `parent_run_id`, `spawn_depth`, `_truncated` — strict superset, no breaking change to log consumers that ignored unknown fields. |
+| Constructor option `policy` + the policy invocation block at line ~263 | **Kept.** Same `(toolName, args, ctx) => true \| string` contract. Recommended wiring is now `wireGate(gate).policy` from `bare-agent/bareguard`. The closure body for that adapter is a one-liner: `(await gate.check({ type: toolName, args, _ctx: ctx })).outcome === 'allow' ? true : '[deny: ...] reason'`. |
+
+**`src/policy.js`** — `pathAllowlist`, `commandAllowlist`, `combinePolicies`:
+
+| Symbol | Done in v0.8.0 |
+| --- | --- |
+| `pathAllowlist(...)` | **Deleted.** Express the same intent in `new Gate({ fs: { readScope, writeScope, deny } })`. Bareguard's `fs` primitive does the home-expansion + path-normalization + deny-wins logic that was duplicated here. |
+| `commandAllowlist(...)` | **Deleted.** Express the same intent in `new Gate({ bash: { allow: [...], denyPatterns: [...] } })`. Bareguard's `bash` primitive gates `argv[0]` for `shell_run` (injection-proof) and string-base for `shell_exec` (with the same documented caveat). |
+| `combinePolicies(...)` | **Deleted.** One source of truth = bareguard. Stack primitives in one Gate config and they compose as one eval (e.g. `tools.allowlist` AND `content.askPatterns` AND `bash.denyPatterns` all run together). A bareagent-side composer would invite layered policies and drift. |
 
 **`src/errors.js`** — `MaxCostError`, `MaxRoundsError` classes:
-- **Keep the class definitions** for downstream `instanceof` checks. Loop no longer throws them itself; instead, bareagent's adapter layer can map a bareguard halt decision (`severity: "halt"` + `rule: "budget.maxCostUsd"` / `rule: "limits.maxTurns"`) to throwing one of these for users on the v(next-1) API. Removed entirely in v(next+2) once dependent projects migrate.
+- **Both deleted.** Halt decisions surface as deny strings (`[HALT: <rule>]`) from `wireGate(gate).policy`, not exceptions. The `bare-agent/errors` exports drop these two; downstream `instanceof MaxCostError` checks must move to string-matching the deny reason or wiring `humanChannel` to detect halts at source.
+
+**`bare-agent/policy` entry point:**
+- **Removed from `package.json` `exports` map.** Replaced with `bare-agent/bareguard` exporting `wireGate`.
 
 **`tools/`** — the bash/shell tools (`shell_run`, `shell_exec`):
-- **Remove** the inline argv-allowlist check that lives in the tool's `execute` function. Tools become "do the thing" — if `gate.check` said yes, the tool runs. No tool self-checks.
+- No inline argv-allowlist check ever lived in `tools/shell.js` (preemptively clean). No change needed.
 
-**Estimated removal:** ~250–300 LOC across `loop.js` + `policy.js`. Net change in bareagent (after adding the bareguard adapter and the re-export shims): ~–150 LOC.
+**Source delta:** ~−250 LOC removed from `loop.js` + `policy.js`. Added: ~+95 LOC in `src/bareguard-adapter.js` and `examples/with-bareguard.mjs`. Net: ~−150 LOC, matching original estimate.
 
-**Verification command after the cut:**
+**Verification command after the cut (run on bareagent v0.8.0):**
 
 ```bash
 # No policy decision should remain in bareagent source.
-grep -rn 'allowlist\|denylist\|maxCost\|maxRounds' src/ \
-  | grep -v 'deprecated\|re-export\|Loop({ maxCost' \
-  | grep -v src/policy.js  # the deprecation shims live here
+grep -rn 'allowlist\|denylist\|maxCost\|maxRounds' src/ index.js
 ```
 
-Should print nothing — every other allowlist/denylist hit means a leak.
+Returns zero hits in v0.8.0 source. Any future hit indicates a regression.
 
 ### 9.2 `bareagent.context.md` must be updated
 

@@ -1,26 +1,26 @@
 # bare-agent
 
-Lightweight, composable agent orchestration library for autonomous agents. ~2.6K lines core, 0 required deps, MIT.
+Lightweight, composable agent orchestration library for autonomous agents. ~2.4K lines core, one required dep (`bareguard ^0.1.1`), Apache 2.0.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
 
 ## Components
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, Loop-level `policy(tool, args, ctx)` + `audit` gate every tool call, fail-safe verdict, durable audit flush, `maxCost` runaway cap, unified `loop:error`+`onError` for every silent-ish failure) |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, `policy(tool, args, ctx)` chokepoint for bareguard adapter, fail-safe verdict, unified `loop:error`+`onError` for every silent-ish failure). Internal `HARD_ROUND_LIMIT = 100` safety net only — real bounds come from bareguard `limits.maxTurns` |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
 | Scheduler | src/scheduler.js | Time-triggered turns (cron + relative) |
-| Checkpoint | src/checkpoint.js | Human-in-the-loop approval gate |
+| Checkpoint | src/checkpoint.js | Human-in-the-loop approval gate (always-prompt; complementary to bareguard's policy-driven humanChannel) |
 | Memory | src/memory.js | Thin wrapper delegating to swappable store |
 | Stream | src/stream.js | Structured event emitter |
 | Retry | src/retry.js | Backoff with jitter for async functions |
 | CircuitBreaker | src/circuit-breaker.js | Per-key circuit breaker (closed/open/half-open) |
 | JsonlTransport | src/transport-jsonl.js | JSONL output to writable stream (pipe-friendly) |
-| Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError, MaxCostError |
-| Policy helpers | src/policy.js | pathAllowlist, commandAllowlist, combinePolicies — composable predicates for Loop({ policy }) |
-| MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools. Static allow/deny via .mcp-bridge.json. Runtime policy moved to Loop-level in v0.6.0 |
+| Errors | src/errors.js | BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError. Halt decisions (turn cap, budget cap, content rules) come from bareguard, not Loop |
+| bareguard adapter | src/bareguard-adapter.js | `wireGate(gate)` -> `{ policy, wrapTool, wrapTools }`. One-line wiring: maps gate.check decisions to Loop's policy contract; wrapTools so gate.record fires after every execute |
+| MCPBridge | src/mcp-bridge.js | Auto-discover MCP servers, expose as bareagent tools. Static allow/deny via .mcp-bridge.json. Runtime policy lives in `Loop({ policy })` (v0.6.0+) — wire bareguard for unified MCP + native gating (v0.8.0+) |
 
 Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
@@ -32,12 +32,12 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 
 | Entry point | Contents |
 |-------------|----------|
-| `bare-agent` | Components + error classes + CircuitBreaker |
+| `bare-agent` | Components + error classes + CircuitBreaker + wireGate |
 | `bare-agent/providers` | All providers including Fallback |
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
 | `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools |
-| `bare-agent/policy` | pathAllowlist, commandAllowlist, combinePolicies |
+| `bare-agent/bareguard` | wireGate (returns `{ policy, wrapTool, wrapTools }`) |
 | `bare-agent/mcp` | createMCPBridge, discoverServers |
 
 ## Commands

@@ -1,26 +1,26 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.4.3 | Node.js >= 18 | 0 required deps | MIT
+> v0.8.0 | Node.js >= 18 | one required dep (`bareguard ^0.1.1`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~2.6K lines of core, zero required deps). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, provider fallback, Loop-level governance (policy + audit + cost caps), cross-platform shell tools, and an MCP bridge. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (~2.4K lines of core, one required dep). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, provider fallback, single-gate governance via [bareguard](https://npmjs.com/package/bareguard), cross-platform shell tools, and an MCP bridge. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent
 ```
 
-Five entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, MaxRoundsError
+Six entry points:
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools
 - `require('bare-agent/mcp')` — createMCPBridge, discoverServers
-- `require('bare-agent/policy')` — pathAllowlist, commandAllowlist, combinePolicies
+- `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration)
 
 ## Which components do I need?
 
@@ -42,7 +42,7 @@ Five entry points:
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
 | Track cost per run | Automatic — `result.cost` and `loop:done` event |
-| Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError, MaxRoundsError |
+| Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
@@ -53,13 +53,15 @@ Five entry points:
 | Read files, list directories, run shell commands, grep | createShellTools + Loop({ policy }) |
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
 | Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
-| Gate every tool call with one policy hook | Loop({ policy }) |
-| Route policy decisions per user / tenant / chat | Loop({ policy }) + `loop.run(msgs, tools, { ctx })` |
-| Cap total USD spend per run | Loop({ maxCost: 0.50 }) — throws `MaxCostError` |
-| Compose path + command allowlists without boilerplate | `bare-agent/policy` helpers |
+| Gate every tool call with one policy hook | `wireGate(gate).policy` → `Loop({ policy })` |
+| Route policy decisions per user / tenant / chat | `wireGate(gate).policy` + `loop.run(msgs, tools, { ctx })` (ctx routes to bareguard's check via `_ctx`) |
+| Cap total USD spend per run | `new Gate({ budget: { maxCostUsd: 0.50 } })` |
+| Cap total tool-calling rounds | `new Gate({ limits: { maxTurns: 20 } })` |
+| Audit every gated event to JSONL | `new Gate({ audit: { path: './audit.jsonl' } })` |
+| Allowlist filesystem paths for shell tools | `new Gate({ fs: { readScope, writeScope, deny } })` |
+| Allowlist `argv[0]` for shell_run | `new Gate({ bash: { allow: [...], denyPatterns: [...] } })` |
 | Auto-deny Checkpoint prompts that never get a reply | Checkpoint({ timeout: 300000 }) |
 | Get one hook for every silent-ish failure | Loop({ onError }) + `loop:error` stream events |
-| Audit every tool call to JSONL | Loop({ audit: './audit.jsonl' }) |
 | Send messages across WhatsApp/iMessage/Signal/Discord/Slack/Telegram | createMCPBridge + beeperbox |
 
 **Most projects start with Loop + Provider.** Add components as needed.
@@ -131,133 +133,97 @@ const loop = new Loop({
 });
 ```
 
-## Wiring with governance (policy + audit)
+## Wiring with bareguard
 
-Every tool call (native, MCP, browsing, mobile, user-defined) flows through `Loop.run()`. The `policy` option gates each call before execute; the `audit` option writes one JSONL line per call to disk. One hook covers every tool in the agent.
+Every tool call (native, MCP, browsing, mobile, user-defined) flows through `Loop.run()`. The `policy` option is the single chokepoint; the recommended wiring delegates every decision to a [bareguard](https://github.com/hamr0/bareguard) `Gate`. Bareguard owns the audit log, budget caps, content rules, fs/net/bash primitives, and humanChannel — bareagent just respects the verdict.
 
 ```javascript
-const { Loop } = require('bare-agent');
+const { Gate } = require('bareguard');
+const { Loop, wireGate } = require('bare-agent');
 const { OpenAI } = require('bare-agent/providers');
+const { createShellTools } = require('bare-agent/tools');
+
+const gate = new Gate({
+  budget: { maxCostUsd: 0.50 },
+  limits: { maxTurns: 20 },
+  fs:     { readScope: ['/tmp', '~/Projects'], deny: ['/etc'] },
+  bash:   { allow: ['ls', 'cat', 'grep', 'ps', 'df'] },          // argv[0] allowlist
+  audit:  { path: './audit.jsonl' },
+  humanChannel: async (event) => ({ decision: 'deny' }),         // wire to your UI
+});
+await gate.init();
+
+const { policy, wrapTools } = wireGate(gate);
+const { tools } = createShellTools();
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
-  policy: async (toolName, args) => {
-    if (toolName === 'shell_exec') {
-      const base = args.command.trim().split(/\s+/)[0];
-      if (!['ls', 'cat', 'grep', 'ps', 'df'].includes(base)) {
-        return `Denied: ${base} is not in the allowlist for this agent.`;
-      }
-    }
-    if (toolName === 'beeperbox_send_message' && args.chat_id?.includes('finance')) {
-      return 'Finance chats are read-only for this agent.';
-    }
-    return true;
-  },
-  audit: './audit.jsonl',
+  policy,
 });
+
+const result = await loop.run(messages, wrapTools(tools));
 ```
 
-**Policy return values:**
+**Why two pieces (`policy` + `wrapTools`).** `policy` runs `gate.check` *before* every tool call. `wrapTools` decorates each tool's `execute` so `gate.record` fires *after* — that's how bareguard tracks cost, time, and audit. Without `wrapTools`, the gate sees the check but not the result; budget caps wouldn't accumulate.
+
+**Halt decisions surface as deny strings.** When bareguard halts (budget exhausted, `limits.maxTurns` hit, content rule fired with `severity: 'halt'`), the policy returns `[HALT: <rule>] <reason>` and Loop feeds it to the LLM as the tool result. Subsequent rounds halt the same way; the LLM typically gives up and the loop exits. To detect halts earlier, watch the `loop:error` stream or wire `onError` and match on the deny string.
+
+**Same gate covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all pass through `wrapTools` and `policy` — bareguard does no MCP-specific parsing, just glob-matches `tools.allowlist` / `tools.denylist` on the canonical name string.
+
+**Migration map (v0.7 → v0.8):**
+
+| You had | Move to |
+|---|---|
+| `new Loop({ maxCost: 0.50 })` | `new Gate({ budget: { maxCostUsd: 0.50 } })` |
+| `new Loop({ maxRounds: 20 })` | `new Gate({ limits: { maxTurns: 20 } })` |
+| `new Loop({ audit: './x.jsonl' })` | `new Gate({ audit: { path: './x.jsonl' } })` |
+| `pathAllowlist({ allow, deny })` | `new Gate({ fs: { readScope: allow, deny } })` |
+| `commandAllowlist({ allow })` | `new Gate({ bash: { allow } })` |
+| `combinePolicies(a, b, c)` | Stack primitives in one Gate config — they compose as one eval |
+| `MaxCostError` / `MaxRoundsError` | Watch for `[HALT: budget.maxCostUsd]` / `[HALT: limits.maxTurns]` deny strings, or detect halts via `humanChannel` |
+
+**Policy return values (Loop's contract is unchanged):**
 
 | Return | Effect |
 |---|---|
 | `true` | Tool executes normally. |
-| `false` | Tool call aborted. Generic `[Loop] Tool "X" denied by policy` returned to the LLM as tool result — it can reason around the refusal. |
-| `string` | Same as `false`, but the string is returned verbatim. Use this to give the LLM an actionable reason. |
+| `false` | Tool call aborted. Generic `[Loop] Tool "X" denied by policy` returned to the LLM as tool result. |
+| `string` | Returned verbatim to the LLM as the deny reason. `wireGate` produces these for every gate deny. |
 | throws | Treated as a deny. The thrown message becomes the reason. Loop continues. |
-| omitted | Allow-all (existing behaviour). |
-
-**Audit file format** — one JSON object per line, append-only:
-
-```json
-{"ts":"2026-04-13T12:34:56.789Z","tool":"shell_exec","args":{"command":"ls /tmp"},"decision":"allow","result":"foo\nbar","durationMs":12}
-{"ts":"2026-04-13T12:34:57.123Z","tool":"shell_exec","args":{"command":"rm -rf /"},"decision":"deny","reason":"Denied: rm is not in the allowlist"}
-{"ts":"2026-04-13T12:34:58.000Z","tool":"shell_exec","args":{"command":"nonexistent"},"decision":"allow","error":"Command failed"}
-```
-
-- Writes are async and best-effort — an audit write failure logs a warning and never aborts the tool call.
-- File is created on first write, appended to on subsequent writes. No rotation, no size cap — operational concerns are the user's responsibility.
-
-**Same policy covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all pass through the same `Loop.run()` dispatch and hit the same `policy` function. The `.mcp-bridge.json` allow/deny file still controls **which** MCP tools are exposed to the Loop in the first place; `policy` handles arg-dependent runtime decisions on top of that.
+| omitted | Allow-all. Useful for development; never in production — that's what bareguard is for. |
 
 ### Per-caller governance with ctx (multi-user, multi-tenant)
 
-Real autonomous agents serve more than one user. The policy signature accepts a third arg `ctx` — an opaque blob you pass per-call via `loop.run(msgs, tools, { ctx })`. Bareagent forwards it unchanged; you define the shape.
+The policy signature accepts a third arg `ctx` — an opaque blob you pass per-call via `loop.run(msgs, tools, { ctx })`. `wireGate` forwards it as `_ctx` on every `gate.check({ type, args, _ctx })`, and you can branch on it inside bareguard's `humanChannel` callback or via custom primitives.
 
 ```javascript
-const policy = async (toolName, args, ctx) => {
-  if (isHardDenied(toolName, args)) return 'hard-denied';   // nobody, ever
-  if (ctx?.isOwner) return true;                             // owner: anything not hard-denied
-  if (ctx?.adminGroupIds?.has(ctx.senderId)) return adminPolicy(toolName, args);
-  return userPolicy(toolName, args);                         // everyone else: narrow
-};
-
-const loop = new Loop({ provider, policy });
-
-// Per-request: pass ctx; the same closure routes on it
-await loop.run(messages, tools, {
+await loop.run(messages, wrapTools(tools), {
   ctx: { senderId, chatId, isOwner, adminGroupIds },
 });
 ```
 
-One Loop, one policy closure, one audit file — but per-user routing. No need to rebuild the Loop per request, no closure gymnastics. Multi-tenant agents are a one-liner.
+For routing rules that don't fit bareguard's primitives (e.g. "owner can do anything; user can only read"), you can layer a custom closure on top of `wireGate(gate).policy` — but the cleaner pattern is one source of truth: encode the rules as bareguard primitives and let the gate evaluate them.
 
-### Cost caps (`maxCost`) — the runaway catch
+### Catalog pre-filter (omit denied tools from the LLM's view)
 
-Pair `maxCost` with your policy to make autonomous agents safe to leave running. The cap is checked after every round; when cumulative estimated USD exceeds it, the Loop throws `MaxCostError` (or returns `{error}` with `throwOnError: false`).
-
-```javascript
-const { Loop, MaxCostError } = require('bare-agent');
-
-const loop = new Loop({
-  provider,
-  maxCost: 0.50,   // USD — hard cap on accumulated cost per run()
-});
-
-try {
-  await loop.run(messages, tools);
-} catch (err) {
-  if (err instanceof MaxCostError) {
-    console.warn(`Agent stopped — cost ${err.context.cost} exceeded cap ${err.context.maxCost}`);
-    // pager, Slack alert, human review
-  }
-}
-```
-
-**Why cost cap instead of rate limiting?** A rate limiter caps tool calls per minute — hostile to legitimate long-running research tasks. A cost cap caps the thing you actually care about (money) and catches the same runaway-loop failure mode (retry storms, infinite tool loops) because those burn tokens and hit the cap. Ship this, not per-minute throttles.
-
-### Policy helpers — compose instead of hand-rolling
-
-`bare-agent/policy` ships three small building blocks so you don't write path-startsWith logic with your own home-expansion bugs:
+Bareguard's `gate.allows(...)` is a pure predicate (no audit write, no budget delta) you can use to drop denied tools from the catalog before the LLM sees them. v0.1.1 added a string shorthand:
 
 ```javascript
-const { pathAllowlist, commandAllowlist, combinePolicies } = require('bare-agent/policy');
+const visibleTools = (await Promise.all(
+  allTools.map(async (t) => (await gate.allows(t.name)) ? t : null)
+)).filter(Boolean);
 
-const policy = combinePolicies(
-  pathAllowlist({
-    allow: ['~/Documents', '~/Projects', '/tmp'],
-    deny: ['/etc', '/var', '/usr'],
-    toolNames: ['shell_read', 'shell_grep'],
-  }),
-  commandAllowlist({
-    allow: ['ls', 'cat', 'grep', 'ps', 'df', 'git', 'node'],
-    deny: ['rm', 'sudo', 'dd', 'mkfs'],
-    toolName: 'shell_run',   // gates argv[0] — injection-proof
-  }),
-  async (toolName, args, ctx) => {
-    if (!ctx?.isOwner && toolName === 'shell_run') return 'Owner only';
-    return true;
-  },
-);
-
-const loop = new Loop({ provider, policy });
+const result = await loop.run(messages, wrapTools(visibleTools));
 ```
 
-- **`pathAllowlist`** — home expansion, path normalization, deny-wins, optional per-tool gating via `toolNames`.
-- **`commandAllowlist`** — gates `argv[0]` for `shell_run` (safe) or `command.split(/\s+/)[0]` for `shell_exec` (documented caveat: bypassable via shell metacharacters).
-- **`combinePolicies(...)`** — short-circuit combinator. First non-`true` verdict wins. Forwards `ctx` down the chain so every step sees the same caller context.
+For arg-aware filtering (e.g. drop `send_message` only when chat_id matches a specific group), pass the full action shape: `gate.allows({ type: 'send_message', args: { chat_id } })`. This is a context optimization, not a gov mechanism — gov decisions still happen at invoke time via `gate.check`.
 
-Each helper returns an async function matching the policy contract, so they compose freely with your own closures.
+### Checkpoint vs bareguard's humanChannel
+
+- **`humanChannel`** (bareguard) — fires for *policy-driven* asks/halts (budget about to overrun, content rule wants a confirm, halt-severity event needs ack). One callback, one place to wire your UI.
+- **`Checkpoint`** (bareagent) — fires for *always-prompt* flows that aren't policy-driven (e.g. "always confirm before sending an email", regardless of who or why). Stays for that case.
+
+Both can route to the same underlying chat / terminal / Slack helper.
 
 ### Checkpoint timeout — no silent hangs
 
@@ -282,26 +248,25 @@ Set `timeout: 0` to opt out and keep the old "hang forever" behaviour.
 
 | Hook | Use for | Fires on |
 |---|---|---|
-| `audit: './audit.jsonl'` | Forensic replay, compliance, billing | Every tool decision with result/reason/error |
-| `stream` + a transport | Live telemetry (Datadog, Sentry, Loki) | Every loop event including new `loop:error` |
-| `onError(err, { source, ...meta })` | Pager-style alerts (one function, one-liner) | Provider errors, audit failures, callback throws, Checkpoint timeouts, stream listener exceptions, cost-cap breaches |
+| `Gate({ audit: { path } })` | Forensic replay, compliance, billing | Every gated event (check + record) — bareguard owns this |
+| `stream` + a transport | Live telemetry (Datadog, Sentry, Loki) | Every loop event including `loop:error` |
+| `onError(err, { source, ...meta })` | Pager-style alerts (one function, one-liner) | Provider errors, callback throws, Checkpoint timeouts, stream listener exceptions |
 
 ```javascript
 const loop = new Loop({
   provider,
-  policy,
-  audit: './audit.jsonl',
+  policy,   // from wireGate(gate)
   stream,
   onError: (err, meta) => {
     // Fires for every silent-ish failure with { source, ...extra }
-    // source ∈ {'provider', 'audit:write', 'audit:serialize', 'callback:onToolCall',
-    //           'callback:onText', 'checkpoint', 'stream', 'cost-cap'}
+    // source ∈ {'provider', 'callback:onToolCall', 'callback:onText',
+    //           'checkpoint', 'stream'}
     pager.send({ level: 'warn', source: meta.source, err: err.message });
   },
 });
 ```
 
-If you run bareagent headless, **wire at least `onError` and either `audit` or `stream`**. Otherwise you are flying blind.
+If you run bareagent headless, **wire at least `onError`, a `Gate` with an audit path, and a `humanChannel` callback** (the latter is required by bareguard — without it, ask/halt events return silent denies). Otherwise you are flying blind.
 
 ## Wiring with Checkpoint (human approval)
 
@@ -447,9 +412,10 @@ Tools are validated at the start of `run()`. Missing `name` or `execute` throws 
 
 ## Error handling
 
-- **Loop throws by default** (v0.3.0+) — provider errors re-thrown as-is, maxRounds throws `MaxRoundsError`. Use `try/catch` or `.catch()`.
+- **Loop throws by default** (v0.3.0+) — provider errors re-thrown as-is. Use `try/catch` or `.catch()`.
 - **Loop `throwOnError: false`** — opt into v0.2.x behavior where errors are returned in `result.error` instead of thrown.
 - **Loop throws at setup** — missing provider, malformed tools.
+- **Halt decisions don't throw** — turn cap, budget cap, content rules return as `[HALT: <rule>]` deny strings via the policy adapter (v0.8.0+). Watch the `loop:error` stream or wire `humanChannel` to detect halts at source.
 - All errors are prefixed `[ComponentName]` for easy identification.
 - See `docs/errors.md` in the repo for a full error reference with triggers and fixes.
 
@@ -462,9 +428,10 @@ Error
     ├── ToolError           code: 'TOOL_ERROR', retryable: false
     ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
     ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
-    ├── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
-    └── MaxRoundsError      code: 'MAX_ROUNDS', retryable: false
+    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
 ```
+
+Halt classes (`MaxCostError`, `MaxRoundsError`) were removed in v0.8.0 — bareguard halt decisions surface as deny strings now, not exceptions.
 
 All error classes extend `Error` — `instanceof Error` always works. The `retryable` property integrates with `Retry`'s fast path: `err.retryable === true` auto-retries, `err.retryable === false` bails immediately.
 
@@ -816,43 +783,43 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 | `shell_run` | Run a command with an **argv array** via `child_process.execFile` (no shell, no metacharacter interpretation). Returns `{stdout, stderr, code, timedOut}`. **Use this when you need a policy allowlist.** |
 | `shell_exec` | Run a raw shell command string via `/bin/sh -c` (or `cmd.exe`). Returns the same shape. **Shell metacharacters are interpreted — naive allowlists are bypassable.** Use only when you genuinely need shell features (pipes, redirects, globs). |
 
-**Zero baked-in allowlist.** The library ships the primitives; gating is the agent author's job via `Loop({ policy })`.
+**Zero baked-in allowlist.** The library ships the primitives; gating is bareguard's job via the standard `wireGate(gate)` wiring.
 
 > **⚠️ `shell_exec` injection caveat.** `"ls"` passes a base-command allowlist like `args.command.split(/\s+/)[0]`, but so does `"ls;rm -rf /tmp/x"` — the shell runs both. **A base-command allowlist is NOT safe for `shell_exec`.** For policy-gated use, prefer `shell_run({argv})` and allow-list on `args.argv[0]` — there is no shell in that path, so metacharacters are just literal argument bytes. Use `shell_exec` only when the agent needs pipes/redirects/globs, and gate it at a higher level (human approval, narrow intent).
 
 ```javascript
-const { Loop } = require('bare-agent');
+const { Gate } = require('bareguard');
+const { Loop, wireGate } = require('bare-agent');
 const { OpenAI } = require('bare-agent/providers');
 const { createShellTools } = require('bare-agent/tools');
 
+const gate = new Gate({
+  // argv[0] allowlist for shell_run — bareguard's `bash` primitive enforces this.
+  bash:   { allow: ['ls', 'cat', 'grep', 'ps', 'df', 'uname', 'node', 'git'] },
+  // Hard-deny shell_exec for this agent. tools.denylist short-circuits before content checks.
+  tools:  { denylist: ['shell_exec'] },
+  // fs scope for shell_read / shell_grep.
+  fs:     { readScope: ['/home/', '/tmp/'] },
+  audit:  { path: './shell-audit.jsonl' },
+  humanChannel: async (event) => ({ decision: 'deny' }),
+});
+await gate.init();
+
+const { policy, wrapTools } = wireGate(gate);
 const { tools } = createShellTools();
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' }),
-  policy: async (name, args) => {
-    // Safe: argv[0] is a literal binary name, no shell between LLM and kernel.
-    if (name === 'shell_run') {
-      const allow = ['ls', 'cat', 'grep', 'ps', 'df', 'uname', 'node', 'git'];
-      if (!allow.includes(args.argv?.[0])) return `Denied: ${args.argv?.[0]} is not in the allowlist.`;
-    }
-    // Deny shell_exec entirely for this agent — use shell_run for allow-listed commands.
-    if (name === 'shell_exec') return 'shell_exec is disabled for this agent. Use shell_run with an argv array instead.';
-    if (name === 'shell_read' || name === 'shell_grep') {
-      const p = (args.path || '').replace(/^~/, process.env.HOME || '');
-      if (!p.startsWith('/home/') && !p.startsWith('/tmp/')) return 'Path outside allowed roots.';
-    }
-    return true;
-  },
-  audit: './shell-audit.jsonl',
+  policy,
 });
 
 const result = await loop.run(
   [{ role: 'user', content: 'What is in /tmp and how many README files are there under /home/me/code?' }],
-  tools,
+  wrapTools(tools),
 );
 ```
 
-**Allowlist is platform-specific on purpose.** `ls`/`cat`/`grep` work on linux and macOS, `dir`/`type`/`findstr` on Windows. The primitives are cross-platform; the *policy you write* picks the commands appropriate for your OS. The library stays out of that decision.
+**Allowlist is platform-specific on purpose.** `ls`/`cat`/`grep` work on linux and macOS, `dir`/`type`/`findstr` on Windows. The primitives are cross-platform; the *gate config you write* picks the commands appropriate for your OS. The library stays out of that decision.
 
 **Why JavaScript regex for `shell_grep` instead of shelling out to `grep`/`rg`:** pure-Node means no dependency on external binaries being installed, identical behaviour on Windows, and governance covers the implementation (no hidden `child_process.spawn` bypassing the Loop policy).
 
@@ -907,26 +874,42 @@ try {
 }
 ```
 
-**Runtime policy (arg-dependent checks).** Static allow/deny in the file handles coarse-grained permissions. For checks that depend on arguments (e.g. deny `send_message` only when `chat_id` matches a specific group), wire a `policy` closure into the Loop — it covers MCP tools, native tools, and user-defined tools uniformly:
+**Runtime policy (arg-dependent checks).** Static allow/deny in the file handles coarse-grained permissions. For checks that depend on arguments (e.g. deny `send_message` only when `chat_id` matches a specific group), express them in your bareguard `Gate` config — `tools.denyArgPatterns` and `content.denyPatterns` cover most cases, and the `wireGate(gate).policy` adapter applies them to every tool source uniformly:
 
 ```javascript
+const { Gate } = require('bareguard');
+const { Loop, wireGate } = require('bare-agent');
+const { createMCPBridge } = require('bare-agent/mcp');
+
 const bridge = await createMCPBridge();
+
+const gate = new Gate({
+  tools: {
+    denyArgPatterns: {
+      // Per-tool arg patterns. Matches against JSON-stringified args.
+      beeperbox_send_message: [/"chat_id"\s*:\s*"[^"]*finance[^"]*"/],
+    },
+  },
+  humanChannel: async (event) => ({ decision: 'deny' }),
+});
+await gate.init();
+
+const { policy, wrapTools } = wireGate(gate);
 
 const loop = new Loop({
   provider,
   system: bridge.systemContext,
-  policy: async (toolName, args) => {
-    if (toolName === 'beeperbox_send_message' && args.chat_id?.includes('finance')) {
-      return 'Blocked: finance chats are read-only for this agent.';
-    }
-    return true;
-  },
+  policy,
 });
+
+await loop.run(messages, wrapTools(bridge.tools));
 ```
 
-MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `send_message`). Return value semantics match the "Wiring with governance" section above: only `true` allows, anything else denies.
+MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `send_message`). Bareguard glob-matches the canonical name string against `tools.allowlist` / `tools.denylist`; no MCP-specific parsing.
 
 > **v0.6.0 migration:** `createMCPBridge({ policy })` was removed. Runtime policy is Loop-level now, not mcp-bridge-level. Passing `policy` to `createMCPBridge` throws with a migration message.
+>
+> **v0.8.0 migration:** All policy/audit/budget decisions moved to bareguard. `Loop({ maxCost })`, `Loop({ maxRounds })`, `Loop({ audit })`, and the `bare-agent/policy` helpers are gone. Wire bareguard via `wireGate(gate)`; see "Wiring with bareguard" above.
 
 **Options:**
 

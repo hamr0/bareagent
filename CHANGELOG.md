@@ -2,6 +2,64 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.8.0] — 2026-04-30
+
+**Single-gate governance via bareguard.** All policy, audit, and budget decisions move out of Loop and into the sibling [bareguard](https://npmjs.com/package/bareguard) library. Loop becomes a pure runner that respects whatever verdict bareguard returns. Net source delta: ~−250 LOC; no deprecation shims (pre-1.0, clean cut).
+
+### Added
+
+- **`bare-agent/bareguard` entry point** — new `wireGate(gate)` helper returns `{ policy, wrapTool, wrapTools }`. One-line integration: pass `policy` to `new Loop({ policy })`, run tools through `wrapTools(tools)`, and every tool call traverses `gate.check` pre-execute and `gate.record` post-execute. Halt-severity decisions (budget exhausted, `limits.maxTurns` hit, etc.) flow back as `[HALT: <rule>]` deny strings the LLM sees as tool results.
+- **`bareguard` as a hard dependency** (pinned `^0.1.1`). Reflects that single-gate governance is now load-bearing for the library; opt-out costs nothing if you don't pass `policy`, but the recommended wiring is built in.
+- **Apache 2.0 license** — switched from MIT. `LICENSE` and `NOTICE` files added; `package.json` `license` field updated to `Apache-2.0`.
+- **`examples/with-bareguard.mjs`** — end-to-end smoke wiring: `Gate` with budget cap, fs scope, bash allowlist, audit path, and `humanChannel` callback, plumbed into a real `Loop` with shell tools.
+- **`test/integration-bareguard.test.js`** — 13 tests pinning the adapter contract: decision shape mapping, halt prefixing, ctx forwarding, `wrapTool` record/error behaviour, end-to-end Loop + Gate wiring.
+
+### Removed (breaking)
+
+- **`Loop({ maxCost })`** — moved to `new Gate({ budget: { maxCostUsd } })`. `MaxCostError` class deleted.
+- **`Loop({ maxRounds })`** — moved to `new Gate({ limits: { maxTurns } })`. `MaxRoundsError` class deleted. Loop has an internal `HARD_ROUND_LIMIT = 100` safety net only — not configurable, not part of the public API.
+- **`Loop({ audit })`** — moved to `new Gate({ audit: { path } })`. Loop's internal `_writeAudit` / `_auditInFlight` / `flush()` removed; bareguard owns audit I/O end-to-end.
+- **`bare-agent/policy` entry point** — `pathAllowlist`, `commandAllowlist`, `combinePolicies` deleted. Express the same intent in bareguard config primitives (`fs.readScope` / `fs.writeScope` / `fs.deny`, `bash.allow` / `bash.denyPatterns`, layered `tools` + `content` rules). One source of truth = no drift.
+- **`source: 'cost-cap'`** value from the `onError` `meta.source` enumeration. Cost halt comes from bareguard now and surfaces as a deny string + `loop:tool_result` event with `denied: true`.
+
+### Changed
+
+- **`Loop({ policy })` JSDoc** — recommended wiring is now `wireGate(gate).policy`. The contract is unchanged: `(toolName, args, ctx) => true | string`. Existing custom closures keep working without modification.
+- **`bareagent.context.md`** — version bumped to v0.8.0; new "Wiring with bareguard" top-level section between MCP Bridge and Recipes; "Wiring with governance (policy + audit)" section rewritten around bareguard; "Cost caps with maxCost" + "Policy helpers" sections deleted; error hierarchy + entry points + Which-components table refreshed.
+- **`README.md`** — Loop row, Errors row, dependencies note, license footer updated.
+
+### Migration from v0.7.x
+
+Drop-in if you don't use `policy`, `maxCost`, `maxRounds`, `audit`, or the `bare-agent/policy` helpers — Loop's default behaviour is unchanged.
+
+| You had | Move to |
+| --- | --- |
+| `new Loop({ maxCost: 0.50 })` | `new Gate({ budget: { maxCostUsd: 0.50 } })` |
+| `new Loop({ maxRounds: 20 })` | `new Gate({ limits: { maxTurns: 20 } })` |
+| `new Loop({ audit: './x.jsonl' })` | `new Gate({ audit: { path: './x.jsonl' } })` |
+| `pathAllowlist({ allow, deny })` | `new Gate({ fs: { readScope: allow, deny } })` (or `writeScope`) |
+| `commandAllowlist({ allow })` | `new Gate({ bash: { allow } })` |
+| `combinePolicies(a, b, c)` | Stack primitives in one Gate config — they compose as one eval |
+| `policy: yourClosure` | Same closure works. Wrap with bareguard via `wireGate(gate).policy` for the recommended wiring. |
+| `catch (err) { if (err instanceof MaxCostError) ... }` | Watch for `[HALT: budget.maxCostUsd]` in the deny string, or wire `humanChannel` to detect halts at source |
+| `catch (err) { if (err instanceof MaxRoundsError) ... }` | Same — `[HALT: limits.maxTurns]` |
+
+End-to-end example: `examples/with-bareguard.mjs`.
+
+### Tests
+
+- Removed: `test/policy-helpers.test.js` (entire file — symbols deleted), `MaxRoundsError` test in `test/errors.test.js`, `maxRounds` / `maxCost` / `audit` describe blocks in `test/loop.test.js`.
+- Added: `test/integration-bareguard.test.js` (13 tests covering the wireGate contract end-to-end).
+- All other tests pass against v0.8.0 unchanged; the option drops were silent (`maxRounds: 5` etc. are now ignored, not erroring).
+
+### Deps
+
+- `dependencies` — added `bareguard ^0.1.1`.
+- `optionalDependencies`, `peerDependencies`, `peerDependenciesMeta` — unchanged.
+- `exports` map — added `./bareguard`, removed `./policy`.
+
+---
+
 ## [0.7.0] — 2026-04-14
 
 Foundations for autonomous agents: per-caller policy routing, cost caps, Checkpoint safety, composable policy helpers, and a discipline pass eliminating silent failures.

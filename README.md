@@ -11,9 +11,9 @@
 
 ```
 
-**Agent orchestration in ~2.6K lines of core. Zero required deps. Apache 2.0.**
+**Agent orchestration in ~2.4K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard)). Apache 2.0.**
 
-Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents.
+Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. Single-gate governance via bareguard: every tool call traverses one policy hook, one audit log, one budget cap.
 
 ## Quick start
 
@@ -60,7 +60,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Returns estimated USD cost per run. Governance built in: `policy(tool, args, ctx)` gates every tool call (native, MCP, browsing, mobile) through one hook with per-caller `ctx` routing. `audit` writes a JSONL decision log. `maxCost` catches runaway loops. `onError` + `loop:error` surface every silent-ish failure (audit write, callback throw, Checkpoint timeout) |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Returns estimated USD cost per run. Governance via `Loop({ policy })` — wire bareguard's `Gate` through `wireGate(gate)` and every tool call (native, MCP, browsing, mobile) traverses one chokepoint with per-caller `ctx` routing. Bareguard owns the audit log, budget caps, and halt decisions; Loop respects the verdict. `onError` + `loop:error` surface every silent-ish failure (callback throw, Checkpoint timeout) |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
@@ -71,8 +71,8 @@ Every piece works alone — take what you need, ignore the rest.
 | **Checkpoint** | Human approval gate. You provide the transport — terminal, Telegram, Slack, whatever |
 | **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |
 | **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
-| **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `MaxRoundsError`, `MaxCostError`, `CircuitOpenError`, `ValidationError` |
-| **Policy helpers** | `pathAllowlist`, `commandAllowlist`, `combinePolicies` — composable predicates for `Loop({ policy })`. Home expansion, deny-wins, short-circuit combinator, argv-based safe allowlists. `require('bare-agent/policy')` |
+| **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `CircuitOpenError`, `ValidationError`. Halt decisions (turn cap, budget cap, content rules) come from bareguard, not Loop |
+| **bareguard adapter** | `wireGate(gate)` returns `{ policy, wrapTools }` — one-line wiring to bareguard's `Gate`. Maps gate decisions to Loop's `policy` contract; `wrapTools` decorates tools so `gate.record` fires after every execute. `require('bare-agent/bareguard')` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
 | **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
 | **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |
@@ -84,7 +84,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** 0 required. Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
+**Deps:** 1 required (`bareguard` for governance — single-gate policy + audit + budget). Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
 
 ---
 

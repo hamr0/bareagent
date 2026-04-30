@@ -10,6 +10,7 @@ const { Stream } = require('./src/stream');
 const { Retry } = require('./src/retry');
 const { runPlan } = require('./src/run-plan');
 const { CircuitBreaker } = require('./src/circuit-breaker');
+const { wireGate } = require('./src/bareguard-adapter');
 const {
   BareAgentError,
   ProviderError,
@@ -17,8 +18,6 @@ const {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
-  MaxRoundsError,
-  MaxCostError,
 } = require('./src/errors');
 
 module.exports = {
@@ -32,12 +31,11 @@ module.exports = {
   Retry,
   runPlan,
   CircuitBreaker,
+  wireGate,
   BareAgentError,
   ProviderError,
   ToolError,
   TimeoutError,
   ValidationError,
   CircuitOpenError,
-  MaxRoundsError,
-  MaxCostError,
 };

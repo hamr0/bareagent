@@ -1,14 +1,16 @@
 {
   "name": "bare-agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "files": [
     "index.js",
     "src/",
     "bin/",
-    "tools/"
+    "tools/",
+    "LICENSE",
+    "NOTICE"
   ],
-  "description": "Lightweight, composable agent orchestration for autonomous agents. Loop policy + audit, cost caps, cross-platform shell tools, MCP bridge. ~2.6K lines core, 0 required deps.",
-  "license": "MIT",
+  "description": "Lightweight, composable agent orchestration for autonomous agents. Single-gate governance via bareguard, cross-platform shell tools, MCP bridge. ~2.4K lines core, one required dep.",
+  "license": "Apache-2.0",
   "author": "hamr0",
   "repository": {
     "type": "git",
@@ -25,7 +27,7 @@
     "./transports": "./src/transports.js",
     "./tools": "./src/tools.js",
     "./mcp": "./src/mcp.js",
-    "./policy": "./src/policy.js"
+    "./bareguard": "./src/bareguard-adapter.js"
   },
   "engines": {
     "node": ">=18"
@@ -37,8 +39,13 @@
     "ai",
     "tool-calling",
     "planner",
-    "lightweight"
+    "lightweight",
+    "bareguard",
+    "governance"
   ],
+  "dependencies": {
+    "bareguard": "^0.1.1"
+  },
   "optionalDependencies": {
     "barebrowse": "^0.5.0",
     "baremobile": "^0.7.0",

@@ -35,9 +35,10 @@ Behavior:
 - Never throws. All errors in `result.error`
 - Unknown tools: error string sent to LLM, loop continues
 - Tool execution errors: caught, error message to LLM, loop continues
-- `maxRounds` (default 5): stops with warning if exceeded
+- Internal `HARD_ROUND_LIMIT = 100` safety net; real bounds come from a wired bareguard `Gate` via `limits.maxTurns`
 - System prompt: `options.system` or constructor `system`, prepended as `role: 'system'`
-- Integrations via constructor: checkpoint, retry, stream, onToolCall, onText, onError
+- Integrations via constructor: checkpoint, retry, stream, onToolCall, onText, onError, policy
+- `policy(toolName, args, ctx)` is the single chokepoint for governance — wire bareguard via `wireGate(gate).policy` for the recommended single-gate setup (audit + budget + content + fs + bash + tools + limits all in one config)
 
 Internal message format is OpenAI-compatible. Each provider normalizes from this.
 

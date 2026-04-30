@@ -13,8 +13,7 @@ Error
     ├── ToolError           code: 'TOOL_ERROR', retryable: false
     ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
     ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
-    ├── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
-    └── MaxRoundsError      code: 'MAX_ROUNDS', retryable: false
+    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
 ```
 
 | Class | When thrown | `retryable` |
@@ -23,8 +22,9 @@ Error
 | `ToolError` | Tool `execute()` throws during Loop | `false` |
 | `TimeoutError` | Retry per-attempt timeout exceeded | `true` |
 | `CircuitOpenError` | CircuitBreaker is open, request rejected | `true` |
-| `MaxRoundsError` | Loop exceeded `maxRounds` without final response | `false` |
 | `ValidationError` | Input validation failures | `false` |
+
+**Halt classes (`MaxCostError`, `MaxRoundsError`) were removed in v0.8.0.** Halt decisions now come from bareguard and surface as `[HALT: <rule>]` deny strings via the policy adapter, not exceptions. Watch the `loop:error` stream or wire `humanChannel` to detect halts at source.
 
 **Import:** `const { ProviderError, CircuitOpenError } = require('bare-agent');`
 
@@ -57,7 +57,7 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 | `[Loop] Tool "X" has invalid parameters` | `parameters` is present but not an object | Set `parameters` to a JSON Schema object or remove it |
 | `[Loop] Unknown tool: X` | LLM requested a tool not in the `tools` array | Not an error you throw — fed back to the LLM so it can self-correct |
 | `[Loop] Tool error: ...` | A tool's `execute()` threw during the loop | Not an error you throw — fed back to the LLM. Check the tool's implementation |
-| `[Loop] ended after N rounds without final response` | LLM kept requesting tool calls past `maxRounds` | Increase `maxRounds` or simplify the task. Throws `MaxRoundsError` by default (v0.3.0+). Pass `throwOnError: false` for v0.2.x behavior (returned in `result.error`) |
+| `[Loop] hit internal safety limit of 100 rounds. Wire bareguard for proper governance — see bare-agent/bareguard.` | LLM kept requesting tool calls past the internal hard cap. v0.8.0+ removed the `maxRounds` option; real bounds belong in bareguard `limits.maxTurns`. | Wire bareguard via `wireGate(gate)` with `limits: { maxTurns: N }` set to the real ceiling for your task. The hard cap is a safety net, not a configuration knob. |
 
 **Note:** `[Loop] Tool "X" has a non-string description` is a `console.warn`, not a thrown error.
 
