@@ -1,0 +1,12 @@
+{
+  "systemPrompt": "You are a researcher. You have shell_read and shell_grep tools scoped to the current working directory. The user's message describes what to find or read. Use shell_grep to locate matches and shell_read to read whole files. Return a concise summary of what you found (3-8 sentences). Do not invent file contents; if you can't find something, say so.",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "tools": ["shell_read", "shell_grep"],
+  "gate": {
+    "limits": { "maxTurns": 10 },
+    "fs":     { "readScope": ["."] },
+    "tools":  { "allowlist": ["shell_read", "shell_grep"] },
+    "audit":  { "path": "./bareagent-audit.jsonl" }
+  }
+}

@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.8.0 | Node.js >= 18 | one required dep (`bareguard ^0.1.1`) | Apache 2.0
+> v0.9.0 | Node.js >= 18 | one required dep (`bareguard ^0.2.0`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -18,8 +18,8 @@ Six entry points:
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
-- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools
-- `require('bare-agent/mcp')` — createMCPBridge, discoverServers
+- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue
+- `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration)
 
 ## Which components do I need?
@@ -63,6 +63,9 @@ Six entry points:
 | Auto-deny Checkpoint prompts that never get a reply | Checkpoint({ timeout: 300000 }) |
 | Get one hook for every silent-ish failure | Loop({ onError }) + `loop:error` stream events |
 | Send messages across WhatsApp/iMessage/Signal/Discord/Slack/Telegram | createMCPBridge + beeperbox |
+| **Spawn a child specialist agent** | createSpawnTool + bin/cli.js --config (v0.9+) |
+| **Defer an action for later (cron-fired)** | createDeferTool + examples/wake.sh (v0.9+) |
+| **Expose a large MCP catalog dynamically** | createMCPBridge → bridge.metaTools (v0.9+) |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -132,6 +135,108 @@ const loop = new Loop({
   system: `Use this context:\n${context}`,
 });
 ```
+
+## Multi-agent: spawn + defer + wake (v0.9)
+
+Three primitives, no framework. The "always-on" feeling of multi-agent
+systems is an illusion produced by *frequent stateless wakeups over
+persistent JSONL*. UNIX figured this out in 1973.
+
+```javascript
+const { Loop, wireGate } = require('bare-agent');
+const { Gate } = require('bareguard');
+const { createSpawnTool, createDeferTool } = require('bare-agent/tools');
+
+const gate = new Gate({
+  budget: { maxCostUsd: 0.50 },          // shared across the family via BAREGUARD_BUDGET_FILE
+  limits: { maxTurns: 20, maxChildren: 3, maxDepth: 2 },
+  spawn:  { ratePerMinute: 5 },          // bareguard 0.2 — per-family
+  defer:  { ratePerMinute: 10 },         // bareguard 0.2 — per-family
+  audit:  { path: './bareagent-audit.jsonl' },
+  humanChannel: async () => ({ decision: 'deny' }),
+});
+await gate.init();
+
+const { policy, wrapTools } = wireGate(gate);
+const { tool: spawn } = createSpawnTool();
+const { tool: defer } = createDeferTool();
+
+const loop = new Loop({ provider, policy });
+await loop.run(messages, wrapTools([spawn, defer, ...otherTools]));
+```
+
+**`spawn({ config, input? })`** — fork a child bareagent process with the
+given config file path (a JSON specialist definition). Blocks until the
+child exits; returns `{ text, usage, cost, error, events }`. The child is
+invoked as `bare-agent --config <path>` (see `bin/cli.js` config-mode);
+env-vars `BAREGUARD_AUDIT_PATH`, `BAREGUARD_PARENT_RUN_ID`,
+`BAREGUARD_BUDGET_FILE`, `BAREGUARD_SPAWN_DEPTH+1` are threaded
+automatically. Child stderr is captured and re-emitted as
+`{type: 'child:stderr', text, ts}` events on the parent's stream — one
+JSONL channel per child, no two-stream split.
+
+**`defer({ action, when })`** — append a JSONL record to the queue file
+(default `./bareagent-defers.jsonl`, override `BAREAGENT_DEFER_QUEUE`).
+bareagent does NOT wake up later; the running process exits when the
+loop ends. An external scheduler (cron + `examples/wake.sh`) reads the
+queue and re-invokes bareagent at fire time. Returns `{ id }`.
+
+**Two-phase defer (defense in depth):**
+
+1. **Emit** (the `defer` tool): one `gate.check` on `{ type: 'defer', args: { action, when } }`.
+   Runs the full pipeline — `defer.ratePerMinute` cap, `tools.allowlist`
+   on `defer`, `content.*` over the JSON-serialized form. Bareguard does
+   NOT extract `args.action` and run a second pipeline against it at
+   emit time.
+2. **Fire** (`wake.sh` invokes bareagent): a fresh `gate.check` on the
+   inner action — full pipeline against it as if it had been called
+   directly. Two distinct gate.check calls, two distinct audit lines,
+   reconstructable via `parent_run_id`.
+
+**Per-family rate caps.** `spawn.ratePerMinute` and `defer.ratePerMinute`
+count audit-log records in a trailing 60s window keyed by the root
+`run_id`. A fork-bombing child can't evade the parent's cap by spawning
+its own children — they all share the family count. Defaults: defer
+15/min, spawn 10/min.
+
+**Reference cron + wake script:** `examples/wake.sh` (with
+`examples/wake.md` for setup). The script folds the defer queue with
+`jq`, picks records where `when <= now() AND status === 'pending'`,
+appends a `'fired'` line, and shells out to `bare-agent --config
+<orchestrator>` with the inner action as stdin.
+
+**End-to-end orchestrator example:** `examples/orchestrator/` ships a
+parent + two specialists (summarizer, researcher). The orchestrator's
+"intelligence" is its system prompt — there's no `class Orchestrator`,
+no `dispatch_to_specialist()`. Roles are configs, not types. Adding a
+new specialist is one JSON file.
+
+### MCP catalog: bulk vs metaTools (v0.9)
+
+`createMCPBridge()` now returns BOTH surfaces. Pick by catalog size:
+
+```javascript
+const bridge = await createMCPBridge();
+// bridge.tools     — bulk-loaded array (every MCP tool, name-prefixed).
+//                    LLM sees them all upfront. Token-cheap upfront, token-
+//                    expensive per turn if catalog is big.
+// bridge.metaTools — [mcp_discover, mcp_invoke] LLM-callable pair.
+//                    Two tool slots in the LLM's view; LLM calls
+//                    mcp_discover() to list, then mcp_invoke({ name, args })
+//                    to use. Token-cheap per turn, slightly more turns
+//                    if the LLM needs to discover.
+```
+
+Wire one or the other into Loop's tool array — never both (the LLM would
+see the same MCP tool twice). Same RPC connections under the hood; one
+factory, one source of truth, two output forms. **Lean: ~10 tools or
+fewer → bulk. ~50+ tools → metaTools.**
+
+Bareguard governs both forms, with one quirk for metaTools: it sees
+`action.type === 'mcp_invoke'` (not the canonical inner name), and the
+invoked tool name lives in `args.name`. To deny specific MCP tools when
+using metaTools, use `tools.denyArgPatterns: { mcp_invoke: [/"name":"linear_admin_/] }`
+or `content.denyPatterns` over the serialized action.
 
 ## Wiring with bareguard
 
