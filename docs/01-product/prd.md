@@ -1,8 +1,16 @@
 # bare-agent — Project Plan
 
-> Lightweight, composable agent orchestration library. ~1700 lines, 0 required deps, MIT license.
+> **HISTORICAL DOC.** This is the original v0.2-era project plan. The current
+> spec lives in [`bareagent-prd-updates.md`](./bareagent-prd-updates.md) (v0.4,
+> shipped in bareagent v0.8.0). Notable changes since this doc was written:
+> license is **Apache 2.0** (not MIT); single-gate governance via **bareguard**
+> is now a hard dep at `^0.1.1`; `Loop({ maxCost })`, `Loop({ maxRounds })`,
+> `Loop({ audit })` and the `bare-agent/policy` helpers were **removed** in
+> v0.8.0 — see CHANGELOG migration map.
+>
+> Lightweight, composable agent orchestration library. ~2.4K lines, one required dep, Apache 2.0.
 > Use what you need, ignore the rest. Works as npm import or cross-language subprocess.
-> npm: `bare-agent@0.2.2` (maintainer: hamr0)
+> npm: `bare-agent@0.8.0` (maintainer: hamr0)
 
 ---
 

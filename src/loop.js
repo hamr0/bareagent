@@ -1,7 +1,6 @@
 'use strict';
 
-const fs = require('node:fs');
-const { ToolError, MaxRoundsError, MaxCostError } = require('./errors');
+const { ToolError } = require('./errors');
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
 // Last updated: 2026-03-18. Source: public provider pricing pages.
@@ -21,6 +20,11 @@ const COST_PER_1K = {
   '_default': { in: 0.002, out: 0.008 },
 };
 
+// Internal safety net only — real iteration bounds come from a wired bareguard
+// Gate via `limits.maxTurns`. If you hit this without bareguard wired, you have
+// no governance and the LLM loop is unbounded by design — wire bareguard.
+const HARD_ROUND_LIMIT = 100;
+
 function estimateCost(model, usage) {
   if (!usage || !model) return null;
   const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
@@ -34,20 +38,17 @@ class Loop {
   /**
    * @param {object} options
    * @param {object} options.provider - LLM provider (must implement generate()).
-   * @param {number} [options.maxRounds=5] - Maximum think/act/observe cycles.
    * @param {string} [options.system] - System prompt prepended to messages.
    * @param {object} [options.checkpoint] - Checkpoint instance for human-in-the-loop.
    * @param {object} [options.retry] - Retry instance for backoff on failures.
    * @param {object} [options.stream] - Stream instance for event emission.
    * @param {object} [options.store] - Store instance for validate() health check.
-   * @param {Function} [options.policy] - Async (toolName, args) => true|false|string. Deny returns the string (or a generic message) to the LLM as tool result.
-   * @param {string} [options.audit] - File path for JSONL audit log. Each tool call appends one line: {ts, tool, args, decision, result|reason|error, durationMs}.
+   * @param {Function} [options.policy] - Async (toolName, args, ctx) => true | string. Recommended wiring: closure that delegates to a bareguard Gate (`require('bare-agent/bareguard').wireGate(gate).policy`). Anything other than `true` denies; a string is fed to the LLM verbatim as the deny reason. All policy/budget/audit decisions live in bareguard — Loop just calls the closure and respects the verdict.
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
    */
   constructor(options = {}) {
     if (!options.provider) throw new Error('[Loop] requires a provider');
     this.provider = options.provider;
-    this.maxRounds = options.maxRounds || 5;
     this.system = options.system || null;
     this.checkpoint = options.checkpoint || null;
     this.retry = options.retry || null;
@@ -58,19 +59,16 @@ class Loop {
     this.throwOnError = options.throwOnError !== undefined ? options.throwOnError : true;
     this.store = options.store || null;
     if (options.policy != null && typeof options.policy !== 'function') {
-      throw new Error('[Loop] options.policy must be a function (toolName, args) => true | false | string');
+      throw new Error('[Loop] options.policy must be a function (toolName, args, ctx) => true | string');
     }
     this.policy = options.policy || null;
-    this.audit = options.audit || null;
-    this.maxCost = typeof options.maxCost === 'number' && options.maxCost > 0 ? options.maxCost : null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
-    this._auditInFlight = new Set();
   }
 
   // Unified error emitter — every silent-ish failure path routes through here so
-  // operators see audit writes, callback throws, checkpoint timeouts, stream listener
-  // errors in one place: loop:error stream event + onError callback.
+  // operators see callback throws, checkpoint timeouts, stream listener errors
+  // in one place: loop:error stream event + onError callback.
   _reportError(source, err, extra = {}) {
     const message = err?.message || String(err);
     this._safeEmit({ type: 'loop:error', data: { source, error: message, ...extra } });
@@ -106,35 +104,11 @@ class Loop {
     }
   }
 
-  // Append one JSONL record. Returns nothing (fire-and-forget for callers)
-  // but tracks the in-flight promise so `flush()` and the end of `run()` can await it.
-  _writeAudit(record) {
-    if (!this.audit) return;
-    let line;
-    try {
-      line = JSON.stringify(record) + '\n';
-    } catch (err) {
-      this._reportError('audit:serialize', err, { tool: record?.tool });
-      return;
-    }
-    const p = fs.promises.appendFile(this.audit, line)
-      .catch(err => this._reportError('audit:write', err, { tool: record?.tool }))
-      .finally(() => this._auditInFlight.delete(p));
-    this._auditInFlight.add(p);
-  }
-
-  // Await any in-flight audit writes. Safe to call multiple times; resolves immediately
-  // when no writes are pending. Called automatically at the end of each `run()`.
-  async flush() {
-    if (this._auditInFlight.size === 0) return;
-    await Promise.all([...this._auditInFlight]);
-  }
-
   /**
    * Run the think/act/observe loop.
    * @param {Array<object>} messages - Conversation messages in OpenAI format.
    * @param {Array<object>} [tools=[]] - Tool definitions with name, execute, description, parameters.
-   * @param {object} [options={}] - Per-run overrides (system, temperature, etc.).
+   * @param {object} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
    * @returns {Promise<{text: string, toolCalls: Array, usage: object, error: string|null}>}
    * @throws {Error} `[Loop] Tool is missing a name` — when a tool has no name or a non-string name.
    * @throws {Error} `[Loop] Tool "X" is missing an execute() function` — when execute is not a function.
@@ -170,7 +144,7 @@ class Loop {
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
 
-    for (let round = 0; round < this.maxRounds; round++) {
+    for (let round = 0; round < HARD_ROUND_LIMIT; round++) {
       if (this._stopped) break;
 
       let result;
@@ -179,7 +153,6 @@ class Loop {
         result = this.retry ? await this.retry.call(generate) : await generate();
       } catch (err) {
         this._reportError('provider', err, { round });
-        await this.flush();
         if (this.throwOnError) throw err;
         return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message };
       }
@@ -189,21 +162,10 @@ class Loop {
       const roundCost = estimateCost(model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
 
-      // Cost cap — fail fast before the next round costs more money.
-      if (this.maxCost !== null && totalCost > this.maxCost) {
-        const msg = `[Loop] cost ${totalCost.toFixed(4)} exceeded cap ${this.maxCost.toFixed(4)} after round ${round + 1}`;
-        const err = new MaxCostError(msg, { context: { cost: totalCost, maxCost: this.maxCost, round } });
-        this._reportError('cost-cap', err, { cost: totalCost, maxCost: this.maxCost });
-        await this.flush();
-        if (this.throwOnError) throw err;
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: msg };
-      }
-
       // No tool calls — LLM gave a final text response
       if (!result.toolCalls || result.toolCalls.length === 0) {
         this._safeEmit({ type: 'loop:text', data: { text: result.text } });
         this._safeCall('onText', this.onText, result.text);
-        await this.flush();
         this._safeEmit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
         return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null };
       }
@@ -260,6 +222,8 @@ class Loop {
         // anything else (false, string, undefined, object, throw) denies. A string verdict
         // is used verbatim as the deny reason. `ctx` (opaque blob passed via
         // loop.run(msgs, tools, { ctx })) is forwarded as the third arg for per-caller gating.
+        // Recommended wiring: bareguard's Gate via `wireGate(gate).policy` — bareguard
+        // owns budget, audit, and halt decisions; Loop just respects the verdict.
         if (this.policy) {
           let verdict;
           try {
@@ -273,54 +237,29 @@ class Loop {
               : `[Loop] Tool "${tc.name}" denied by policy`;
             msgs.push({ role: 'tool', tool_call_id: tc.id, content: reason });
             this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, denied: true, reason } });
-            this._writeAudit({
-              ts: new Date().toISOString(),
-              tool: tc.name,
-              args: tc.arguments,
-              decision: 'deny',
-              reason,
-            });
             continue;
           }
         }
 
-        const startedAt = Date.now();
         try {
           const execute = () => tool.execute(tc.arguments);
           const toolResult = this.retry ? await this.retry.call(execute) : await execute();
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
-          this._writeAudit({
-            ts: new Date().toISOString(),
-            tool: tc.name,
-            args: tc.arguments,
-            decision: 'allow',
-            result: content,
-            durationMs: Date.now() - startedAt,
-          });
         } catch (err) {
           const toolErr = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
           const errMsg = `[Loop] Tool error: ${toolErr.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
-          this._writeAudit({
-            ts: new Date().toISOString(),
-            tool: tc.name,
-            args: tc.arguments,
-            decision: 'allow',
-            error: toolErr.message,
-            durationMs: Date.now() - startedAt,
-          });
         }
       }
     }
 
-    // maxRounds exceeded
-    const warning = `[Loop] ended after ${this.maxRounds} rounds without final response`;
-    await this.flush();
+    // Hard safety limit — should never fire under normal usage; bareguard's
+    // limits.maxTurns (or the LLM's natural completion) ends the loop first.
+    const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
-    if (this.throwOnError) throw new MaxRoundsError(warning);
     return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning };
   }
 

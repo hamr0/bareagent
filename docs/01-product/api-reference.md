@@ -11,16 +11,20 @@ const { Loop } = require('bare-agent');
 ```javascript
 new Loop({
   provider,           // Required. Object with generate(messages, tools, options)
-  maxRounds: 5,       // Max tool-calling iterations before stopping
+  policy: null,       // Async (toolName, args, ctx) => true | string. Recommended: wireGate(gate).policy
   system: null,       // Default system prompt string
-  checkpoint: null,   // Checkpoint instance
+  checkpoint: null,   // Checkpoint instance (always-prompt; complementary to bareguard humanChannel)
   retry: null,        // Retry instance (wraps generate + tool.execute)
   stream: null,       // Stream instance
+  store: null,        // Store instance for validate() health check
+  throwOnError: true, // Provider errors throw vs. return in result.error
   onToolCall: null,   // (name, args) => void
   onText: null,       // (text) => void
-  onError: null,      // (err) => void
+  onError: null,      // (err, { source, ...meta }) => void — fires on every silent-ish failure
 })
 ```
+
+Internal `HARD_ROUND_LIMIT = 100` safety net only; real iteration bounds come from a wired bareguard `Gate` via `limits.maxTurns`. v0.7-era options `maxRounds`, `maxCost`, and `audit` were removed in v0.8.0 — see CHANGELOG migration map.
 
 ### Methods
 

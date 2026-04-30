@@ -44,7 +44,7 @@ The core think → act → observe cycle. Everything else is optional scaffoldin
 - Executes tool calls, appends results as `role: 'tool'` messages, loops
 - Unknown tools: returns error string to LLM, loop continues
 - Tool execution errors: caught, error message sent to LLM, loop continues
-- `maxRounds` (default 5): stops with error if exceeded
+- Internal `HARD_ROUND_LIMIT = 100` safety net only; real bounds come from a wired bareguard `Gate` (`limits.maxTurns`). v0.7-era `maxRounds` option was removed in v0.8.0.
 - `stop()`: sets flag, checked each iteration — no race conditions
 - System prompt: prepended as `role: 'system'` message
 - Never throws — all errors returned in `result.error`

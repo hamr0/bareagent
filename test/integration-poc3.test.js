@@ -46,7 +46,7 @@ describe('Checkpoint + Loop + OpenAI', { skip: !OPENAI_API_KEY && 'OPENAI_API_KE
       waitForReply: async () => 'yes',
     });
 
-    const loop = new Loop({ provider, checkpoint: cp, maxRounds: 5 });
+    const loop = new Loop({ provider, checkpoint: cp });
     const result = await loop.run(
       [{ role: 'user', content: 'Send an email to mom@example.com saying I will be late. Use the send_email tool.' }],
       [sendEmailTool],
@@ -64,7 +64,7 @@ describe('Checkpoint + Loop + OpenAI', { skip: !OPENAI_API_KEY && 'OPENAI_API_KE
       waitForReply: async () => 'no',
     });
 
-    const loop = new Loop({ provider, checkpoint: cp, maxRounds: 5 });
+    const loop = new Loop({ provider, checkpoint: cp });
     const result = await loop.run(
       [{ role: 'user', content: 'Send an email to mom@example.com saying hi. Use the send_email tool.' }],
       [sendEmailTool],
@@ -82,7 +82,7 @@ describe('Checkpoint + Loop + OpenAI', { skip: !OPENAI_API_KEY && 'OPENAI_API_KE
       waitForReply: async () => 'yes',
     });
 
-    const loop = new Loop({ provider, checkpoint: cp, maxRounds: 5 });
+    const loop = new Loop({ provider, checkpoint: cp });
     const result = await loop.run(
       [{ role: 'user', content: 'What is the weather in Berlin? Use the get_weather tool.' }],
       [weatherTool, sendEmailTool],
@@ -105,7 +105,7 @@ describe('Checkpoint + Loop + Anthropic', { skip: !ANTHROPIC_API_KEY && 'ANTHROP
       waitForReply: async () => 'yes',
     });
 
-    const loop = new Loop({ provider, checkpoint: cp, maxRounds: 5 });
+    const loop = new Loop({ provider, checkpoint: cp });
     const result = await loop.run(
       [{ role: 'user', content: 'Send an email to mom@example.com saying I will be late. Use the send_email tool.' }],
       [sendEmailTool],
@@ -123,7 +123,7 @@ describe('Checkpoint + Loop + Anthropic', { skip: !ANTHROPIC_API_KEY && 'ANTHROP
       waitForReply: async () => 'no',
     });
 
-    const loop = new Loop({ provider, checkpoint: cp, maxRounds: 5 });
+    const loop = new Loop({ provider, checkpoint: cp });
     const result = await loop.run(
       [{ role: 'user', content: 'Send an email to mom@example.com saying hi. Use the send_email tool.' }],
       [sendEmailTool],

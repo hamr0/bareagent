@@ -69,7 +69,7 @@ describe('OpenAI integration', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not se
   });
 
   it('full loop with tool execution', { timeout: 30000 }, async () => {
-    const loop = new Loop({ provider, maxRounds: 5 });
+    const loop = new Loop({ provider });
     const result = await loop.run(
       [{ role: 'user', content: 'What is the weather in Berlin?' }],
       [weatherTool],
@@ -84,7 +84,7 @@ describe('OpenAI integration', { skip: !OPENAI_API_KEY && 'OPENAI_API_KEY not se
   });
 
   it('multi-tool loop', { timeout: 30000 }, async () => {
-    const loop = new Loop({ provider, maxRounds: 5 });
+    const loop = new Loop({ provider });
     const result = await loop.run(
       [{ role: 'user', content: 'What is the weather in Berlin AND what is 42 * 17? Use both tools.' }],
       [weatherTool, calcTool],
@@ -132,7 +132,7 @@ describe('Anthropic integration', { skip: !ANTHROPIC_API_KEY && 'ANTHROPIC_API_K
   });
 
   it('full loop with tool execution', { timeout: 30000 }, async () => {
-    const loop = new Loop({ provider, maxRounds: 5 });
+    const loop = new Loop({ provider });
     const result = await loop.run(
       [{ role: 'user', content: 'What is the weather in Berlin?' }],
       [weatherTool],
@@ -146,7 +146,7 @@ describe('Anthropic integration', { skip: !ANTHROPIC_API_KEY && 'ANTHROPIC_API_K
   });
 
   it('multi-tool loop', { timeout: 30000 }, async () => {
-    const loop = new Loop({ provider, maxRounds: 5 });
+    const loop = new Loop({ provider });
     const result = await loop.run(
       [{ role: 'user', content: 'What is the weather in Berlin AND what is 42 * 17? Use both tools.' }],
       [weatherTool, calcTool],
