@@ -11,7 +11,7 @@
 
 ```
 
-**Agent orchestration in ~2.6K lines of core. Zero required deps. MIT license.**
+**Agent orchestration in ~2.6K lines of core. Zero required deps. Apache 2.0.**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents.
 
@@ -165,4 +165,4 @@ Four vanilla JS modules. Zero deps where possible (bareguard has one). Same API 
 
 ## License
 
-MIT
+Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
