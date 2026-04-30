@@ -17,15 +17,20 @@ const ANDROID_ONLY = ['mobile_intent', 'mobile_tap_grid', 'mobile_grid'];
 // iOS-only additions
 const IOS_ONLY = ['mobile_unlock'];
 
+// Detect whether baremobile is resolvable in this env. The "returns null when
+// not installed" assertion only makes sense if it really isn't installed —
+// otherwise createMobileTools succeeds and the test must skip.
+let baremobileInstalled = false;
+try { require.resolve('baremobile'); baremobileInstalled = true; } catch { /* ok */ }
+
 describe('createMobileTools', () => {
-  it('returns null when baremobile is not installed', async () => {
-    // baremobile is not installed in this test env, so dynamic import fails
+  it('returns null when baremobile is not installed', { skip: baremobileInstalled }, async () => {
     const { createMobileTools } = require('../tools/mobile');
     const result = await createMobileTools();
     assert.equal(result, null);
   });
 
-  it('returns null for ios platform when baremobile/ios is not installed', async () => {
+  it('returns null for ios platform when baremobile/ios is not installed', { skip: baremobileInstalled }, async () => {
     const { createMobileTools } = require('../tools/mobile');
     const result = await createMobileTools({ platform: 'ios' });
     assert.equal(result, null);

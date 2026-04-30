@@ -94,3 +94,8 @@ process.stdin.on('data', async (chunk) => {
     }
   }
 });
+
+// Exit cleanly when parent closes stdin — otherwise the test runner hangs
+// waiting for this child to release the event loop.
+process.stdin.on('end', () => process.exit(0));
+process.stdin.on('close', () => process.exit(0));
