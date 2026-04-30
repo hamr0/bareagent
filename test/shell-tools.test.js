@@ -7,6 +7,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { createShellTools } = require('../tools/shell');
 const { Loop } = require('../src/loop');
+const { Gate } = require('bareguard');
+const { wireGate } = require('../src/bareguard-adapter');
 
 const TMP = path.join(os.tmpdir(), `bareagent-shell-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
@@ -284,15 +286,21 @@ describe('createShellTools', () => {
       };
 
       const { tools } = createShellTools();
-      const loop = new Loop({ provider, audit: auditPath });
-      await loop.run([{ role: 'user', content: 'read it' }], tools);
+      const gate = new Gate({
+        audit: { path: auditPath },
+        humanChannel: async () => false,
+      });
+      const { policy, wrapTools } = wireGate(gate);
+      const loop = new Loop({ provider, policy });
+      await loop.run([{ role: 'user', content: 'read it' }], wrapTools(tools));
+      await gate.flush?.();
 
       await new Promise(r => setTimeout(r, 50));
       const lines = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
-      assert.equal(lines.length, 1);
-      assert.equal(lines[0].tool, 'shell_read');
-      assert.equal(lines[0].decision, 'allow');
-      assert.match(lines[0].result, /hello world/);
+      // bareguard writes one entry per phase (gate + record); both carry action.type
+      const recordEntry = lines.find(l => l.phase === 'record' && l.action?.type === 'shell_read');
+      assert.ok(recordEntry, `expected shell_read record entry in audit; got: ${JSON.stringify(lines)}`);
+      assert.match(recordEntry.result?.result || '', /hello world/);
       fs.unlinkSync(auditPath);
     });
   });

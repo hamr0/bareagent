@@ -35,15 +35,23 @@ class Retry {
     const timeout = options.timeout || this.timeout;
 
     for (let attempt = 1; attempt <= max; attempt++) {
+      let timeoutId;
       try {
         const result = await (timeout
-          ? Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new TimeoutError('[Retry] Timeout')), timeout))])
+          ? Promise.race([
+              fn(),
+              new Promise((_, rej) => {
+                timeoutId = setTimeout(() => rej(new TimeoutError('[Retry] Timeout')), timeout);
+              }),
+            ])
           : fn());
         return result;
       } catch (err) {
         if (attempt === max || !retryOn(err)) throw err;
         const delay = this._delay(attempt);
         await new Promise(r => setTimeout(r, delay));
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
       }
     }
   }

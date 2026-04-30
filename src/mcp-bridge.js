@@ -219,29 +219,30 @@ function wrapTools(serverName, mcpTools, rpc) {
 async function killServer(child) {
   if (child.exitCode !== null) return;
 
-  child.stdin?.destroy();
+  // end() sends FIN so the child sees stdin EOF and can exit cleanly;
+  // destroy() alone does not always propagate.
+  try { child.stdin?.end(); } catch { /* already closed */ }
   child.stdout?.destroy();
   child.stderr?.destroy();
 
-  await new Promise(resolve => {
-    const onClose = () => resolve();
+  // Short grace, then SIGTERM, then SIGKILL. Each wait clears its timer
+  // promptly when the child closes so we don't block the event loop after
+  // exit (which kept node:test's file-level wrapper hanging).
+  const waitClose = (ms) => new Promise(resolve => {
+    let timer;
+    const onClose = () => { clearTimeout(timer); resolve(); };
     child.once('close', onClose);
-    setTimeout(() => {
+    timer = setTimeout(() => {
       child.removeListener('close', onClose);
       resolve();
-    }, 700);
+    }, ms);
   });
+
+  await waitClose(150);
 
   if (child.exitCode === null) {
     child.kill('SIGTERM');
-    await new Promise(resolve => {
-      const onClose = () => resolve();
-      child.once('close', onClose);
-      setTimeout(() => {
-        child.removeListener('close', onClose);
-        resolve();
-      }, 700);
-    });
+    await waitClose(300);
   }
 
   if (child.exitCode === null) {
@@ -262,11 +263,12 @@ async function connectAndListTools(name, def, timeout = 15000) {
     clientInfo: { name: 'bare-agent', version: '0.5.0' },
   });
 
-  const timer = new Promise((_, reject) =>
-    setTimeout(() => reject(new ToolError(`MCP server "${name}" init timed out after ${timeout}ms`)), timeout)
-  );
+  let timerId;
+  const timer = new Promise((_, reject) => {
+    timerId = setTimeout(() => reject(new ToolError(`MCP server "${name}" init timed out after ${timeout}ms`)), timeout);
+  });
 
-  await Promise.race([init, timer]);
+  try { await Promise.race([init, timer]); } finally { clearTimeout(timerId); }
   client.notify('notifications/initialized');
 
   const { tools: mcpTools } = await client.rpc('tools/list');
