@@ -308,6 +308,103 @@ function buildSystemContext(servers, tools, denied) {
   return lines.join('\n');
 }
 
+// --- Meta-tools: mcp_discover + mcp_invoke (v0.9) ---
+
+/**
+ * Build the LLM-callable meta-tool surface from a fully-connected bridge.
+ * Shares the underlying tool array and RPC clients with the bulk surface —
+ * one set of connections, one factory, two output forms. The user picks
+ * `bridge.tools` (bulk) for small catalogs the LLM should see upfront, or
+ * `bridge.metaTools` for large catalogs the LLM should discover on demand.
+ *
+ * Gov shape: when the LLM calls mcp_invoke, the action sent to gate.check
+ * is `{ type: 'mcp_invoke', args: { name, args }, _ctx }` — bareguard sees
+ * `mcp_invoke` as the type. To deny specific MCP tools, use bareguard's
+ * `tools.denyArgPatterns: { mcp_invoke: [/"name":"linear_admin_.*"/] }`
+ * or `content.denyPatterns` over the JSON-serialized form. The inner MCP
+ * tool name doesn't travel as `action.type` — that's a deliberate v0.9
+ * trade for one consistent gate-check call per LLM tool invocation.
+ *
+ * @param {Array} tools - The bulk-loaded, name-prefixed tools array.
+ * @param {string} discoveredAt - ISO timestamp from .mcp-bridge.json.
+ * @returns {Array} [mcp_discover, mcp_invoke]
+ */
+function buildMetaTools(tools, discoveredAt) {
+  // Catalog descriptors: same info the LLM would see for bulk-loaded tools,
+  // but exposed via mcp_discover instead of taking up tool-array slots upfront.
+  const catalog = tools.map(t => {
+    const sep = t.name.indexOf('_');
+    return {
+      name: t.name,
+      description: t.description || '',
+      schema: t.parameters || { type: 'object', properties: {} },
+      server: sep > 0 ? t.name.slice(0, sep) : t.name,
+      tool: sep > 0 ? t.name.slice(sep + 1) : '',
+    };
+  });
+  const byName = new Map(tools.map(t => [t.name, t]));
+
+  const mcpDiscover = {
+    name: 'mcp_discover',
+    description:
+      'List MCP tools currently available across all configured servers. Returns descriptors with name, description, schema, server, and tool. Pass refresh:true to force a fresh discovery (otherwise the catalog is the one loaded at agent startup). Discovery itself is ungated — read-only catalog access. Gov decisions still happen at invoke time via mcp_invoke.',
+    parameters: {
+      type: 'object',
+      properties: {
+        refresh: {
+          type: 'boolean',
+          description: 'Currently a no-op flag in v0.9 — the catalog is loaded once at bridge construction. Set true to signal intent; behavior may change in a later version.',
+        },
+        server: {
+          type: 'string',
+          description: 'Optional: filter the catalog to one server name.',
+        },
+      },
+    },
+    execute: async ({ server } = {}) => {
+      const filtered = server
+        ? catalog.filter(t => t.server === server)
+        : catalog;
+      return {
+        tools: filtered,
+        cachedAt: discoveredAt || new Date().toISOString(),
+        count: filtered.length,
+      };
+    },
+  };
+
+  const mcpInvoke = {
+    name: 'mcp_invoke',
+    description:
+      'Invoke an MCP tool by its canonical bareagent name (the `name` field returned by mcp_discover, e.g. "linear_list_issues"). Args are passed through to the underlying MCP server. Returns the tool result. Bareguard governs every invocation — denies fed back as deny strings, halts as [HALT] strings.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Canonical MCP tool name (from mcp_discover). Format: <server>_<tool>.',
+        },
+        args: {
+          type: 'object',
+          description: 'Arguments for the MCP tool, matching its schema (also from mcp_discover).',
+        },
+      },
+      required: ['name'],
+    },
+    execute: async ({ name, args }) => {
+      const tool = byName.get(name);
+      if (!tool) {
+        throw new ToolError(`mcp_invoke: unknown tool "${name}". Call mcp_discover for the current catalog.`, {
+          context: { name, knownNames: [...byName.keys()] },
+        });
+      }
+      return await tool.execute(args || {});
+    },
+  };
+
+  return [mcpDiscover, mcpInvoke];
+}
+
 // --- Main entry point ---
 
 /**
@@ -316,13 +413,22 @@ function buildSystemContext(servers, tools, denied) {
  * On subsequent runs, reads .mcp-bridge.json and respects allow/deny per tool.
  * Re-discovers when TTL expires (default: 24h).
  *
+ * Returns BOTH surfaces (v0.9+):
+ *   - `tools`     — bulk-loaded array of name-prefixed tools (small catalogs;
+ *                   LLM sees them upfront).
+ *   - `metaTools` — [mcp_discover, mcp_invoke] LLM-callable pair (large catalogs;
+ *                   LLM picks tools dynamically). Shares the same RPC connections.
+ *
+ * Wire one or the other into Loop's tool array; never both (the LLM would see
+ * the same MCP tool twice). Pick by catalog size and token budget.
+ *
  * @param {object} [opts]
  * @param {string} [opts.bridgePath] - Path to .mcp-bridge.json. Default: .mcp-bridge.json in cwd.
  * @param {string[]} [opts.configPaths] - IDE config paths for discovery.
  * @param {string[]} [opts.servers] - Limit to these server names.
  * @param {number} [opts.timeout=15000] - Per-server init timeout in ms.
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
- * @returns {Promise<{tools: Array, servers: string[], systemContext: string, denied: Array, close: Function}>}
+ * @returns {Promise<{tools: Array, metaTools: Array, servers: string[], systemContext: string, denied: Array, close: Function}>}
  */
 async function createMCPBridge(opts = {}) {
   if ('policy' in opts) {
@@ -435,8 +541,11 @@ async function createMCPBridge(opts = {}) {
   const systemContext = buildSystemContext(connected, tools, denied);
   if (connected.length > 0) console.log(systemContext);
 
+  const metaTools = buildMetaTools(tools, config?.discovered);
+
   return {
     tools,
+    metaTools,
     servers: connected,
     denied,
     systemContext,
@@ -447,4 +556,4 @@ async function createMCPBridge(opts = {}) {
   };
 }
 
-module.exports = { createMCPBridge, discoverServers };
+module.exports = { createMCPBridge, discoverServers, buildMetaTools };

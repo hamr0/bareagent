@@ -11,7 +11,7 @@
 
 ```
 
-**Agent orchestration in ~2.4K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard)). Apache 2.0.**
+**Agent orchestration in ~2.7K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.2.0). Apache 2.0.**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. Single-gate governance via bareguard: every tool call traverses one policy hook, one audit log, one budget cap.
 
@@ -76,7 +76,9 @@ Every piece works alone — take what you need, ignore the rest.
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
 | **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
 | **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |
-| **MCP Bridge** | Auto-discover MCP servers from IDE configs (Claude Code, Cursor, etc.), expose as bareagent tools. Static allow/deny via `.mcp-bridge.json`, `systemContext` for LLM awareness. Runtime policy lives in `Loop({ policy })` — one hook for MCP + native tools alike. Zero deps |
+| **MCP Bridge** | Auto-discover MCP servers from IDE configs (Claude Code, Cursor, etc.), expose as bareagent tools. Static allow/deny via `.mcp-bridge.json`, `systemContext` for LLM awareness. Runtime policy lives in `Loop({ policy })` — one hook for MCP + native tools alike. Returns both bulk `tools` (one per MCP tool) and `metaTools` (`mcp_discover` + `mcp_invoke` for token-thrifty access to large catalogs). Zero deps |
+| **Spawn** | Fork a child bareagent process as a specialist agent. LLM-callable form blocks until child exits; library form returns a handle (`wait`, `onLine`, `kill`). One JSONL channel per child — child stderr captured and re-emitted as `child:stderr` events on the parent stream. Threads `BAREGUARD_AUDIT_PATH` / `BAREGUARD_PARENT_RUN_ID` / `BAREGUARD_BUDGET_FILE` / `BAREGUARD_SPAWN_DEPTH` so the family stitches into one audit + budget. `bareguard ^0.2.0` adds `spawn.ratePerMinute` + `limits.maxDepth` per-family caps |
+| **Defer** | Append a `{action, when}` record to a JSONL queue for a separate waker (cron / systemd timer / `examples/wake.sh`) to fire later. Two-phase governance: emit-time `gate.check` on the `defer` action; fire-time `gate.check` on the inner action when the waker re-invokes. `bareguard ^0.2.0` adds `defer.ratePerMinute` family-wide cap |
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely.
 
@@ -84,7 +86,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** 1 required (`bareguard` for governance — single-gate policy + audit + budget). Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
+**Deps:** 1 required (`bareguard ^0.2.0` for governance — single-gate policy + audit + budget + per-family rate caps). Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
 
 ---
 

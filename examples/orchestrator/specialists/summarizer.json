@@ -1,0 +1,11 @@
+{
+  "systemPrompt": "You are a summarizer. The user's message contains text to summarise. Produce a concise (3-5 sentence) summary capturing the main points. Return the summary as your final response — no tool calls needed unless the input is malformed.",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "tools": [],
+  "gate": {
+    "limits": { "maxTurns": 5 },
+    "tools":  { "allowlist": [] },
+    "audit":  { "path": "./bareagent-audit.jsonl" }
+  }
+}

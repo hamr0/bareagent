@@ -2,6 +2,41 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.9.0] — 2026-04-30
+
+**Multi-agent primitives.** Three new tools — `spawn`, `defer`, and the `mcp_discover` / `mcp_invoke` meta-tool pair — paired with bareguard 0.2.0's per-family rate-cap primitives (`spawn.ratePerMinute`, `defer.ratePerMinute`, `limits.maxDepth`) so a fleet of cooperating agents stitches into one audit log, one budget, and one set of rate caps. No public API breaks; bareguard pin bumped from `^0.1.1` to `^0.2.0`.
+
+### Added
+
+- **`tools/spawn.js`** — `createSpawnTool({cliPath, timeoutMs, stream})` returns `{tool, spawnChild}`. The LLM-callable `tool` blocks until the child exits and returns `{text, usage, cost, error, events, exitCode, signal}`; the library `spawnChild()` form returns a handle with `wait()`, `onLine(fn)`, `kill(sig)`, and `pid` for fire-and-forget / streaming use cases. Spawns the child as `process.execPath bin/cli.js --config <path>`, threads `BAREGUARD_AUDIT_PATH` / `BAREGUARD_PARENT_RUN_ID` (inherits from `BAREGUARD_RUN_ID`) / `BAREGUARD_BUDGET_FILE` / `BAREGUARD_SPAWN_DEPTH` (incremented), and runs one JSONL channel per child — stderr is captured and re-emitted as `{type: 'child:stderr', text, ts}` events on the parent stream rather than splitting into a second channel. Default 10-min timeout with `SIGTERM → 5s grace → SIGKILL`.
+- **`tools/defer.js`** — `createDeferTool({queuePath})` returns `{tool}`. Appends one `{id, ts_emitted, when, action, parent_run_id, status: 'pending'}` record per call to a JSONL queue (POSIX `O_APPEND` atomic for <PIPE_BUF). IDs are sortable: `def_<base36-9char-ts>_<hex-20char-rand>`. Validates `when` is ISO 8601 and not >60s in the past. Path resolution: `option.queuePath > BAREAGENT_DEFER_QUEUE env > ./bareagent-defers.jsonl`. Threads `parent_run_id` from `BAREGUARD_RUN_ID || BAREGUARD_PARENT_RUN_ID`. Helper exports: `readQueue` (folds latest-status-wins by id), `generateId`, `resolveQueuePath`. Two-phase governance: emit-time `gate.check` on the `defer` action; fire-time `gate.check` on the inner action when an external waker re-invokes via `bin/cli.js --config`.
+- **`mcp_discover` + `mcp_invoke` meta-tools** — `createMCPBridge()` now returns `{tools, metaTools, servers, denied, systemContext, errors, close}`. Both surfaces are populated; pick one. Bulk `tools` is the existing surface (~10s of tools loaded into the LLM context). `metaTools` is a 2-tool wrapper for token-thrifty access to large catalogs: `mcp_discover({server?})` returns descriptors `[{name, description, schema, server, tool}]` (parsed from `<server>_<tool>` underscore naming); `mcp_invoke({name, args})` dispatches by name. `mcp_invoke` throws `ToolError` with `context.knownNames` on unknown names so the LLM can self-correct. New export: `buildMetaTools(tools, discoveredAt)` from `bare-agent/mcp`.
+- **`bin/cli.js --config <path>` mode** — reads a JSON config (`{systemPrompt, provider, model, tools[], gate}`), wires Provider + tool registry (resolves `shell_read`, `shell_grep`, `shell_run`, `shell_exec`, `shell_*`, `spawn`, `defer` by name) + bareguard `Gate` via `wireGate`, reads stdin (one JSON line or string), runs `Loop`, emits structured JSONL events on stdout, and exits clean. Headless `humanChannel` defaults to "stderr WARN once + auto-deny". This is the surface a parent process invokes when spawning a child or firing a deferred record. Legacy stdio JSONL mode (`--provider`/`--model`) is preserved.
+- **`examples/wake.sh` + `examples/wake.md`** — bash + jq + flock waker. Reads `BAREAGENT_DEFER_QUEUE`, folds status updates, fires due records via `bare-agent --config $ORCHESTRATOR_CONFIG`, appends `done` / `failed` status. Documented cron entry, env overrides table, dependencies, and a `copytruncate`-friendly log-rotation note.
+- **`examples/orchestrator/`** — `orchestrator.json` + `specialists/{summarizer,researcher}.json` reference layout. Orchestrator routes via `spawn` to specialists scoped per-config (`gate.limits`, `gate.fs.readScope`, `gate.tools.allow`, `gate.audit.path`). Demonstrates the canonical "fan out via spawn, collect results, recurse via defer for long-running follow-ups" pattern.
+- **Tests** — `test/spawn.test.js` (8 tests), `test/defer.test.js` (11 tests), `test/mcp-meta-tools.test.js` (10 tests). 29 new tests, all passing.
+
+### Changed
+
+- **`bareguard` pin** — `^0.1.1 → ^0.2.0`. New rate-cap config keys live at step 3 of bareguard's eval order: `spawn.ratePerMinute` (default 10/min, family-wide via root run_id), `defer.ratePerMinute` (default 15/min), `limits.maxDepth` (caps `BAREGUARD_SPAWN_DEPTH`). Audit log is the source of truth — no separate counter file. No public API breaks in bareguard 0.2.
+- **`bareagent.context.md`** — version bumped to v0.9.0; new "Multi-agent: spawn + defer + wake" top-level section before "Wiring with bareguard"; new "MCP catalog: bulk vs metaTools" subsection; entry-points list and Which-components table refreshed.
+- **`README.md`** — LOC tagline `~2.4K → ~2.7K`, MCP Bridge row updated, two new rows for **Spawn** and **Defer**, deps note updated to `bareguard ^0.2.0`.
+- **`CLAUDE.md`** — same LOC + dep-pin refresh; added Spawn and Defer rows; tools entry expanded with `createSpawnTool, spawnChild, createDeferTool, readDeferQueue`; mcp entry expanded with `buildMetaTools`.
+
+### Decisions log (cross-aligned with bareguard 0.2)
+
+- Args wrapped uniformly: every gov'd action is `{type, args}`. Spawn/defer follow this; bareguard scans `JSON.stringify(args)` for content rules.
+- Two-phase defer: emit-time check is on the outer `defer`; fire-time check is on the inner action. Both are normal `gate.check` calls — no special path.
+- Per-family scope = root run_id. Children inherit `BAREGUARD_PARENT_RUN_ID`; rate windows count per-family, not per-process.
+- Audit log is the source of truth for rate windows. Fixed-minute window (not rolling). No counter file = no drift, no cleanup.
+- One JSONL channel per child. Stderr captured by parent, re-emitted as `child:stderr` events on stdout. Wake.sh redirects child stdout alone.
+- cwd-only defer queue (resolved from option > env > `./bareagent-defers.jsonl`). No global queue, no per-user state dir.
+- MCP "Path A" governance: gate runs at invocation (`mcp_invoke` action.type is the literal string), not at catalog list. Use `denyArgPatterns` to scope.
+- LLM blocks on `spawn` tool. Library callers can use `spawnChild` for handle-based / fire-and-forget. LLMs don't manage handles across tool calls.
+- No deprecation shims for the bareguard 0.2 pin bump — pre-1.0, clean cut.
+
+---
+
 ## [0.8.0] — 2026-04-30
 
 **Single-gate governance via bareguard.** All policy, audit, and budget decisions move out of Loop and into the sibling [bareguard](https://npmjs.com/package/bareguard) library. Loop becomes a pure runner that respects whatever verdict bareguard returns. Net source delta: ~−250 LOC; no deprecation shims (pre-1.0, clean cut).

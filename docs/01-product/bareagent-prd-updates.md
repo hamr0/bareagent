@@ -311,48 +311,75 @@ HTTP request via Node's built-in `fetch`. Gated by `bareguard.net.allowDomains`
 and by `content.denyPatterns` over the serialized request (catches e.g.
 `method: "DELETE"` if configured).
 
-### 10.6 `spawn(config: string, input?: object)` → `handle`
+### 10.6 `spawn({ config: string, input?: object })` → child final result
 
-Forks a child `bareagent` process with the given config file path and an
-optional JSON input on stdin. Returns a handle that exposes:
+**LLM-callable form (the tool the agent invokes):** blocking. Returns the
+child's parsed final result `{ text, toolCalls, usage, cost, error }` once
+the child exits. The LLM doesn't manage handles across tool calls, so
+auto-blocking is the only sane LLM surface.
 
-- `await handle.wait()` → resolves with parsed JSONL output of the child.
-- `handle.onLine(fn)` → optional streaming callback per JSONL line.
-- `await handle.kill()` → forced termination (used by gate timeouts).
+**Library form (`Agent.spawn(...)`, optional, advanced):** returns a handle
+synchronously with the child backgrounded. Same underlying primitive; one
+~5-line wrapper.
 
-**Implementation sketch:**
+**Action shape passed to `gate.check`:** `{ type: 'spawn', args: { config, input }, _ctx }`
+— args-wrapped, consistent with every other tool. Bareguard treats `args`
+as opaque (content patterns scan the JSON-serialized form).
+
+**Child output channel:** the child writes JSONL events to stdout (loop:start,
+loop:tool_call, loop:done, etc.). The parent's `spawn` tool also captures
+the child's stderr line-by-line and re-emits each line as
+`{type: 'child:stderr', text, ts}` events on the *parent's* stream. **One
+JSONL channel per child** — wake.sh redirects child stdout to a log and
+gets events + debug in one grep-able file. No two-channel split.
+
+**Implementation sketch (CJS, matches actual codebase):**
 
 ```js
-import { spawn as cpSpawn } from "node:child_process";
+const { spawn: cpSpawn } = require('node:child_process');
+const path = require('node:path');
 
-async function spawnTool({ config, input }, ctx) {
-  const child = cpSpawn("bareagent", ["--config", config], {
-    stdio: ["pipe", "pipe", "pipe"],
+async function spawnExecute({ config, input }) {
+  const cli = path.resolve(__dirname, '..', 'bin', 'cli.js');
+  const child = cpSpawn(process.execPath, [cli, '--config', config], {
+    stdio: ['pipe', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      BAREGUARD_PARENT_RUN_ID: ctx.runId,
-      BAREGUARD_BUDGET_FILE:    ctx.budget.sharedFile ?? "",
-      BAREGUARD_SPAWN_DEPTH:    String((ctx.spawnDepth ?? 0) + 1),
+      BAREGUARD_AUDIT_PATH:   process.env.BAREGUARD_AUDIT_PATH || '',
+      BAREGUARD_BUDGET_FILE:  process.env.BAREGUARD_BUDGET_FILE || '',
+      BAREGUARD_PARENT_RUN_ID: process.env.BAREGUARD_RUN_ID || process.env.BAREGUARD_PARENT_RUN_ID || '',
+      BAREGUARD_SPAWN_DEPTH:  String((+process.env.BAREGUARD_SPAWN_DEPTH || 0) + 1),
     },
   });
   if (input) child.stdin.write(JSON.stringify(input));
   child.stdin.end();
-  return makeHandle(child);
+  // ... line-buffer stdout (collect JSONL events) and stderr (re-emit as child:stderr events) ...
+  // ... await child exit; return final loop:done payload ...
 }
 ```
 
-**Gated by:**
+**Gated by (single `gate.check` call before spawn):**
 - `bareguard.limits.maxChildren` — cap siblings per parent.
 - `bareguard.limits.maxDepth` — cap spawn-tree depth.
-- `bareguard.spawn.ratePerMinute` — cap rate.
+- `bareguard.spawn.ratePerMinute` (v0.2) — cap rate. **Per-family** (root run_id),
+  not per-process — counted from the audit log over a trailing 60s window.
+  Without per-family scope, a child could fork-bomb to evade the parent's cap.
 - `bareguard.tools.allowlist` — orchestrator config can spawn; specialist
   configs may not.
 - Shared budget — parent and children draw from one budget file.
 
-### 10.7 `defer(action: object, when: string)` → `{ id }`
+### 10.7 `defer({ action: object, when: string })` → `{ id }`
 
 Appends a JSONL record to the defer queue file. bareagent does NOT wake up
 later; the running process exits cleanly when the loop ends.
+
+**Action shape passed to `gate.check`:** `{ type: 'defer', args: { action, when }, _ctx }`
+— args-wrapped, consistent with every other tool.
+
+**Default queue path:** `./bareagent-defers.jsonl` (cwd-only). Override via
+`BAREAGENT_DEFER_QUEUE` env var or `defer.queuePath` config field. Cwd-scoped
+because the wake script is project-scoped (one cron entry per project) and
+XDG would invite cross-project queue bleed.
 
 **Defer queue record schema:**
 
@@ -371,10 +398,21 @@ Status transitions are appends (the file is append-only); the wake script
 emits `{"id": "...", "status": "fired", "ts": "..."}` lines, and reconstruction
 reads the whole file folding by `id`.
 
-**Gated by:**
-- `bareguard.defer.ratePerMinute`.
-- The `action` inside the defer record is itself gated on emit AND again on
-  fire (defense in depth — see bareguard PRD §14).
+**Two-phase gate semantics (defense in depth):**
+
+- **At emit:** ONE `gate.check` on the *defer* action: `{ type: 'defer', args: { action, when }, _ctx }`.
+  All primitives run — `defer.ratePerMinute` (v0.2), `tools.allowlist` (is `defer`
+  itself allowed?), `content.*` (the JSON-serialized form transitively contains
+  the inner action's bytes — incidental match, not a separate inner-action check).
+  Bareguard does NOT extract `args.action` and run a second pipeline against it
+  at emit time.
+- **At fire:** `wake.sh` invokes `bareagent --config <orchestrator>` with the
+  inner action as stdin input. That invocation runs its own `gate.check`
+  pipeline against the inner action (as a fresh action with its own `type`).
+  Two separate gate.check calls, two distinct actions, two distinct audit lines —
+  reconstructable from the audit log via `parent_run_id`.
+- `defer.ratePerMinute` (v0.2) is **per-family** (root run_id), counted from
+  the audit log over a trailing 60s window. Default: 15/min.
 
 ### 10.8 `mcp_discover(servers?: string[])` → `{ tools: ToolDescriptor[], cachedAt }`
 
@@ -656,13 +694,17 @@ Order matters. Each step is independently shippable.
    every result hits `gate.record()`. Old guard exports re-route to bareguard
    with `DeprecationWarning`. Use `new Gate(...)` only — `Gate.fromConfig`
    was removed in 0.1.1.
-3. **bareguard 0.2** ships only the rate-limit primitives (`spawn-rate`,
-   `defer-rate`) — they need bareagent's `defer` / `spawn` tools to exercise.
-   Plus `**` glob if real allowlist over-grant pain surfaces during
-   bareagent integration.
-4. **bareagent v(next+1)** depends on `bareguard ^0.2`. Adds `spawn`,
-   `defer`, `mcp_discover`, `mcp_invoke` tools. Documents JSONL conventions.
-   Ships `examples/wake.sh` and `examples/orchestrator/` in repo.
+3. **bareguard 0.2** SHIPPED 2026-04-30. Adds `defer-rate` and `spawn-rate`
+   primitives — fixed-minute window, audit-log as source of truth, per-family
+   scope. Defaults: defer 15/min, spawn 10/min. Public API unchanged (no
+   breaking changes from 0.1.1). Pin: `bareguard ^0.2.0`. The `**` glob
+   stayed deferred — flag during v0.9 integration if real over-grant pain
+   surfaces.
+4. **bareagent v0.9** depends on `bareguard ^0.2.0`. Adds `spawn`, `defer`,
+   `mcp_discover`, `mcp_invoke` tools (the last two as the LLM-callable
+   meta-tool form alongside the existing bulk-loading `createMCPBridge`).
+   Documents JSONL conventions. Ships `examples/wake.sh`,
+   `examples/wake.md`, and `examples/orchestrator/` in repo.
 5. **bareagent v(next+2)** removes deprecated guard re-exports.
 6. **Real-use phase.** Build at least one orchestrator + specialist project
    using the above. Live in it for two weeks. Note what hurts.
@@ -714,6 +756,41 @@ Order matters. Each step is independently shippable.
 
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
+
+### v0.9 / bareguard 0.2 decisions (2026-04-30)
+
+- **Defer/spawn rate caps live in bareguard, not bareagent.** Counted from
+  the audit log over a trailing 60s window. No bareagent-side counter file —
+  the audit log is the single source of truth, cross-process correctness for free.
+- **Rate caps are per-family (root run_id), not per-process.** Otherwise a
+  child spawned by a fork-bomb-shaped agent resets to 0/cap and evades the
+  parent's count. Per-family enforcement uses the existing `parent_run_id`
+  chain that bareguard 0.1.1 already threads via env vars.
+- **Action shapes are args-wrapped uniformly.** `{ type, args, _ctx }` for
+  every tool — spawn, defer, mcp_invoke, shell_run, etc. Consistent with
+  v0.8.0's `wireGate` adapter; bareguard treats `args` as opaque except
+  for content scans on the JSON-serialized form.
+- **Defer is two phases, two gate.check calls, two distinct actions.** Emit-time
+  is one gate.check on `{type:'defer', args:{action,when}}`; fire-time (via
+  wake.sh) is a separate gate.check on the inner action. No coupling between
+  them beyond the shared `parent_run_id` in the audit log.
+- **Spawn has two surfaces: LLM-blocking and library-handle.** LLM tool form
+  blocks (LLMs don't manage handles across tool calls); library `Agent.spawn`
+  returns a handle for advanced use. Both share one underlying primitive.
+- **Children emit one JSONL channel.** stdout = JSONL events; child stderr is
+  captured by the parent's spawn tool and re-emitted as `{type:'child:stderr'}`
+  events on stdout. One stream per child, one log file in wake.sh.
+- **Defer queue is cwd-only by default.** `./bareagent-defers.jsonl`. Project-
+  scoped wake script + project-scoped queue = one cron entry per project, no
+  XDG cross-project bleed.
+- **MCP factory + LLM-tools coexist.** `createMCPBridge()` returns
+  `{ tools, metaTools, ... }` — bulk-loaded array for small catalogs,
+  `[mcp_discover, mcp_invoke]` for large catalogs. Same factory, two surfaces,
+  user picks based on catalog size.
+- **MCP cache invalidation: TTL only.** 30 days default. Force refresh with
+  `mcp_discover({ refresh: true })`.
+
+### v0.8 / bareguard 0.1.x decisions
 
 - **Cronjobs do not belong in bareagent.** External schedule = OS cron.
   Long-running watcher = a separate daemon. Agent-emitted deferral = `defer`

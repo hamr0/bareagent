@@ -1,5 +1,5 @@
 'use strict';
 
-const { createMCPBridge, discoverServers } = require('./mcp-bridge');
+const { createMCPBridge, discoverServers, buildMetaTools } = require('./mcp-bridge');
 
-module.exports = { createMCPBridge, discoverServers };
+module.exports = { createMCPBridge, discoverServers, buildMetaTools };
