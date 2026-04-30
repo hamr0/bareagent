@@ -184,8 +184,11 @@ function names from `bareagent/guards/*` as proxies to bareguard with
 
 ### 9.1 Concrete removal list (files + options + symbols)
 
-bareguard v0.1 ships everything needed (verified 2026-04-29 — see
-[bareguard/CHANGELOG.md](https://github.com/hamr0/bareguard/blob/main/CHANGELOG.md)).
+bareguard v0.1.1 ships everything needed (published to npm 2026-04-30 —
+see [bareguard/CHANGELOG.md](https://github.com/hamr0/bareguard/blob/main/CHANGELOG.md)).
+Pin `^0.1.1` in `package.json`, not `^0.1.0` (the patch addresses
+pre-publish review fixes — `gate.allows(string)` overload, `_truncated`
+audit boolean, missing-`humanChannel` WARN, removal of `Gate.fromConfig`).
 This is what mechanically goes away from bareagent v(next).
 
 **`src/loop.js`** — the bulk of the change is here:
@@ -231,11 +234,12 @@ extraction, it must include a "Wiring with bareguard" section that:
 
 1. Says bareguard is now the source of truth for `bash`, `budget`, `tools`,
    `content`, `limits.maxTurns`, `audit`, `fs`, `net`, `secrets`. References
-   [bareguard's PRD](https://github.com/hamr0/bareguard/blob/main/docs/01-product/bareguard-prd.md)
-   + [v0.5 amendments](https://github.com/hamr0/bareguard/blob/main/docs/01-product/bareguard-prd-v0.5-amendments.md)
-   for design rationale, NO-GO list, decisions log.
-2. Shows the canonical wiring: build the `Gate` first; pass an adapter
-   closure to `Loop({ policy })` that calls `gate.check`. Example in
+   [bareguard's unified PRD](https://github.com/hamr0/bareguard/blob/main/docs/01-product/bareguard-prd.md)
+   for design rationale, NO-GO list, decisions log. (The v0.5 amendments
+   doc was folded into the unified PRD as v0.6 — a single doc going forward.)
+2. Shows the canonical wiring with **`new Gate(...)` only** — `Gate.fromConfig`
+   was removed in 0.1.1. Build the `Gate` first; pass an adapter closure to
+   `Loop({ policy })` that calls `gate.check`. End-to-end example in
    [`bareguard.context.md` Recipe 8](https://github.com/hamr0/bareguard/blob/main/bareguard.context.md#recipe-8-bareguard--bareagent--beeperbox-50-messengers).
 3. Documents the migration map (`Loop({ maxCost })` → `gate.budget.maxCostUsd`,
    `Loop({ maxRounds })` → `gate.limits.maxTurns`, `Loop({ audit })` → gate
@@ -254,6 +258,14 @@ extraction, it must include a "Wiring with bareguard" section that:
      `new Gate({ budget: { maxCostUsd: 0.50 } })`.
    - Row "Audit every tool call to JSONL" → was `Loop({ audit: './audit.jsonl' })`;
      is now `new Gate({ audit: { path: './audit.jsonl' } })`.
+6. Catalog pre-filter for `mcp_discover`: use the **string-form
+   `gate.allows("toolName")` shorthand** added in 0.1.1. Avoids constructing
+   a synthetic action object for every tool in the catalog:
+   ```js
+   const visible = catalog.filter(t => gate.allows(t.name));
+   ```
+   The object form (`gate.allows({ type, args })`) still works when you need
+   arg-aware filtering.
 
 A copy-pasteable draft of the new section was prepared during the design
 discussion — it covers minimal wiring, the migration map (Loop options →
@@ -425,9 +437,10 @@ grep-able, no schema drift between processes, survives machine reboot.
 import { Agent } from "bareagent";
 import { Gate } from "bareguard";
 
-const gate = Gate.fromConfig({
+const gate = new Gate({
   // ...full bareguard config; see bareguard-prd.md §10
 });
+await gate.init();
 
 const agent = new Agent({
   systemPrompt: "...",
@@ -629,19 +642,24 @@ PRD.
 
 Order matters. Each step is independently shippable.
 
-1. **bareguard 0.1** ships first (see bareguard PRD §19). Includes all
-   primitives extracted from bareagent + audit + gate.
-2. **bareagent v(next)** depends on `bareguard ^0.1`. All policy code removed
-   from runner. Every tool call traverses `gate.check()`; every result hits
-   `gate.record()`. Old guard exports re-route to bareguard with
-   `DeprecationWarning`.
-3. **bareguard 0.2** ships with multi-agent + scheduling guards
-   (`maxChildren`, `maxDepth`, `spawn.ratePerMinute`, `defer.ratePerMinute`,
-   shared budget, `parent_run_id`/`spawn_depth` audit fields, `content`
-   primitive, `gate.allows()`, `tools.denyArgPatterns`).
-4. **bareagent v(next+1)** depends on `bareguard ^0.2`. Adds `spawn`, `defer`,
-   `mcp_discover`, `mcp_invoke` tools. Documents JSONL conventions. Ships
-   `examples/wake.sh` and `examples/orchestrator/` in repo.
+1. **bareguard 0.1.1** SHIPPED 2026-04-30 (see bareguard's CHANGELOG and
+   unified PRD). Brought forward from the original 0.1 baseline: shared
+   budget file, halt severity, `humanChannel`, single-file audit via
+   `O_APPEND`, `gate.allows()`, `tools.denyArgPatterns`, `parent_run_id` /
+   `spawn_depth`, `content` primitive with safe defaults. Rate limits
+   (`defer-rate`, `spawn-rate`) are the only deferral to 0.2.
+2. **bareagent v(next)** depends on `bareguard ^0.1.1`. All policy code
+   removed from runner per §9.1. Every tool call traverses `gate.check()`;
+   every result hits `gate.record()`. Old guard exports re-route to bareguard
+   with `DeprecationWarning`. Use `new Gate(...)` only — `Gate.fromConfig`
+   was removed in 0.1.1.
+3. **bareguard 0.2** ships only the rate-limit primitives (`spawn-rate`,
+   `defer-rate`) — they need bareagent's `defer` / `spawn` tools to exercise.
+   Plus `**` glob if real allowlist over-grant pain surfaces during
+   bareagent integration.
+4. **bareagent v(next+1)** depends on `bareguard ^0.2`. Adds `spawn`,
+   `defer`, `mcp_discover`, `mcp_invoke` tools. Documents JSONL conventions.
+   Ships `examples/wake.sh` and `examples/orchestrator/` in repo.
 5. **bareagent v(next+2)** removes deprecated guard re-exports.
 6. **Real-use phase.** Build at least one orchestrator + specialist project
    using the above. Live in it for two weeks. Note what hurts.
