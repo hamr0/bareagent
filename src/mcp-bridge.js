@@ -284,9 +284,10 @@ function buildSystemContext(servers, tools, denied) {
 
   const byServer = {};
   for (const t of tools) {
-    const parts = t.name.split('_');
-    const server = parts[0];
-    (byServer[server] = byServer[server] || []).push(t.name.replace(`${server}_`, ''));
+    const sep = t.name.indexOf('_');
+    const server = sep > 0 ? t.name.slice(0, sep) : t.name;
+    const tool = sep > 0 ? t.name.slice(sep + 1) : '';
+    (byServer[server] = byServer[server] || []).push(tool);
   }
   for (const [server, toolNames] of Object.entries(byServer)) {
     lines.push(`  ${server}: ${toolNames.join(', ')}`);
@@ -449,43 +450,52 @@ async function createMCPBridge(opts = {}) {
   if (needsRefresh) {
     // Discover from IDE configs
     const discovered = discoverServers(opts.configPaths);
+
     if (discovered.size === 0 && !config) {
       return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
     }
 
-    // Connect to all discovered servers and list their tools
-    const freshTools = new Map();
-    const connectResults = new Map();
-    const errors = [];
+    // Only attempt connection when discovery found something.
+    // If discovered.size === 0 but config exists, fall through and use the existing config
+    // rather than wiping it on a transient discovery failure.
+    if (discovered.size > 0) {
+      const freshTools = new Map();
+      const connectResults = new Map();
+      const errors = [];
 
-    const toDiscover = opts.servers
-      ? [...discovered.entries()].filter(([n]) => opts.servers.includes(n))
-      : [...discovered.entries()];
+      const toDiscover = opts.servers
+        ? [...discovered.entries()].filter(([n]) => opts.servers.includes(n))
+        : [...discovered.entries()];
 
-    await Promise.all(toDiscover.map(async ([name, def]) => {
-      try {
-        const result = await connectAndListTools(name, def, timeout);
-        freshTools.set(name, result.mcpTools);
-        connectResults.set(name, result.client);
-      } catch (err) {
-        errors.push({ server: name, error: err.message });
+      await Promise.all(toDiscover.map(async ([name, def]) => {
+        try {
+          const result = await connectAndListTools(name, def, timeout);
+          freshTools.set(name, result.mcpTools);
+          connectResults.set(name, result.client);
+        } catch (err) {
+          errors.push({ server: name, error: err.message });
+        }
+      }));
+
+      if (errors.length > 0) {
+        console.warn('[MCP Bridge] Some servers failed to connect:', errors);
       }
-    }));
 
-    if (errors.length > 0) {
-      console.warn('[MCP Bridge] Some servers failed to connect:', errors);
-    }
+      // Only write config when at least one server connected successfully.
+      // If all servers failed, retain the existing config unchanged so
+      // user-curated allow/deny settings are not destroyed on transient failures.
+      if (freshTools.size > 0) {
+        config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
+        writeBridgeConfig(bridgePath, config);
+        console.log(`[MCP Bridge] Wrote ${bridgePath}`);
+      } else if (!config) {
+        return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+      }
 
-    // Merge with existing config (preserves user's allow/deny)
-    config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
-
-    // Write the config file
-    writeBridgeConfig(bridgePath, config);
-    console.log(`[MCP Bridge] Wrote ${bridgePath}`);
-
-    // Close the discovery connections — we'll reconnect below using the config
-    for (const client of connectResults.values()) {
-      await killServer(client.child);
+      // Close the discovery connections — we'll reconnect below using the config
+      for (const client of connectResults.values()) {
+        await killServer(client.child);
+      }
     }
   }
 

@@ -40,7 +40,7 @@ class Planner {
    */
   async plan(goal, context = {}) {
     if (this._cacheTTL > 0) {
-      const cacheKey = goal + '|' + (context.info || '');
+      const cacheKey = JSON.stringify({ goal, info: context.info || '' });
       const cached = this._cache.get(cacheKey);
       if (cached && Date.now() < cached.expiresAt) {
         return cached.result;
@@ -63,7 +63,7 @@ class Planner {
     const steps = this._parse(result.text);
 
     if (this._cacheTTL > 0) {
-      const cacheKey = goal + '|' + (context.info || '');
+      const cacheKey = JSON.stringify({ goal, info: context.info || '' });
       this._cache.set(cacheKey, { result: steps, expiresAt: Date.now() + this._cacheTTL });
     }
 

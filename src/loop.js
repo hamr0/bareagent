@@ -154,7 +154,7 @@ class Loop {
       } catch (err) {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message };
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -167,7 +167,8 @@ class Loop {
         this._safeEmit({ type: 'loop:text', data: { text: result.text } });
         this._safeCall('onText', this.onText, result.text);
         this._safeEmit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null };
+        msgs.push({ role: 'assistant', content: result.text });
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs };
       }
 
       // Execute tool calls
@@ -260,7 +261,7 @@ class Loop {
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
-    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning };
+    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs };
   }
 
   /**
@@ -329,9 +330,10 @@ class Loop {
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });
     const result = await this.run(this._history, tools, options);
-    if (result.text) {
-      this._history.push({ role: 'assistant', content: result.text });
-    }
+    // Sync _history from the full msgs run() built (tool-call messages, tool results,
+    // and final assistant text). Strip the leading system message if one was prepended.
+    const effectiveSystem = options.system || this.system;
+    this._history = effectiveSystem ? result.msgs.slice(1) : result.msgs.slice();
     return result;
   }
 

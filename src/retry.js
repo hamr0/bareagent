@@ -14,9 +14,9 @@ const DEFAULT_RETRY_ON = (err) => {
 
 class Retry {
   constructor(options = {}) {
-    this.maxAttempts = options.maxAttempts || 3;
+    this.maxAttempts = options.maxAttempts !== undefined ? options.maxAttempts : 3;
     this.backoff = options.backoff || 'exponential';
-    this.timeout = options.timeout || 60000;
+    this.timeout = options.timeout !== undefined ? options.timeout : 60000;
     this.retryOn = options.retryOn || DEFAULT_RETRY_ON;
     this.jitter = options.jitter !== undefined ? options.jitter : false;
   }
@@ -30,9 +30,9 @@ class Retry {
    * @throws {Error} Rethrows the last error when maxAttempts is exhausted or error is not retryable.
    */
   async call(fn, options = {}) {
-    const max = options.maxAttempts || this.maxAttempts;
+    const max = options.maxAttempts !== undefined ? options.maxAttempts : this.maxAttempts;
     const retryOn = options.retryOn || this.retryOn;
-    const timeout = options.timeout || this.timeout;
+    const timeout = options.timeout !== undefined ? options.timeout : this.timeout;
 
     for (let attempt = 1; attempt <= max; attempt++) {
       let timeoutId;

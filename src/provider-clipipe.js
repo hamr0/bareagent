@@ -74,7 +74,7 @@ class CLIPipeProvider {
   /**
    * Spawn the CLI process, pipe prompt to stdin, collect stdout.
    * @param {string} prompt
-   * @param {string[]} [extraArgs=[]] - Additional args prepended to this.args.
+   * @param {string[]} [extraArgs=[]] - Additional args appended after this.args.
    * @returns {Promise<string>}
    */
   _spawn(prompt, extraArgs = []) {

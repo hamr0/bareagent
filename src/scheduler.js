@@ -22,7 +22,7 @@ class Scheduler {
       : [];
     this._timer = null;
     this._nextId = this._jobs.length
-      ? Math.max(...this._jobs.map(j => j.id)) + 1
+      ? this._jobs.reduce((max, j) => Math.max(max, j.id), 0) + 1
       : 1;
   }
 
@@ -80,15 +80,16 @@ class Scheduler {
         try {
           await handler(job);
         } catch (err) {
-          this.onError?.(err, job);
+          try { this.onError?.(err, job); } catch { /* swallow onError throws */ }
+        } finally {
+          this._running.delete(job.id);
+          if (job.type === 'once') {
+            job.status = 'done';
+          } else {
+            job.nextRun = this._parseSchedule(job.schedule).toISOString();
+          }
+          this._save();
         }
-        this._running.delete(job.id);
-        if (job.type === 'once') {
-          job.status = 'done';
-        } else {
-          job.nextRun = this._parseSchedule(job.schedule).toISOString();
-        }
-        this._save();
       }
     };
     tick();

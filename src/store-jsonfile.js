@@ -24,7 +24,7 @@ class JsonFileStore {
       ? JSON.parse(readFileSync(this._path, 'utf8'))
       : [];
     this._nextId = this._data.length
-      ? Math.max(...this._data.map(d => d.id)) + 1
+      ? this._data.reduce((max, d) => Math.max(max, d.id), 0) + 1
       : 1;
   }
 

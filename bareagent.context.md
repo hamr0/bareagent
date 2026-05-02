@@ -590,7 +590,7 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 3. **SQLiteStore requires `better-sqlite3`** — it's a peer dep. JsonFileStore has zero deps.
 4. **Scheduler runs jobs sequentially within a tick** — if one handler takes 5s, others wait. Use short handlers or offload work.
 5. **Ollama tool call IDs are synthetic** — `call_${Date.now()}`. Works fine but IDs aren't stable across retries.
-6. **Loop's `chat()` is stateful** — it accumulates history forever. For long conversations, use `run()` with your own message management.
+6. **Loop's `chat()` is stateful** — it accumulates the full conversation history including tool calls and tool results across turns. For long conversations, use `run()` with your own message management to control what stays in context.
 7. **CLIPipe `_formatPrompt()` flattens all messages** — System messages become `System: content` plaintext in stdin. If your CLI tool expects system prompts via a dedicated flag (e.g. `claude --system`), use `systemPromptFlag` to separate them. Without it, structured output prompts embedded in system messages will break.
 8. **Loop `run()` throws by default (v0.3.0+)** — Provider errors and maxRounds exhaustion throw instead of returning `result.error`. Use `try/catch` or pass `throwOnError: false` for the old behavior.
 9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
