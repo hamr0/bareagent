@@ -11,7 +11,12 @@
 
 ```
 
-**Agent orchestration in ~2.7K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.2.0). Apache 2.0.**
+<p align="center">
+  <img src="https://img.shields.io/github/package-json/v/hamr0/bareagent?label=version&color=2a4f8c" alt="version (auto from package.json)">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
+</p>
+
+**Agent orchestration in ~2.7K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.2.0).**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. Single-gate governance via bareguard: every tool call traverses one policy hook, one audit log, one budget cap.
 
