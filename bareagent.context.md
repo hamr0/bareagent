@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.9.0 | Node.js >= 18 | one required dep (`bareguard ^0.2.0`) | Apache 2.0
+> v0.10.0 | Node.js >= 18 | one required dep (`bareguard ^0.2.0`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -157,12 +157,13 @@ const gate = new Gate({
 });
 await gate.init();
 
-const { policy, wrapTools } = wireGate(gate);
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
 const { tool: spawn } = createSpawnTool();
 const { tool: defer } = createDeferTool();
 
-const loop = new Loop({ provider, policy });
-await loop.run(messages, wrapTools([spawn, defer, ...otherTools]));
+const tools = await filterTools([spawn, defer, ...otherTools]);
+const loop = new Loop({ provider, policy, onLlmResult, onToolResult });
+await loop.run(messages, tools);
 ```
 
 **`spawn({ config, input? })`** — fork a child bareagent process with the
@@ -259,18 +260,28 @@ const gate = new Gate({
 });
 await gate.init();
 
-const { policy, wrapTools } = wireGate(gate);
-const { tools } = createShellTools();
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+const { tools: shellTools } = createShellTools();
+const tools = await filterTools(shellTools);                       // drop denied tools from the LLM's view
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
   policy,
+  onLlmResult,                                                     // forwards LLM cost to gate.record (BA1)
+  onToolResult,                                                    // forwards tool result + ctx (BA1)
 });
 
-const result = await loop.run(messages, wrapTools(tools));
+const result = await loop.run(messages, tools, { ctx: { userId: 42 } });
+if (result.error?.startsWith('halt:')) {
+  // budget / turn cap / gate terminated — handled cleanly, no [HALT:] reached the LLM (BA2)
+}
 ```
 
-**Why two pieces (`policy` + `wrapTools`).** `policy` runs `gate.check` *before* every tool call. `wrapTools` decorates each tool's `execute` so `gate.record` fires *after* — that's how bareguard tracks cost, time, and audit. Without `wrapTools`, the gate sees the check but not the result; budget caps wouldn't accumulate.
+**Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
+
+Halt-severity decisions (budget exhausted, `limits.maxTurns`, gate terminated) throw a typed `HaltError` from the policy closure; Loop catches it, emits `loop:error{source:'halt'}` + `loop:done{halted:true, rule}`, and returns `{ error: 'halt:<rule>' }`. The halt is **never** fed back to the LLM as a tool message — adopters check `result.error` to react.
+
+Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `onToolResult` / `onLlmResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
 
 **Halt decisions surface as deny strings.** When bareguard halts (budget exhausted, `limits.maxTurns` hit, content rule fired with `severity: 'halt'`), the policy returns `[HALT: <rule>] <reason>` and Loop feeds it to the LLM as the tool result. Subsequent rounds halt the same way; the LLM typically gives up and the loop exits. To detect halts earlier, watch the `loop:error` stream or wire `onError` and match on the deny string.
 

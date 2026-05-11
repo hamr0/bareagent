@@ -215,15 +215,17 @@ describe('Scheduler', () => {
     let callCount = 0;
     sched.start(async () => {
       callCount++;
-      // Simulate slow handler that outlasts one tick interval
-      await new Promise(r => setTimeout(r, 100));
+      // Simulate slow handler that outlasts several tick intervals
+      await new Promise(r => setTimeout(r, 300));
     });
 
-    // Wait for 2-3 ticks — but handler takes 100ms so overlap should be prevented
-    await new Promise(r => setTimeout(r, 120));
+    // Wait <handler duration so the handler is still running when we stop —
+    // ticks at 0/30/60/90 see it as in-flight and skip. Closing this window
+    // close to the 100ms handler boundary used to race the t=120 tick.
+    await new Promise(r => setTimeout(r, 100));
     sched.stop();
 
-    // Should have been called only once because it was still running during subsequent ticks
+    // Only called once — subsequent ticks saw _running and skipped.
     assert.equal(callCount, 1);
   });
 });

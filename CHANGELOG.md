@@ -4,6 +4,33 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-12
+
+**Governance seam reshaped (BA1–BA5).** `wireGate` now exposes callbacks Loop calls inline (`onLlmResult`, `onToolResult`) instead of wrapping tools post-hoc, so `gate.record` finally sees both LLM cost *and* `ctx`. Halt-severity decisions throw a typed `HaltError` and Loop exits cleanly — they never leak as `[HALT: ...]` strings to the LLM. Old `wrapTool` / `wrapTools` retained as deprecation shims with a one-shot warning; removal target 1.0.
+
+### Added
+
+- **`Loop({ onLlmResult, onToolResult })`** (`src/loop.js`) — two new constructor callbacks. `onLlmResult({model, provider, usage, costUsd, durationMs, ctx})` fires after every successful `provider.generate`; `onToolResult({name, args, result, error, durationMs, ctx})` fires after every `tool.execute` (success and failure). Callback errors route through `_reportError` (loop:error + onError) but never kill the loop. Both receive the per-run `ctx` opaque blob so per-principal accounting reaches `gate.record`.
+- **`HaltError` in `src/errors.js`** — extends `BareAgentError` with `{ rule, decision }`. Signals a clean governance exit. Loop's outer handler catches it, emits `loop:error{source:'halt'}` + `loop:done{halted:true, rule, cost}`, calls `onError`, and returns `{ error: 'halt:<rule>' }` — **even with `throwOnError:true`** (halt is a governed exit, not an exception).
+- **`wireGate(gate, { formatDeny })`** (`src/bareguard-adapter.js`) — adopters customise the deny string fed to the LLM (localize, strip the bracketed prefix). Halt bypasses this (uses `HaltError`).
+- **`wireGate(gate).filterTools(tools)`** — async catalog pre-filter via `gate.allows`. Drops denied tools so the LLM never sees them. No audit, no record.
+- **`wireGate(gate).onLlmResult` / `.onToolResult`** — forwards to `gate.record` with action shapes `{type:'llm', args:{model, provider}, _ctx}` and `{type:<name>, args, _ctx}` respectively. **Fixes silent budget undercount** for token-heavy / tool-light workloads (every chatbot): pre-BA1, `budget.maxCostUsd` only saw tool cost and was effectively a lie for LLM-only loops.
+- **`test/integration-bareguard-real.test.js`** — 4-test smoke suite against a real bareguard 0.2 `Gate` (not the mock contract). Asserts LLM cost lands in the audit JSONL as `{type:'llm'}` with positive `costUsd` and `tokens=2000` (the pre-BA1 silent bug), halt fires cleanly across multi-round runs, no `[HALT:]` strings ever appear in tool messages, `filterTools` honors `tools.denylist`.
+
+### Changed
+
+- **`wireGate(gate)` return shape** — now `{ policy, onLlmResult, onToolResult, filterTools, wrapTool, wrapTools }`. Existing adopters using `wrapTool` / `wrapTools` keep working with a one-shot console deprecation warning. Migration: replace `wrapTools(tools)` at `loop.run()` with `onToolResult` / `onLlmResult` in `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
+- **`wireGate` policy halt path** — now throws `HaltError` instead of returning `[HALT: <rule>] <reason>`. Old behavior leaked the halt string to the LLM as a tool message; the LLM would try to recover, burning more tokens past the cap that just tripped. Loop's outer handler catches the typed error and exits cleanly.
+- **`bareagent.context.md`** — wireGate section, examples, and entry-points list updated to reflect the new return shape; the wrapTool examples replaced with `onLlmResult` / `onToolResult` wiring.
+- **`README.md`** — new "Recipes" section: wire-up, owner/role bypass with audit/budget caveat, custom deny strings via `formatDeny`, halt detection in app code.
+- **`CLAUDE.md`** — bareguard adapter table row updated to the BA-era shape; Errors row mentions `HaltError`.
+
+### Fixed (test flakes)
+
+- **`test/mcp-bridge.test.js`** — two tests flaked under parallel-test load when the mock MCP server failed to respond to `initialize` in time, leaving `freshTools.size === 0` so the bridge file never wrote; subsequent `readFileSync` ENOENTed. Added a `freshBridge()` retry helper (3 attempts) for cold-discovery tests.
+- **`test/integration-mcp-bridge.test.js`** — first-run test had the same failure mode against a real `barebrowse`. Skip path widened to `bridge.tools.length === 0 || !existsSync(bridgePath)`, matching the existing "not configured" graceful-skip intent.
+- **`test/scheduler.test.js`** — `overlap prevention skips job still running on next tick` raced when the wait window (120 ms) was barely longer than the handler (100 ms); a tick landing just after the handler finished could fire it again and bump `callCount` to 2. Adjusted to 100 ms wait / 300 ms handler so the assertion always runs while the handler is still in-flight. Suite stable across 30 consecutive runs.
+
 ### Compatible with bareguard 0.3.0
 
 - **bareguard ≥0.3 adds `humanChannelTimeoutMs`** — passed through unchanged via the existing `cfg.gate` spread in `bin/cli.js` and `wireGate`'s Gate config. No bareagent code change required; users opt in by setting it on the gate config. Context doc + Checkpoint vs humanChannel section updated to mention the new option.

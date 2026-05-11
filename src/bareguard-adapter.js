@@ -1,25 +1,34 @@
 'use strict';
 
+const { HaltError } = require('./errors');
+
 /**
  * Wire a bareguard Gate into bareagent's Loop.
  *
  * Returns:
- *   - `policy`   — async (toolName, args, ctx) closure for `new Loop({ policy })`.
- *                  Maps gate.check decisions to true (allow) or a deny string
- *                  (used verbatim by Loop as the LLM-visible reason).
- *   - `wrapTool` — wraps a single tool so its execute() also calls gate.record
- *                  with the result + duration (or error). Bareguard owns the
- *                  audit log and budget tracking; record() is what feeds them.
- *   - `wrapTools` — convenience: applies wrapTool to an array.
+ *   - `policy`        — async (toolName, args, ctx) closure for `new Loop({ policy })`.
+ *                       Allow → true; deny → tagged reason string; halt → throws HaltError.
+ *   - `onLlmResult`   — callback for `new Loop({ onLlmResult })`. Forwards every
+ *                       provider.generate result to gate.record as a `{type:'llm'}` action
+ *                       so `budget.maxCostUsd` covers token-only workloads.
+ *   - `onToolResult`  — callback for `new Loop({ onToolResult })`. Forwards every
+ *                       tool.execute result to gate.record with ctx in scope.
+ *   - `filterTools`   — async (tools) => filtered. Drops tools denied by gate.allows
+ *                       so the LLM never sees them. No audit, no record.
+ *   - `wrapTool` / `wrapTools` — DEPRECATED. Pre-BA1 shim that wraps execute() to
+ *                       call gate.record post-hoc. Loses _ctx and never sees LLM cost.
+ *                       Prefer `onToolResult` (and `onLlmResult` for budget correctness).
  *
- * Halt-severity decisions (budget exhausted, limits.maxTurns hit, etc.) come
- * back as deny strings tagged `[HALT: <rule>]`. Subsequent rounds halt the
- * same way; the LLM typically gives up and the loop exits naturally. For
- * earlier exit, watch the loop:error stream (the closure also calls onError
- * via Loop's policy-deny path) or wire `onError` to detect halt strings.
+ * Halt-severity decisions (budget exhausted, limits.maxTurns hit, gate terminated)
+ * throw HaltError from the policy closure; Loop catches it and exits cleanly with
+ * loop:error{source:'halt'} + loop:done — the deny is NOT fed back to the LLM.
  *
- * @param {object} gate - A bareguard Gate instance (must have .check and .record).
- * @returns {{policy: Function, wrapTool: Function, wrapTools: Function}}
+ * @param {object} gate - A bareguard Gate instance (must have .check, .record, .allows).
+ * @param {object} [options]
+ * @param {Function} [options.formatDeny] - (decision) => string. Transforms the deny
+ *   string fed to the LLM. Default: "[deny: <rule>] <reason>". Halt bypasses this
+ *   (HaltError doesn't reach the LLM).
+ * @returns {{policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}}
  *
  * @example
  *   const { Gate } = require('bareguard');
@@ -30,29 +39,84 @@
  *     budget: { maxCostUsd: 0.50 },
  *     limits: { maxTurns: 20 },
  *     audit:  { path: './audit.jsonl' },
- *     humanChannel: async (ev) => ({ decision: 'deny' }),
  *   });
  *   await gate.init();
  *
- *   const { policy, wrapTools } = wireGate(gate);
- *   const loop = new Loop({ provider, policy });
- *   await loop.run(messages, wrapTools(myTools));
+ *   const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+ *   const loop = new Loop({ provider, policy, onLlmResult, onToolResult });
+ *   const tools = await filterTools(myTools);
+ *   await loop.run(messages, tools);
  */
-function wireGate(gate) {
+function wireGate(gate, options = {}) {
   if (!gate || typeof gate.check !== 'function' || typeof gate.record !== 'function') {
     throw new Error('[wireGate] expects a bareguard Gate instance (must have .check and .record).');
   }
+  if (options.formatDeny != null && typeof options.formatDeny !== 'function') {
+    throw new Error('[wireGate] options.formatDeny must be a function (decision) => string');
+  }
+  const formatDeny = options.formatDeny || defaultFormatDeny;
 
   const policy = async (toolName, args, ctx) => {
     const decision = await gate.check({ type: toolName, args, _ctx: ctx });
     if (decision.outcome === 'allow') return true;
-    const tag = decision.severity === 'halt'
-      ? `[HALT: ${decision.rule}]`
-      : `[deny: ${decision.rule}]`;
-    return decision.reason ? `${tag} ${decision.reason}` : `${tag} ${toolName} denied`;
+    if (decision.severity === 'halt') {
+      throw new HaltError(decision.reason || `${toolName} halted by ${decision.rule}`, {
+        rule: decision.rule,
+        decision,
+      });
+    }
+    return formatDeny(decision, toolName);
   };
 
+  const onLlmResult = async ({ model, provider, usage, costUsd, durationMs, ctx }) => {
+    await gate.record(
+      { type: 'llm', args: { model: model || null, provider: provider || null }, _ctx: ctx ?? null },
+      {
+        costUsd: typeof costUsd === 'number' ? costUsd : 0,
+        tokens: (usage?.inputTokens || 0) + (usage?.outputTokens || 0),
+        durationMs: durationMs ?? null,
+      },
+    );
+  };
+
+  const onToolResult = async ({ name, args, result, error, durationMs, ctx }) => {
+    const action = { type: name, args, _ctx: ctx ?? null };
+    if (error) {
+      await gate.record(action, {
+        error: error?.message || String(error),
+        durationMs: durationMs ?? null,
+      });
+    } else {
+      await gate.record(action, {
+        result: typeof result === 'string' ? result : JSON.stringify(result),
+        durationMs: durationMs ?? null,
+      });
+    }
+  };
+
+  const filterTools = async (tools) => {
+    if (!Array.isArray(tools)) {
+      throw new Error('[wireGate.filterTools] expects an array of tools');
+    }
+    if (typeof gate.allows !== 'function') {
+      throw new Error('[wireGate.filterTools] gate must have .allows (bareguard >= 0.2)');
+    }
+    const out = [];
+    for (const t of tools) {
+      if (await gate.allows(t.name)) out.push(t);
+    }
+    return out;
+  };
+
+  let warnedWrap = false;
   function wrapTool(tool) {
+    if (!warnedWrap) {
+      warnedWrap = true;
+      console.warn(
+        '[wireGate] wrapTool/wrapTools is deprecated — use new Loop({ policy, onLlmResult, onToolResult }) ' +
+        'so budget covers LLM cost and ctx reaches gate.record. wrap* will be removed in 1.0.',
+      );
+    }
     if (!tool || typeof tool.execute !== 'function') {
       throw new Error('[wireGate.wrapTool] tool must have an execute() function');
     }
@@ -87,7 +151,12 @@ function wireGate(gate) {
     return tools.map(wrapTool);
   }
 
-  return { policy, wrapTool, wrapTools };
+  return { policy, onLlmResult, onToolResult, filterTools, wrapTool, wrapTools };
+}
+
+function defaultFormatDeny(decision, toolName) {
+  const tag = `[deny: ${decision.rule}]`;
+  return decision.reason ? `${tag} ${decision.reason}` : `${tag} ${toolName} denied`;
 }
 
 module.exports = { wireGate };

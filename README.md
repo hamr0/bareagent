@@ -77,7 +77,7 @@ Every piece works alone — take what you need, ignore the rest.
 | **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |
 | **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
 | **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `CircuitOpenError`, `ValidationError`. Halt decisions (turn cap, budget cap, content rules) come from bareguard, not Loop |
-| **bareguard adapter** | `wireGate(gate)` returns `{ policy, wrapTools }` — one-line wiring to bareguard's `Gate`. Maps gate decisions to Loop's `policy` contract; `wrapTools` decorates tools so `gate.record` fires after every execute. `require('bare-agent/bareguard')` |
+| **bareguard adapter** | `wireGate(gate)` returns `{ policy, onLlmResult, onToolResult, filterTools, formatDeny }` — one-line wiring to bareguard's `Gate`. `policy` maps gate decisions to Loop's policy contract; `onLlmResult` + `onToolResult` forward every LLM and tool result to `gate.record` (so `budget.maxCostUsd` covers token-only workloads); `filterTools` drops denied tools from the catalog the LLM ever sees. Halt-severity decisions throw a typed `HaltError` and Loop exits cleanly — never leaks `[HALT: ...]` to the LLM. `require('bare-agent/bareguard')` |
 | **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
 | **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
 | **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |
@@ -92,6 +92,73 @@ Every piece works alone — take what you need, ignore the rest.
 **Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
 
 **Deps:** 1 required (`bareguard ^0.2.0` for governance — single-gate policy + audit + budget + per-family rate caps). Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
+
+---
+
+## Recipes
+
+### Wire bareguard into Loop
+
+```js
+const { Gate } = require('bareguard');
+const { Loop } = require('bare-agent');
+const { wireGate } = require('bare-agent/bareguard');
+
+const gate = new Gate({
+  budget: { maxCostUsd: 0.50 },
+  limits: { maxTurns: 20 },
+  audit:  { path: './audit.jsonl' },
+});
+await gate.init();
+
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+const tools = await filterTools(myTools);      // drop tools denied by static policy
+
+const loop = new Loop({ provider, policy, onLlmResult, onToolResult });
+await loop.run([{ role: 'user', content: 'go' }], tools, { ctx: { userId: 42 } });
+```
+
+`onLlmResult` + `onToolResult` are what make `budget.maxCostUsd` actually cover token-heavy workloads — without them, budget only sees tool cost. `ctx` flows through to `gate.record` as `_ctx` for per-principal accounting.
+
+### Per-principal bypass (owner / admin role)
+
+Wrap the gate policy when a principal is trusted unconditionally:
+
+```js
+const { policy: gatePolicy } = wireGate(gate);
+
+const policy = async (toolName, args, ctx) => {
+  if (ctx?.role === 'owner') return true;       // bypass gate entirely
+  return gatePolicy(toolName, args, ctx);
+};
+
+new Loop({ provider, policy, onLlmResult, onToolResult });
+```
+
+Bypassing the gate also bypasses audit and budget — only do this for principals you trust unconditionally. For partial trust, use ctx-aware rules inside bareguard instead.
+
+### Custom deny strings (localize / strip prefix)
+
+```js
+const { policy } = wireGate(gate, {
+  formatDeny: (decision) => `Sorry — ${decision.reason || 'not allowed'}`,
+});
+```
+
+Halt-severity decisions bypass `formatDeny` (they throw `HaltError` and exit the loop without ever reaching the LLM).
+
+### Catch halts in your app
+
+```js
+const result = await loop.run(msgs, tools);
+if (result.error?.startsWith('halt:')) {
+  // budget cap, turn cap, or gate terminated. Inspect rule:
+  const rule = result.error.slice('halt:'.length);
+  // tell the user, schedule retry, escalate, etc.
+}
+```
+
+Halts also fire `loop:error` on the stream (`source: 'halt'`) and the `onError` callback (with a `HaltError` instance).
 
 ---
 

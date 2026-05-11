@@ -43,6 +43,22 @@ class CircuitOpenError extends BareAgentError {
   }
 }
 
+// Signals a halt-severity governance decision (budget exhausted, turn cap hit,
+// gate terminated, etc.). Thrown by wireGate's policy closure and caught by
+// Loop's outer handler — does NOT propagate to the LLM as a tool result.
+// Loop exits cleanly: emits loop:error{source:'halt'} + loop:done, calls onError.
+class HaltError extends BareAgentError {
+  constructor(message, { rule, decision, context = {} } = {}) {
+    super(message || `[HALT: ${rule || 'unknown'}]`, {
+      code: 'HALT',
+      retryable: false,
+      context: { ...context, rule, decision },
+    });
+    this.rule = rule || null;
+    this.decision = decision || null;
+  }
+}
+
 module.exports = {
   BareAgentError,
   ProviderError,
@@ -50,4 +66,5 @@ module.exports = {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
+  HaltError,
 };

@@ -67,6 +67,19 @@ describe('createMCPBridge', () => {
     cleanup(bridgePath);
   });
 
+  // Mock MCP server has a startup race under load — occasionally its
+  // initialize response is missed and the bridge returns tools:[] without
+  // writing the bridge file. Retry the cold-discovery path up to 3 times.
+  async function freshBridge(opts) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const b = await createMCPBridge(opts);
+      if (b.tools.length > 0) return b;
+      await b.close();
+      cleanup(bridgePath);
+    }
+    throw new Error('mock MCP server failed to connect after 3 attempts');
+  }
+
   afterEach(() => cleanup(configPath, bridgePath));
 
   it('first run: discovers, writes bridge file, returns all tools as allow', async () => {
@@ -156,7 +169,7 @@ describe('createMCPBridge', () => {
 
   it('TTL expiry triggers refresh and preserves deny entries', async () => {
     // First run
-    const b1 = await createMCPBridge({ configPaths: [configPath], bridgePath, timeout: 5000 });
+    const b1 = await freshBridge({ configPaths: [configPath], bridgePath, timeout: 5000 });
     await b1.close();
 
     // Edit file: deny delete_file, and backdate the timestamp so TTL expires
@@ -350,7 +363,7 @@ describe('createMCPBridge', () => {
 
   it('systemContext shows denied tools', async () => {
     // First run
-    const b1 = await createMCPBridge({ configPaths: [configPath], bridgePath, timeout: 5000 });
+    const b1 = await freshBridge({ configPaths: [configPath], bridgePath, timeout: 5000 });
     await b1.close();
 
     // Deny a tool

@@ -1,6 +1,6 @@
 'use strict';
 
-const { ToolError } = require('./errors');
+const { ToolError, HaltError } = require('./errors');
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
 // Last updated: 2026-03-18. Source: public provider pricing pages.
@@ -43,7 +43,9 @@ class Loop {
    * @param {object} [options.retry] - Retry instance for backoff on failures.
    * @param {object} [options.stream] - Stream instance for event emission.
    * @param {object} [options.store] - Store instance for validate() health check.
-   * @param {Function} [options.policy] - Async (toolName, args, ctx) => true | string. Recommended wiring: closure that delegates to a bareguard Gate (`require('bare-agent/bareguard').wireGate(gate).policy`). Anything other than `true` denies; a string is fed to the LLM verbatim as the deny reason. All policy/budget/audit decisions live in bareguard — Loop just calls the closure and respects the verdict.
+   * @param {Function} [options.policy] - Async (toolName, args, ctx) => true | string. Recommended wiring: closure that delegates to a bareguard Gate (`require('bare-agent/bareguard').wireGate(gate).policy`). Anything other than `true` denies; a string is fed to the LLM verbatim as the deny reason. A throw of `HaltError` exits the loop cleanly. All policy/budget/audit decisions live in bareguard — Loop just calls the closure and respects the verdict.
+   * @param {Function} [options.onLlmResult] - Async ({model, provider, usage, costUsd, durationMs, ctx}) called after every successful provider.generate. Wire via `wireGate(gate).onLlmResult` so `budget.maxCostUsd` covers token-only workloads. Errors route through `_reportError` but never kill the loop.
+   * @param {Function} [options.onToolResult] - Async ({name, args, result, error, durationMs, ctx}) called after every tool.execute (success and failure). Wire via `wireGate(gate).onToolResult` so `gate.record` sees `ctx`. Errors route through `_reportError` but never kill the loop.
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
    */
   constructor(options = {}) {
@@ -62,6 +64,14 @@ class Loop {
       throw new Error('[Loop] options.policy must be a function (toolName, args, ctx) => true | string');
     }
     this.policy = options.policy || null;
+    if (options.onLlmResult != null && typeof options.onLlmResult !== 'function') {
+      throw new Error('[Loop] options.onLlmResult must be a function');
+    }
+    if (options.onToolResult != null && typeof options.onToolResult !== 'function') {
+      throw new Error('[Loop] options.onToolResult must be a function');
+    }
+    this.onLlmResult = options.onLlmResult || null;
+    this.onToolResult = options.onToolResult || null;
     this._stopped = false;
     this._history = []; // for chat() stateful mode
   }
@@ -144,10 +154,12 @@ class Loop {
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
 
+    try {
     for (let round = 0; round < HARD_ROUND_LIMIT; round++) {
       if (this._stopped) break;
 
       let result;
+      const llmStartedAt = Date.now();
       try {
         const generate = () => this.provider.generate(msgs, tools, options);
         result = this.retry ? await this.retry.call(generate) : await generate();
@@ -161,6 +173,25 @@ class Loop {
       const model = this.provider.model || null;
       const roundCost = estimateCost(model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
+
+      // BA1: forward LLM usage to gate.record (via wireGate) so budget.maxCostUsd
+      // covers token-heavy / tool-light workloads. Callback errors route through
+      // _reportError but never kill the loop — governance failure ≠ run failure.
+      if (this.onLlmResult) {
+        try {
+          await this.onLlmResult({
+            model,
+            provider: this.provider.name || null,
+            usage: result.usage || null,
+            costUsd: roundCost,
+            durationMs: Date.now() - llmStartedAt,
+            ctx,
+          });
+        } catch (err) {
+          if (err instanceof HaltError) throw err;
+          this._reportError('onLlmResult', err, { round });
+        }
+      }
 
       // No tool calls — LLM gave a final text response
       if (!result.toolCalls || result.toolCalls.length === 0) {
@@ -230,6 +261,9 @@ class Loop {
           try {
             verdict = await this.policy(tc.name, tc.arguments, ctx);
           } catch (err) {
+            // BA2: HaltError bubbles past the per-tool try/catch to the outer
+            // handler so halt exits cleanly without ever reaching the LLM.
+            if (err instanceof HaltError) throw err;
             verdict = `[Loop] policy error: ${err.message}`;
           }
           if (verdict !== true) {
@@ -242,19 +276,50 @@ class Loop {
           }
         }
 
+        const toolStartedAt = Date.now();
+        let toolResult;
+        let toolError;
         try {
           const execute = () => tool.execute(tc.arguments);
-          const toolResult = this.retry ? await this.retry.call(execute) : await execute();
+          toolResult = this.retry ? await this.retry.call(execute) : await execute();
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
         } catch (err) {
-          const toolErr = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
-          const errMsg = `[Loop] Tool error: ${toolErr.message}`;
+          toolError = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
+          const errMsg = `[Loop] Tool error: ${toolError.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
         }
+
+        // BA1: forward tool result/error to gate.record (via wireGate) with ctx in
+        // scope — fixes the lost-_ctx issue that wrapTool can't solve.
+        if (this.onToolResult) {
+          try {
+            await this.onToolResult({
+              name: tc.name,
+              args: tc.arguments,
+              result: toolResult,
+              error: toolError || null,
+              durationMs: Date.now() - toolStartedAt,
+              ctx,
+            });
+          } catch (err) {
+            if (err instanceof HaltError) throw err;
+            this._reportError('onToolResult', err, { tool: tc.name });
+          }
+        }
       }
+    }
+    } catch (err) {
+      // BA2: HaltError is a clean governance exit, not a runtime failure.
+      // No throw even when throwOnError:true — the gate halted us deliberately.
+      if (err instanceof HaltError) {
+        this._reportError('halt', err, { rule: err.rule, reason: err.decision?.reason ?? null });
+        this._safeEmit({ type: 'loop:done', data: { text: '', halted: true, rule: err.rule, cost: totalCost } });
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${err.rule}`, msgs };
+      }
+      throw err;
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
