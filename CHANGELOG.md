@@ -4,6 +4,19 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-05-12
+
+**Bareguard 0.4.2 alignment.** Bareguard shipped both items called out in 0.10.1's known-limitations note: `limits.maxToolRounds` (sibling primitive that ticks only on non-`llm` records, no more `maxTurns: N*2` workaround) and field-shape fallback on `bashCheck` / `fsCheck` / `netCheck` (read either flat `action.cmd` or nested `action.args.cmd`/`.command`). Bareagent's `actionTranslator` snippets simplified accordingly.
+
+### Changed
+
+- **`bareguard` pin** — `^0.2.0 → ^0.4.2`. No bareagent code change; the new primitives are additive. 0.4.2 carries `limits.maxToolRounds`; 0.4.1 carries the field-shape fallback. Recommended: use `maxToolRounds` instead of `maxTurns * 2` for capping LLM-tool rounds.
+- **README + `bareagent.context.md`** — `actionTranslator` snippets now show the verbatim `args` passthrough form (`{type:'bash', args, _ctx}`) since bareguard reads `args.command` / `args.path` directly. The pre-0.4.1 manual-hoist form (`{type:'bash', cmd: args.command}`) still works but is now optional. Wire-up example uses `limits.maxToolRounds: 20` instead of `limits.maxTurns: 20`.
+
+### Added
+
+- **Real-bareguard tests** for the two new primitives — `limits.maxToolRounds` halts after N tool calls (proves the counter skips `{type:'llm'}` records) and `bashCheck` activates against nested `args.command` (proves the field-shape fallback works through `actionTranslator` without re-hoisting).
+
 ## [0.10.1] — 2026-05-12
 
 **Multis feedback patch (A7 + ergonomics).** Three seam issues surfaced during multis' bareguard-0.4 adoption: `HaltError` was unreachable from the public API, `wireGate`'s action shape didn't compose with bareguard's `bash`/`fs` primitives, and `Loop({maxRounds: N})` (removed in v0.8) was silently ignored instead of erroring.

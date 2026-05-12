@@ -101,17 +101,24 @@ Every piece works alone — take what you need, ignore the rest.
 
 ```js
 const { Gate } = require('bareguard');
-const { Loop } = require('bare-agent');
-const { wireGate } = require('bare-agent/bareguard');
+const { Loop, wireGate, defaultActionTranslator } = require('bare-agent');
 
 const gate = new Gate({
   budget: { maxCostUsd: 0.50 },
-  limits: { maxTurns: 20 },
+  limits: { maxToolRounds: 20 },                // bareguard 0.4.2+ — N tool rounds, LLM rounds bypass
   audit:  { path: './audit.jsonl' },
 });
 await gate.init();
 
-const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate, {
+  // Optional: translate tool names → bareguard primitive types for bash/fs/net rules.
+  // bareguard 0.4.1+ reads args.command / args.path verbatim, so args passes through.
+  actionTranslator: (toolName, args, ctx) => {
+    if (toolName === 'shell_exec') return { type: 'bash', args, _ctx: ctx };
+    if (toolName === 'shell_read') return { type: 'read', args, _ctx: ctx };
+    return defaultActionTranslator(toolName, args, ctx);
+  },
+});
 const tools = await filterTools(myTools);      // drop tools denied by static policy
 
 const loop = new Loop({ provider, policy, onLlmResult, onToolResult });

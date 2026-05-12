@@ -160,6 +160,82 @@ describe('Real bareguard 0.2 Gate + Loop end-to-end', () => {
     fs.unlinkSync(auditPath);
   });
 
+  // bareguard 0.4.2: limits.maxToolRounds — ticks only on non-llm records.
+  // This is the clean version of "N LLM-tool rounds" without the *2 hack on
+  // limits.maxTurns. Pairs natively with our split onLlmResult / onToolResult.
+  it('limits.maxToolRounds halts after N tool calls (bareguard 0.4.2)', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({
+      limits: { maxToolRounds: 2 },          // halt after 2 tool calls
+      audit: { path: auditPath },
+    });
+    await gate.init();
+
+    const { policy, onLlmResult, onToolResult } = wireGate(gate);
+    const dummyTool = { name: 'dummy', execute: async () => 'ok' };
+
+    // Each round emits one tool call. After 2 tool records, the 3rd round's
+    // pre-eval halt check fires limits.maxToolRounds.
+    let round = 0;
+    const provider = {
+      model: 'gpt-4o-mini',
+      name: 'mock',
+      async generate() {
+        round++;
+        return {
+          text: '',
+          toolCalls: [{ id: `c${round}`, name: 'dummy', arguments: {} }],
+          usage: { inputTokens: 10, outputTokens: 5 },
+        };
+      },
+    };
+
+    const result = await new Loop({ provider, policy, onLlmResult, onToolResult })
+      .run([{ role: 'user', content: 'go' }], [dummyTool]);
+
+    assert.equal(result.error, 'halt:limits.maxToolRounds');
+    // No [HALT:] leaked into any tool message.
+    for (const m of result.msgs) {
+      if (m.role === 'tool') assert.doesNotMatch(String(m.content), /\[HALT:/);
+    }
+    // Audit shows ≥2 tool records before the halt landed.
+    const lines = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+    const toolRecords = lines.filter(l => l.phase === 'record' && l.action?.type === 'dummy');
+    assert.ok(toolRecords.length >= 2, `expected ≥2 tool records, got ${toolRecords.length}`);
+    fs.unlinkSync(auditPath);
+  });
+
+  // bareguard 0.4.1+: bashCheck / fsCheck / netCheck accept either flat
+  // (action.cmd) or nested (action.args.cmd / .command) shapes. Lets
+  // actionTranslator pass args through verbatim without re-hoisting.
+  it('bashCheck activates with nested args (bareguard 0.4.1+ field fallback)', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({
+      bash: { allow: ['ls'] },
+      audit: { path: auditPath },
+    });
+    await gate.init();
+
+    // Translate tool-name → bash type; args passes through verbatim.
+    // bareguard 0.4.1+ reads action.args.command for the bash check.
+    const { policy } = wireGate(gate, {
+      actionTranslator: (toolName, args, ctx) =>
+        toolName === 'shell_exec' ? { type: 'bash', args, _ctx: ctx } : { type: toolName, args, _ctx: ctx },
+    });
+
+    // Allowed: argv[0] === 'ls'
+    assert.equal(await policy('shell_exec', { command: 'ls -la' }, null), true);
+    // Denied: 'whoami' isn't on the allowlist — bash.allow.exclusive fires.
+    // (Avoiding 'rm -rf' here because bareguard's default content.denyPatterns
+    //  would short-circuit before bash's check; we want to prove bashCheck
+    //  itself activated against args.command, not the content pattern.)
+    const denyVerdict = await policy('shell_exec', { command: 'whoami' }, null);
+    assert.match(denyVerdict, /\[deny: bash/);
+    fs.unlinkSync(auditPath);
+  });
+
   it('BA3: filterTools drops tools denied by static policy', async () => {
     const { Gate } = await loadBareguard();
     const auditPath = tmpAudit();

@@ -1,6 +1,6 @@
 # bare-agent
 
-Lightweight, composable agent orchestration library for autonomous agents. ~2.7K lines core, one required dep (`bareguard ^0.2.0`), Apache 2.0.
+Lightweight, composable agent orchestration library for autonomous agents. ~2.7K lines core, one required dep (`bareguard ^0.4.2`), Apache 2.0.
 Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with prefix naming.
 
 ## Components

@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "files": [
     "index.js",
     "src/",
@@ -46,7 +46,7 @@
     "governance"
   ],
   "dependencies": {
-    "bareguard": "^0.2.0"
+    "bareguard": "^0.4.2"
   },
   "optionalDependencies": {
     "barebrowse": "^0.5.0",
