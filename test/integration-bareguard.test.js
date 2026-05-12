@@ -224,7 +224,9 @@ describe('wireGate', () => {
   });
 
   // Legacy shims still work (with a console.warn one-shot deprecation notice).
-  it('wrapTool still works for backward compat (deprecated)', async () => {
+  // Keep full coverage until removal in 1.0 so the shim can't silently regress
+  // while adopters are still migrating off it.
+  it('wrapTool still works for backward compat (deprecated): success path + warning', async () => {
     const gate = mockGate();
     const { wrapTool } = wireGate(gate);
     const origWarn = console.warn;
@@ -235,7 +237,59 @@ describe('wireGate', () => {
       const result = await wrapped.execute({ city: 'Berlin' });
       assert.deepEqual(result, { temp: 22, city: 'Berlin', conditions: 'sunny' });
       assert.equal(gate._recordCalls.length, 1);
+      const [{ action, result: rec }] = gate._recordCalls;
+      assert.deepEqual(action, { type: 'get_weather', args: { city: 'Berlin' } });
+      assert.equal(typeof rec.durationMs, 'number');
       assert.match(warned, /deprecated/);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it('wrapTool (deprecated): records error and re-throws', async () => {
+    const gate = mockGate();
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const { wrapTool } = wireGate(gate);
+      const failingTool = { name: 'fail', execute: async () => { throw new Error('boom'); } };
+      const wrapped = wrapTool(failingTool);
+      await assert.rejects(() => wrapped.execute({}), { message: 'boom' });
+      assert.equal(gate._recordCalls.length, 1);
+      assert.equal(gate._recordCalls[0].result.error, 'boom');
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it('wrapTool (deprecated): preserves description and parameters', () => {
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const { wrapTool } = wireGate(mockGate());
+      const wrapped = wrapTool(weatherTool);
+      assert.equal(wrapped.name, weatherTool.name);
+      assert.equal(wrapped.description, weatherTool.description);
+      assert.deepEqual(wrapped.parameters, weatherTool.parameters);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
+  it('wrapTools (deprecated): applies wrapTool across an array', async () => {
+    const gate = mockGate();
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const { wrapTools } = wireGate(gate);
+      const a = { name: 'a', execute: async () => 'a-out' };
+      const b = { name: 'b', execute: async () => 'b-out' };
+      const [wa, wb] = wrapTools([a, b]);
+      await wa.execute({});
+      await wb.execute({});
+      assert.equal(gate._recordCalls.length, 2);
+      assert.equal(gate._recordCalls[0].action.type, 'a');
+      assert.equal(gate._recordCalls[1].action.type, 'b');
     } finally {
       console.warn = origWarn;
     }
