@@ -9,6 +9,7 @@ const {
   TimeoutError,
   ValidationError,
   CircuitOpenError,
+  HaltError,
 } = require('../src/errors');
 
 describe('Errors', () => {
@@ -82,5 +83,35 @@ describe('Errors', () => {
     assert.equal(err.code, 'CIRCUIT_OPEN');
     assert.equal(err.retryable, true);
     assert.equal(err.message, 'Circuit breaker is open');
+  });
+
+  it('HaltError carries rule + decision', () => {
+    const decision = { outcome: 'deny', severity: 'halt', rule: 'budget.maxCostUsd', reason: 'over' };
+    const err = new HaltError('budget exhausted', { rule: 'budget.maxCostUsd', decision });
+    assert.ok(err instanceof BareAgentError);
+    assert.equal(err.code, 'HALT');
+    assert.equal(err.retryable, false);
+    assert.equal(err.rule, 'budget.maxCostUsd');
+    assert.deepEqual(err.decision, decision);
+  });
+});
+
+// A7: HaltError must be reachable through the public API so adopters whose
+// policy shims throw it can be caught by Loop's instanceof check (which
+// requires identity-equal class across module boundaries).
+describe('Public API exports', () => {
+  it('HaltError is re-exported from main entry', () => {
+    const { HaltError: HaltFromMain } = require('../index');
+    assert.equal(HaltFromMain, HaltError, 'main re-export must be the same class identity');
+  });
+
+  it('HaltError is reachable via the ./errors subpath', () => {
+    const { HaltError: HaltFromSubpath } = require('../src/errors');
+    assert.equal(HaltFromSubpath, HaltError);
+    // Verify package.json exports declares the subpath (resolution from
+    // outside the package goes through exports; from inside we read the file).
+    const pkg = require('../package.json');
+    assert.equal(pkg.exports['./errors'], './src/errors.js');
+    assert.equal(pkg.exports['./package.json'], './package.json');
   });
 });

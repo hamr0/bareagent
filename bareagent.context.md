@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.10.0 | Node.js >= 18 | one required dep (`bareguard ^0.2.0`) | Apache 2.0
+> v0.10.1 | Node.js >= 18 | one required dep (`bareguard ^0.2.0`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -282,6 +282,25 @@ if (result.error?.startsWith('halt:')) {
 Halt-severity decisions (budget exhausted, `limits.maxTurns`, gate terminated) throw a typed `HaltError` from the policy closure; Loop catches it, emits `loop:error{source:'halt'}` + `loop:done{halted:true, rule}`, and returns `{ error: 'halt:<rule>' }`. The halt is **never** fed back to the LLM as a tool message — adopters check `result.error` to react.
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `onToolResult` / `onLlmResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
+
+**`actionTranslator` for bash/fs primitive activation (v0.10.1+).** Bareguard's `bashCheck` / `fsCheck` / `netCheck` only fire when `action.type === 'bash'` / `'read'` / `'write'` / `'net'` and read top-level fields like `action.cmd` / `action.path`. The default action shape is `{type: toolName, args, _ctx}` which matches `tools.denylist` / `tools.allowlist` but does NOT activate those primitives. Adopters who want both pass `wireGate(gate, { actionTranslator })`:
+
+```javascript
+const { policy, onToolResult } = wireGate(gate, {
+  actionTranslator: (toolName, args, ctx) => {
+    if (toolName === 'shell_exec') return { type: 'bash', cmd: args.command, _ctx: ctx };
+    if (toolName === 'shell_run')  return { type: 'bash', cmd: args.argv.join(' '), _ctx: ctx };
+    if (toolName === 'shell_read') return { type: 'read', path: args.path, _ctx: ctx };
+    return { type: toolName, args, _ctx: ctx };          // fall through to defaultActionTranslator
+  },
+});
+```
+
+`onLlmResult` always uses `{type:'llm'}` regardless of the translator (so budget rules match without translator collusion). `defaultActionTranslator` is exported for composition.
+
+**`HaltError` reachable from the public API (v0.10.1+).** `require('bare-agent').HaltError`, `require('bare-agent/errors').HaltError`. Adopters whose policy shim throws `HaltError` get identity-equal class across module boundaries — Loop's `instanceof HaltError` catches it cleanly.
+
+**`Loop({ maxRounds })` throws (v0.10.1+).** The pre-v0.8 option is now an explicit error pointing at bareguard's `limits.maxTurns`. Silent-ignore migration foot-gun removed.
 
 **Halt decisions surface as deny strings.** When bareguard halts (budget exhausted, `limits.maxTurns` hit, content rule fired with `severity: 'halt'`), the policy returns `[HALT: <rule>] <reason>` and Loop feeds it to the LLM as the tool result. Subsequent rounds halt the same way; the LLM typically gives up and the loop exits. To detect halts earlier, watch the `loop:error` stream or wire `onError` and match on the deny string.
 

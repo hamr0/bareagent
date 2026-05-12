@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "files": [
     "index.js",
     "src/",
@@ -22,12 +22,14 @@
   },
   "exports": {
     ".": "./index.js",
+    "./errors": "./src/errors.js",
     "./providers": "./src/providers.js",
     "./stores": "./src/stores.js",
     "./transports": "./src/transports.js",
     "./tools": "./src/tools.js",
     "./mcp": "./src/mcp.js",
-    "./bareguard": "./src/bareguard-adapter.js"
+    "./bareguard": "./src/bareguard-adapter.js",
+    "./package.json": "./package.json"
   },
   "engines": {
     "node": ">=18"

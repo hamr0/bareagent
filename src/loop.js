@@ -50,6 +50,14 @@ class Loop {
    */
   constructor(options = {}) {
     if (!options.provider) throw new Error('[Loop] requires a provider');
+    if (options.maxRounds !== undefined) {
+      throw new Error(
+        '[Loop] options.maxRounds was removed in v0.8 when single-gate governance landed. ' +
+        'Bound iteration via bareguard `new Gate({ limits: { maxTurns: N } })` and wire it with ' +
+        '`new Loop({ policy: wireGate(gate).policy })`. Loop\'s internal HARD_ROUND_LIMIT (100) is ' +
+        'a safety net only and not configurable.',
+      );
+    }
     this.provider = options.provider;
     this.system = options.system || null;
     this.checkpoint = options.checkpoint || null;

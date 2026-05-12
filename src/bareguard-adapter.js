@@ -28,6 +28,14 @@ const { HaltError } = require('./errors');
  * @param {Function} [options.formatDeny] - (decision) => string. Transforms the deny
  *   string fed to the LLM. Default: "[deny: <rule>] <reason>". Halt bypasses this
  *   (HaltError doesn't reach the LLM).
+ * @param {Function} [options.actionTranslator] - (toolName, args, ctx) => action.
+ *   Builds the action object passed to `gate.check` and `gate.record`. Default:
+ *   `{ type: toolName, args, _ctx: ctx }`. Override when bareguard's primitives
+ *   need a specific shape — e.g. `bashCheck` requires `{type:'bash', cmd:...}`,
+ *   `fsCheck` requires `{type:'read'|'write'|'edit', path:...}`. The default shape
+ *   matches `tools.denylist` / `tools.allowlist` (which read `action.type`) but
+ *   does NOT activate `bash`/`fs`/`net` primitives — those need their own
+ *   `action.type` value. Adopters using those primitives must translate.
  * @returns {{policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}}
  *
  * @example
@@ -54,10 +62,14 @@ function wireGate(gate, options = {}) {
   if (options.formatDeny != null && typeof options.formatDeny !== 'function') {
     throw new Error('[wireGate] options.formatDeny must be a function (decision) => string');
   }
+  if (options.actionTranslator != null && typeof options.actionTranslator !== 'function') {
+    throw new Error('[wireGate] options.actionTranslator must be a function (toolName, args, ctx) => action');
+  }
   const formatDeny = options.formatDeny || defaultFormatDeny;
+  const translate = options.actionTranslator || defaultActionTranslator;
 
   const policy = async (toolName, args, ctx) => {
-    const decision = await gate.check({ type: toolName, args, _ctx: ctx });
+    const decision = await gate.check(translate(toolName, args, ctx));
     if (decision.outcome === 'allow') return true;
     if (decision.severity === 'halt') {
       throw new HaltError(decision.reason || `${toolName} halted by ${decision.rule}`, {
@@ -69,6 +81,8 @@ function wireGate(gate, options = {}) {
   };
 
   const onLlmResult = async ({ model, provider, usage, costUsd, durationMs, ctx }) => {
+    // LLM rounds bypass actionTranslator — they always use the canonical
+    // {type:'llm'} action so budget rules can match without translator collusion.
     await gate.record(
       { type: 'llm', args: { model: model || null, provider: provider || null }, _ctx: ctx ?? null },
       {
@@ -80,7 +94,7 @@ function wireGate(gate, options = {}) {
   };
 
   const onToolResult = async ({ name, args, result, error, durationMs, ctx }) => {
-    const action = { type: name, args, _ctx: ctx ?? null };
+    const action = translate(name, args, ctx);
     if (error) {
       await gate.record(action, {
         error: error?.message || String(error),
@@ -159,4 +173,13 @@ function defaultFormatDeny(decision, toolName) {
   return decision.reason ? `${tag} ${decision.reason}` : `${tag} ${toolName} denied`;
 }
 
-module.exports = { wireGate };
+// Canonical action shape: tool name as type, args nested, ctx tagged. Matches
+// bareguard's `tools.denylist`/`tools.allowlist` (which read `action.type`) but
+// does NOT activate `bash`/`fs`/`net` primitives — those require `action.type`
+// to be `bash`/`read`/`write`/etc. and read fields like `action.cmd` /
+// `action.path` at the top level. Override via `wireGate(gate, { actionTranslator })`.
+function defaultActionTranslator(toolName, args, ctx) {
+  return { type: toolName, args, _ctx: ctx ?? null };
+}
+
+module.exports = { wireGate, defaultActionTranslator };

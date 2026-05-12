@@ -139,6 +139,63 @@ describe('wireGate', () => {
       { message: /formatDeny must be a function/ });
   });
 
+  // actionTranslator: custom translator reshapes the action passed to gate.check
+  // and gate.record. Critical for bareguard's bash/fs primitives which require
+  // {type:'bash', cmd:...} / {type:'read', path:...} not {type: toolName, args}.
+  it('actionTranslator reshapes actions for bareguard bash/fs primitives', async () => {
+    const gate = mockGate();
+    const translator = (toolName, args, ctx) => {
+      if (toolName === 'shell_exec') return { type: 'bash', cmd: args.command, _ctx: ctx };
+      if (toolName === 'shell_read') return { type: 'read', path: args.path, _ctx: ctx };
+      return { type: toolName, args, _ctx: ctx };
+    };
+    const { policy, onToolResult } = wireGate(gate, { actionTranslator: translator });
+
+    await policy('shell_exec', { command: 'ls -la' }, { userId: 1 });
+    await policy('shell_read', { path: '/etc/passwd' }, { userId: 1 });
+    await policy('other_tool', { x: 1 }, { userId: 1 });
+
+    assert.deepEqual(gate._checkCalls[0], { type: 'bash', cmd: 'ls -la', _ctx: { userId: 1 } });
+    assert.deepEqual(gate._checkCalls[1], { type: 'read', path: '/etc/passwd', _ctx: { userId: 1 } });
+    assert.deepEqual(gate._checkCalls[2], { type: 'other_tool', args: { x: 1 }, _ctx: { userId: 1 } });
+
+    // onToolResult uses the same translator.
+    await onToolResult({ name: 'shell_exec', args: { command: 'ls' }, result: 'ok', ctx: { userId: 1 } });
+    const lastRecord = gate._recordCalls[gate._recordCalls.length - 1];
+    assert.equal(lastRecord.action.type, 'bash');
+    assert.equal(lastRecord.action.cmd, 'ls');
+  });
+
+  it('actionTranslator must be a function if provided', () => {
+    assert.throws(() => wireGate(mockGate(), { actionTranslator: 'not a fn' }),
+      { message: /actionTranslator must be a function/ });
+  });
+
+  it('defaultActionTranslator is exported for adopters to compose', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    assert.equal(typeof defaultActionTranslator, 'function');
+    assert.deepEqual(
+      defaultActionTranslator('get_weather', { city: 'X' }, { userId: 1 }),
+      { type: 'get_weather', args: { city: 'X' }, _ctx: { userId: 1 } },
+    );
+  });
+
+  // onLlmResult bypasses actionTranslator — LLM rounds always use {type:'llm'}
+  // so budget rules can match without translator collusion.
+  it('onLlmResult bypasses actionTranslator (always {type:llm})', async () => {
+    const gate = mockGate();
+    const translator = () => ({ type: 'should-not-see-this', _ctx: null });
+    const { onLlmResult } = wireGate(gate, { actionTranslator: translator });
+    await onLlmResult({
+      model: 'gpt-4o-mini',
+      provider: 'openai',
+      usage: { inputTokens: 100, outputTokens: 50 },
+      costUsd: 0.001,
+      ctx: { userId: 1 },
+    });
+    assert.equal(gate._recordCalls[0].action.type, 'llm');
+  });
+
   // BA3: filterTools drops denied tools via gate.allows.
   it('filterTools drops tools denied by gate.allows (BA3)', async () => {
     const gate = mockGate({

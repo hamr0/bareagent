@@ -4,6 +4,30 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-05-12
+
+**Multis feedback patch (A7 + ergonomics).** Three seam issues surfaced during multis' bareguard-0.4 adoption: `HaltError` was unreachable from the public API, `wireGate`'s action shape didn't compose with bareguard's `bash`/`fs` primitives, and `Loop({maxRounds: N})` (removed in v0.8) was silently ignored instead of erroring.
+
+### Added
+
+- **`HaltError` exported from `bare-agent`** and reachable via `require('bare-agent/errors')`. Adopters whose policy shim throws `HaltError` (so Loop's `instanceof HaltError` catches it cross-module) no longer need to `require(path.join(path.dirname(require.resolve('bare-agent')), 'src', 'errors.js'))`. Identity-equal class across module boundaries is now guaranteed.
+- **`./errors` and `./package.json` subpath exports** in `package.json` — `require('bare-agent/errors')` and `require('bare-agent/package.json')` work from outside the package.
+- **`wireGate(gate, { actionTranslator })`** (`src/bareguard-adapter.js`) — `(toolName, args, ctx) => action` lets adopters reshape the action passed to `gate.check` and `gate.record`. Critical for bareguard's `bash` / `fs` / `net` primitives which require specific shapes (`{type:'bash', cmd:...}`, `{type:'read', path:...}`) at the top of the action, not nested under `args`. Default unchanged — adopters using only `tools.denylist` / `tools.allowlist` (which read `action.type`) need no change.
+- **`defaultActionTranslator`** exported from main and `bare-agent/bareguard` — adopters can compose custom translators on top of the default (`{type: toolName, args, _ctx: ctx ?? null}`).
+
+### Changed
+
+- **`Loop({ maxRounds })` throws** with a migration message pointing at bareguard's `limits.maxTurns`. `maxRounds` was removed in v0.8 when single-gate governance landed and has been silently ignored since — multis flagged the silent-ignore as a wasted migration cycle.
+
+### Documentation
+
+- README and `bareagent.context.md` get a note about the `actionTranslator` extension point and when adopters need it (any rule that uses `bash` / `fs` / `net` primitives).
+
+### Known limitations surfaced (bareguard-side, not bareagent)
+
+- **`limits.maxTurns` semantics**: bareguard ticks on every `gate.record` (LLM + tool), so 1 LLM-tool round counts as 2 turns. Multis worked around it by doubling the cap. Worth a sibling `limits.maxToolRounds` (counts only tool records) or a README clarification on bareguard's side — not bareagent's fix.
+- **bash/fs primitive activation**: bareguard's `bashCheck` and `fsCheck` only fire when `action.type === 'bash'` / `'read'` / `'write'`. Bareagent's default `{type: toolName}` shape disables both. Either layer could move — bareagent shipped the `actionTranslator` escape hatch this release; bareguard could optionally widen primitives to also read `action.args.cmd` / `action.args.path`.
+
 ## [0.10.0] — 2026-05-12
 
 **Governance seam reshaped (BA1–BA5).** `wireGate` now exposes callbacks Loop calls inline (`onLlmResult`, `onToolResult`) instead of wrapping tools post-hoc, so `gate.record` finally sees both LLM cost *and* `ctx`. Halt-severity decisions throw a typed `HaltError` and Loop exits cleanly — they never leak as `[HALT: ...]` strings to the LLM. Old `wrapTool` / `wrapTools` retained as deprecation shims with a one-shot warning; removal target 1.0.

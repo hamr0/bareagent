@@ -44,6 +44,18 @@ describe('Loop', () => {
     assert.throws(() => new Loop(), { message: /requires a provider/ });
   });
 
+  it('throws on removed options.maxRounds with a migration message', () => {
+    const provider = mockProvider([]);
+    assert.throws(
+      () => new Loop({ provider, maxRounds: 5 }),
+      (err) => {
+        assert.match(err.message, /maxRounds was removed in v0\.8/);
+        assert.match(err.message, /limits.*maxTurns/);
+        return true;
+      },
+    );
+  });
+
   it('returns text when LLM responds without tool calls', async () => {
     const provider = mockProvider([
       { text: 'Hello!', toolCalls: [], usage: { inputTokens: 5, outputTokens: 3 } },

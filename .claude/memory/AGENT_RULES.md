@@ -6,7 +6,7 @@
 3. [Testing Standards](#testing-standards)
 4. [Environment](#environment)
 5. [Development Workflow](#development-workflow)
-6. [Twelve-Factor Reference](#twelve-factor-reference)
+6. [Twelve-Factor Checklist](#twelve-factor-checklist)
 7. [CLAUDE.md Stub](#claudemd-stub)
 8. [AI Agent Instructions](#ai-agent-instructions)
 
@@ -25,6 +25,7 @@
 - **Learning Style**: Understands concepts, needs executable instructions
 - **Expects**: Step-by-step guidance with clear explanations
 - **Comfortable with**: Command-line operations and scripts
+- **Builds a lot of web apps** — assume any UI work will be consumed on phones as well as desktop
 
 ### Required Safeguards
 - Always identify affected files before making changes
@@ -74,6 +75,8 @@ Before adding any external dependency, all of these must be true:
 - **Every line must have a purpose.** No speculative code, no "might need this later", no abstractions for one use case
 - **Simple > clever.** Readable code that a junior can follow beats elegant code that requires a PhD to debug
 - **Containerize only when necessary.** Start with a virtualenv or bare metal. Docker adds value for deployment parity and isolation — not for running a script
+- **Responsive web UI is mandatory in dev projects.** Any web UI must be usable on mobile by default — fluid layouts, viewport meta tag, breakpoints for narrow screens, no horizontal scroll. Test in DevTools device emulation before declaring a UI task done. POCs are exempt (validate the idea first), but the moment a POC graduates to a real project this becomes a hard requirement
+- **Surgical changes only.** Touch what the task requires; nothing else. Don't "improve" adjacent code, comments, or formatting. Match existing style even if you'd do it differently. Only clean up orphans your own change created — leave pre-existing dead code alone unless asked. Every changed line should trace directly to the request
 
 ### Red Flags — Stop and Flag These
 - Over-engineering simple problems
@@ -195,7 +198,7 @@ Before adding any external dependency, all of these must be true:
 
 ---
 
-## Twelve-Factor Reference
+## Twelve-Factor Checklist
 
 The [Twelve-Factor App](https://12factor.net) methodology for modern, scalable applications:
 
@@ -232,6 +235,8 @@ Copy this to any project's CLAUDE.md. These are mandatory rules, not suggestions
 **Lightweight over complex.** Fewer moving parts, fewer deps, less config. Express over NestJS, Flask over Django, unless the project genuinely needs the framework. Simple > clever. Readable > elegant.
 
 **Open-source only.** No vendor lock-in. Every line of code must have a purpose — no speculative code, no premature abstractions.
+
+**Responsive web UI is mandatory.** Any web UI must work on mobile by default — fluid layouts, viewport meta, breakpoints, no horizontal scroll. Verify in DevTools device emulation before claiming a UI task is done. POCs exempt; real projects are not.
 
 For full development and testing standards, see `.claude/memory/AGENT_RULES.md`.
 ```
