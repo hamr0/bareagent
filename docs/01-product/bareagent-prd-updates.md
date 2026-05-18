@@ -757,6 +757,74 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
+### v0.10.3 / hardening pass (2026-05-18)
+
+- **Halt is a sealed exit, not a thrown exception.** `HaltError` still bubbles
+  out of `wireGate.policy`, but Loop catches it in its outer handler and returns
+  `{ error: 'halt:<rule>', msgs }` *even when `throwOnError:true`*. The
+  argument is that halts are *governance decisions* the operator asked for
+  (cap hit, budget exhausted) — they are not runtime failures and should not
+  force every adopter to `try/catch` the loop. Adopters who want the
+  exception-shape can re-throw from `onError` (`if (info.source === 'halt')
+  throw err`). Decision is unchanged from v0.10.0 — restated here because
+  v0.10.3 work touched the surrounding code and the contract is load-bearing.
+- **Halt-path `msgs` must be a valid OpenAI transcript.** When a halt fires
+  mid-way through a multi-tool round, the assistant `tool_calls` array is
+  already in `msgs` but only some (or zero) `role:'tool'` replies are. Pre-0.10.3
+  this produced a dangling-tool-calls protocol violation if adopters fed
+  `result.msgs` into another provider call. v0.10.3 seals the gap by appending
+  a synthetic `{role:'tool', content:'[halted:<rule>]'}` for every uncovered
+  tool_call_id. Lowercase `[halted:]` to keep the v0.10.0 contract that
+  `[HALT:]` never reaches the LLM — the synthetic reply is what bareagent
+  writes into the transcript on the way out, not what any policy returns.
+- **`bin/cli.js` fails closed on gate-wiring errors.** When a `spawn`-ed child
+  config sets `cfg.gate` but `Gate` init throws, the CLI now `process.exit(1)`
+  instead of running with `policy=null`. Reasoning: the only adopter-facing
+  signal of a misconfigured child was a stderr line — and parent agents
+  don't read child stderr by default. A silently ungoverned child can run any
+  tool, including `spawn` and `defer`, without a single audit record. The
+  cost of `exit(1)` is a loud failure during config; the cost of silent
+  fallback is an unbounded escape hatch. Loud failure wins.
+- **`bin/cli.js` rewired to the BA1 seam (`policy + onLlmResult + onToolResult
+  + filterTools`).** The deprecated `wrapTools` path was a latent regression:
+  every spawned child silently dropped LLM cost from `budget.maxCostUsd` and
+  failed to thread `_ctx` into `gate.record`. Migrated to match what the
+  README's wire-up example already showed external adopters. No config
+  change for adopters — the upgrade is invisible except in the audit log
+  (now correct) and the absent deprecation warning.
+- **`safeStringify` for `onToolResult` results.** Tool results can be circular
+  structures or include functions / undefined / bigints. Raw `JSON.stringify`
+  threw on circular and silently emitted `undefined` for functions —
+  surfacing inside `gate.record` as a `loop:error{source:'onToolResult'}`
+  for what was really a serialization quirk in the tool, not the gate.
+  Fall back to `String(value)`. Same fix in the deprecated `wrapTool` path
+  for consistency; doesn't outlive the shim's removal target (1.0).
+- **`HaltError` public surface is `err.rule` and `err.decision`, not
+  `err.context.rule` / `err.context.decision`.** The old code wrote both;
+  v0.10.3 drops the duplicates. Adopters who match on `err.context` for
+  rule-specific behavior must move to `err.rule` / `err.decision` directly.
+  Documented in the `bareagent.context.md` typed-error section so the
+  break (if anyone hit it) is searchable.
+- **`COST_PER_1K` is hand-curated and adopter-extensible — not derived.**
+  Refreshed 2026-05-18 for Claude 4.x. The table is intentionally small;
+  we don't ship a "model registry" service or auto-fetch pricing. Unknown
+  models flow through `_default` and the adopter sees `result.cost` based on
+  that fallback. If they care about budget enforcement accuracy for a
+  novel model, they edit the table — same hand-rolled escape hatch as
+  `actionTranslator`. No abstraction earned its keep here.
+- **`filterTools` is bulk-only; MCP inner names are gated via
+  `tools.denyArgPatterns`.** v0.10.3 surfaces this asymmetry in the
+  `filterTools` JSDoc rather than fixing it: when MCP tools are exposed
+  via `[mcp_discover, mcp_invoke]` meta-tools, `filterTools` cannot drop
+  inner tool names (they are not in the bareagent tool list — only
+  `mcp_discover` and `mcp_invoke` are). The intentional gov surface for
+  inner names is `tools.denyArgPatterns: { mcp_invoke: [/"name":"…"/] }`,
+  which `src/mcp-bridge.js` already documents. Closing the asymmetry would
+  mean running `gate.allows` inside `mcp_invoke.execute` for every inner
+  tool name — that's a per-invocation cost for an ergonomic feature
+  (pre-filter, not gov), so it stays on the adopter to use the right
+  bareguard primitive.
+
 ### v0.9 / bareguard 0.2 decisions (2026-04-30)
 
 - **Defer/spawn rate caps live in bareguard, not bareagent.** Counted from

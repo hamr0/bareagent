@@ -2,6 +2,24 @@
 
 const { HaltError } = require('./errors');
 
+// Safe-stringify for tool results: tools can return circular structures or
+// values that include functions / undefined / bigints. Falling back to String()
+// keeps gate.record from throwing inside onToolResult (which would surface as a
+// loop:error{source:'onToolResult'} for what is really a serialization quirk).
+function safeStringify(value) {
+  if (typeof value === 'string') return value;
+  try {
+    const json = JSON.stringify(value);
+    return json === undefined ? String(value) : json;
+  } catch {
+    return String(value);
+  }
+}
+
+// Module-scope so a process that spawns many child agents (each with its own
+// wireGate call) only prints the wrapTool deprecation warning once.
+let warnedWrap = false;
+
 /**
  * Wire a bareguard Gate into bareagent's Loop.
  *
@@ -14,7 +32,12 @@ const { HaltError } = require('./errors');
  *   - `onToolResult`  — callback for `new Loop({ onToolResult })`. Forwards every
  *                       tool.execute result to gate.record with ctx in scope.
  *   - `filterTools`   — async (tools) => filtered. Drops tools denied by gate.allows
- *                       so the LLM never sees them. No audit, no record.
+ *                       so the LLM never sees them. No audit, no record. Bulk-only:
+ *                       when MCP tools are exposed via `mcp_discover`+`mcp_invoke`
+ *                       meta-tools, filterTools cannot drop the inner names (they
+ *                       are not in the tool list). Gate those via bareguard's
+ *                       `tools.denyArgPatterns: { mcp_invoke: [/"name":"…"/] }`
+ *                       — see src/mcp-bridge.js (Gov shape).
  *   - `wrapTool` / `wrapTools` — DEPRECATED. Pre-BA1 shim that wraps execute() to
  *                       call gate.record post-hoc. Loses _ctx and never sees LLM cost.
  *                       Prefer `onToolResult` (and `onLlmResult` for budget correctness).
@@ -25,9 +48,11 @@ const { HaltError } = require('./errors');
  *
  * @param {object} gate - A bareguard Gate instance (must have .check, .record, .allows).
  * @param {object} [options]
- * @param {Function} [options.formatDeny] - (decision) => string. Transforms the deny
- *   string fed to the LLM. Default: "[deny: <rule>] <reason>". Halt bypasses this
- *   (HaltError doesn't reach the LLM).
+ * @param {Function} [options.formatDeny] - (decision, toolName) => string. Transforms
+ *   the deny string fed to the LLM. The second arg is the bareagent tool name (handy
+ *   for tool-specific deny copy). Default: "[deny: <rule>] <reason>" or
+ *   "[deny: <rule>] <toolName> denied" when bareguard omits a reason. Halt bypasses
+ *   this (HaltError doesn't reach the LLM).
  * @param {Function} [options.actionTranslator] - (toolName, args, ctx) => action.
  *   Builds the action object passed to `gate.check` and `gate.record`. Default:
  *   `{ type: toolName, args, _ctx: ctx }`. Override when bareguard's primitives
@@ -102,7 +127,7 @@ function wireGate(gate, options = {}) {
       });
     } else {
       await gate.record(action, {
-        result: typeof result === 'string' ? result : JSON.stringify(result),
+        result: safeStringify(result),
         durationMs: durationMs ?? null,
       });
     }
@@ -115,14 +140,13 @@ function wireGate(gate, options = {}) {
     if (typeof gate.allows !== 'function') {
       throw new Error('[wireGate.filterTools] gate must have .allows (bareguard >= 0.2)');
     }
-    const out = [];
-    for (const t of tools) {
-      if (await gate.allows(t.name)) out.push(t);
-    }
-    return out;
+    // Parallel: gate.allows is config-driven and pure, so concurrent calls are
+    // safe. Matters for large MCP catalogs (50+ tools) where sequential awaits
+    // were noticeable overhead on every startup.
+    const verdicts = await Promise.all(tools.map(t => gate.allows(t.name)));
+    return tools.filter((_, i) => verdicts[i]);
   };
 
-  let warnedWrap = false;
   function wrapTool(tool) {
     if (!warnedWrap) {
       warnedWrap = true;
@@ -143,7 +167,7 @@ function wireGate(gate, options = {}) {
         try {
           const result = await original(args);
           await gate.record(action, {
-            result: typeof result === 'string' ? result : JSON.stringify(result),
+            result: safeStringify(result),
             durationMs: Date.now() - startedAt,
           });
           return result;

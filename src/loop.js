@@ -3,7 +3,7 @@
 const { ToolError, HaltError } = require('./errors');
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
-// Last updated: 2026-03-18. Source: public provider pricing pages.
+// Last updated: 2026-05-18. Source: public provider pricing pages.
 const COST_PER_1K = {
   // OpenAI
   'gpt-4o': { in: 0.0025, out: 0.01 },
@@ -12,9 +12,13 @@ const COST_PER_1K = {
   'gpt-4.1-mini': { in: 0.0004, out: 0.0016 },
   'gpt-4.1-nano': { in: 0.0001, out: 0.0004 },
   'o3-mini': { in: 0.0011, out: 0.0044 },
-  // Anthropic
-  'claude-sonnet-4-20250514': { in: 0.003, out: 0.015 },
+  // Anthropic — Claude 4.x current generation (2026-05)
+  'claude-opus-4-7': { in: 0.015, out: 0.075 },
+  'claude-sonnet-4-6': { in: 0.003, out: 0.015 },
   'claude-haiku-4-5-20251001': { in: 0.0008, out: 0.004 },
+  'claude-haiku-4-5': { in: 0.0008, out: 0.004 },
+  // Anthropic — earlier 4.x snapshots
+  'claude-sonnet-4-20250514': { in: 0.003, out: 0.015 },
   'claude-opus-4-20250514': { in: 0.015, out: 0.075 },
   // Fallback average across popular models (~$0.002 in, ~$0.008 out per 1K)
   '_default': { in: 0.002, out: 0.008 },
@@ -24,6 +28,27 @@ const COST_PER_1K = {
 // Gate via `limits.maxTurns`. If you hit this without bareguard wired, you have
 // no governance and the LLM loop is unbounded by design — wire bareguard.
 const HARD_ROUND_LIMIT = 100;
+
+// Walk the assistant tool_calls in the last assistant message and append a
+// synthetic `role:'tool'` reply for every tool_call_id that has no matching
+// reply. Halt-path only — keeps msgs a valid OpenAI transcript when the loop
+// exits between pushing assistant.tool_calls and finishing the per-tool loop.
+function sealDanglingToolCalls(msgs, rule) {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role !== 'assistant' || !Array.isArray(m.tool_calls)) continue;
+    const seen = new Set();
+    for (let j = i + 1; j < msgs.length; j++) {
+      if (msgs[j].role === 'tool' && msgs[j].tool_call_id) seen.add(msgs[j].tool_call_id);
+    }
+    for (const tc of m.tool_calls) {
+      if (!seen.has(tc.id)) {
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: `[halted:${rule}]` });
+      }
+    }
+    return;
+  }
+}
 
 function estimateCost(model, usage) {
   if (!usage || !model) return null;
@@ -127,7 +152,12 @@ class Loop {
    * @param {Array<object>} messages - Conversation messages in OpenAI format.
    * @param {Array<object>} [tools=[]] - Tool definitions with name, execute, description, parameters.
    * @param {object} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object, error: string|null}>}
+   * @returns {Promise<{text: string, toolCalls: Array, usage: object, cost: number, error: string|null, msgs: Array<object>}>}
+   *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
+   *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
+   *   dangling assistant `tool_calls` from the halted round are paired with
+   *   synthetic `[halted]` tool replies — safe to feed back into another
+   *   provider call without violating OpenAI's tool-call/tool-result pairing.
    * @throws {Error} `[Loop] Tool is missing a name` — when a tool has no name or a non-string name.
    * @throws {Error} `[Loop] Tool "X" is missing an execute() function` — when execute is not a function.
    * @throws {Error} `[Loop] Tool "X" has invalid parameters` — when parameters is not an object.
@@ -323,9 +353,15 @@ class Loop {
       // BA2: HaltError is a clean governance exit, not a runtime failure.
       // No throw even when throwOnError:true — the gate halted us deliberately.
       if (err instanceof HaltError) {
-        this._reportError('halt', err, { rule: err.rule, reason: err.decision?.reason ?? null });
-        this._safeEmit({ type: 'loop:done', data: { text: '', halted: true, rule: err.rule, cost: totalCost } });
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${err.rule}`, msgs };
+        const rule = err.rule || 'unknown';
+        // Pair any dangling assistant.tool_calls (from the halted round) with
+        // synthetic `[halted]` replies so the returned msgs is a valid
+        // OpenAI-shaped transcript — consumers can feed it back into another
+        // provider call without tripping the tool-call/tool-result pairing.
+        sealDanglingToolCalls(msgs, rule);
+        this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
+        this._safeEmit({ type: 'loop:done', data: { text: '', halted: true, rule, cost: totalCost } });
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs };
       }
       throw err;
     }

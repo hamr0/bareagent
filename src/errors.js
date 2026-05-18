@@ -52,8 +52,9 @@ class HaltError extends BareAgentError {
     super(message || `[HALT: ${rule || 'unknown'}]`, {
       code: 'HALT',
       retryable: false,
-      context: { ...context, rule, decision },
+      context,
     });
+    // Public, stable surface — read `err.rule` / `err.decision` (not `err.context`).
     this.rule = rule || null;
     this.decision = decision || null;
   }

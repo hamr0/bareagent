@@ -513,4 +513,95 @@ describe('Loop + wireGate end-to-end (BA suite)', () => {
     assert.equal(errEvents.length, 1);
     assert.equal(errEvents[0].data.source, 'onLlmResult');
   });
+
+  // Locks in the documented contract: a policy deny short-circuits the tool
+  // execution and does NOT fire onToolResult. gate.check already saw the
+  // attempt (via policy) and bareguard records denies on its own — firing
+  // onToolResult here would double-record. The deny still reaches the LLM as
+  // a tool message so the next round can react.
+  it('policy deny does not fire onToolResult (no double-record)', async () => {
+    const gate = mockGate({
+      checkImpl: () => ({ outcome: 'deny', severity: 'action', rule: 'tools.denylist', reason: 'blocked' }),
+    });
+    const { policy, onToolResult } = wireGate(gate);
+    let onToolResultCalls = 0;
+    const wrappedOnToolResult = async (evt) => { onToolResultCalls++; return onToolResult(evt); };
+
+    let denyMsg = null;
+    const provider = {
+      model: 'gpt-4o-mini',
+      name: 'mock',
+      async generate(messages) {
+        const haveTool = messages.some(m => m.role === 'tool');
+        if (!haveTool) {
+          return { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: { city: 'X' } }], usage: { inputTokens: 1, outputTokens: 1 } };
+        }
+        denyMsg = messages.find(m => m.role === 'tool')?.content;
+        return { text: 'understood', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const loop = new Loop({ provider, policy, onToolResult: wrappedOnToolResult });
+    await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+
+    // Tool was denied, so onToolResult must NOT have fired for it.
+    assert.equal(onToolResultCalls, 0);
+    // The deny string reached the LLM so it could react.
+    assert.match(denyMsg, /\[deny: tools\.denylist\]/);
+  });
+
+  // Halt-path returns a transcript that's safe to feed back to a provider —
+  // every assistant.tool_calls entry must have a matching role:'tool' reply,
+  // even when halt fires mid-way through executing a multi-tool round.
+  it('halt seals dangling tool_calls with synthetic [halted] replies', async () => {
+    // Policy halts on the SECOND tool call — the assistant.tool_calls (c1, c2)
+    // is already pushed and c1 has its real tool reply, but c2 is dangling.
+    let checks = 0;
+    const gate = mockGate({
+      checkImpl: () => {
+        checks++;
+        if (checks === 2) return { outcome: 'deny', severity: 'halt', rule: 'budget.maxCostUsd', reason: 'over' };
+        return { outcome: 'allow', severity: 'action', rule: null, reason: null };
+      },
+    });
+    const { policy } = wireGate(gate);
+
+    const provider = mockProvider([
+      { text: '', toolCalls: [
+        { id: 'c1', name: 'get_weather', arguments: { city: 'A' } },
+        { id: 'c2', name: 'get_weather', arguments: { city: 'B' } },
+      ], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const loop = new Loop({ provider, policy });
+    const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+
+    // Every tool_call id has a matching role:'tool' reply (no dangling ids).
+    const lastAssistant = [...result.msgs].reverse().find(m => m.role === 'assistant' && Array.isArray(m.tool_calls));
+    assert.ok(lastAssistant, 'expected an assistant message with tool_calls');
+    const replyIds = new Set(result.msgs.filter(m => m.role === 'tool').map(m => m.tool_call_id));
+    for (const tc of lastAssistant.tool_calls) {
+      assert.ok(replyIds.has(tc.id), `dangling tool_call id=${tc.id} has no matching tool reply`);
+    }
+    // Exactly one synthetic [halted:...] reply — c1 has a real result, c2 was sealed.
+    const synthetic = result.msgs.filter(m => m.role === 'tool' && String(m.content).startsWith('[halted:'));
+    assert.equal(synthetic.length, 1);
+    assert.equal(synthetic[0].tool_call_id, 'c2');
+  });
+
+  // Tolerate adopters who throw `new HaltError('msg')` without a `rule`.
+  // The returned error string must still be a stable `halt:<token>` and not
+  // the literal `halt:null`.
+  it('HaltError without a rule yields error: "halt:unknown"', async () => {
+    const gate = mockGate({
+      checkImpl: () => ({ outcome: 'deny', severity: 'halt' }), // no rule, no reason
+    });
+    const { policy } = wireGate(gate);
+    const provider = mockProvider([
+      { text: '', toolCalls: [{ id: 'c1', name: 'get_weather', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const loop = new Loop({ provider, policy });
+    const result = await loop.run([{ role: 'user', content: 'x' }], [weatherTool]);
+    assert.equal(result.error, 'halt:unknown');
+  });
 });

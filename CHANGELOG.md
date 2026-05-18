@@ -4,6 +4,40 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-05-18
+
+**0.10.3 hardening pass.** Code-review surfaced one critical regression in `bin/cli.js` (still on the deprecated `wrapTools` path → every spawned child agent lost LLM-cost recording AND printed the deprecation warning AND silently ran ungoverned when bareguard wiring failed) plus a clutch of loose ends: `HaltError` mid-round left dangling `tool_calls` in the returned `msgs` (OpenAI protocol violation if reused), `halt:null` for adopters who throw `HaltError` without a `rule`, `JSON.stringify` of circular tool results crashed `onToolResult`, current Claude 4.x model IDs missing from the cost table, `filterTools` serialized on large MCP catalogs, JSDoc drift, `HaltError` storing `rule`/`decision` in two places. All addressed without API breakage.
+
+### Fixed
+
+- **`bin/cli.js` — child agents now use the BA1 seam.** Migrated off deprecated `wrapTools` to `policy + onLlmResult + onToolResult + filterTools` on `new Loop({...})`. Every `spawn`-ed child now records LLM cost into bareguard's audit (was silently dropped), threads `ctx` to `gate.record`, and stops printing the wrap deprecation warning on every first tool call.
+- **`bin/cli.js` — fail-closed on bareguard wiring failure.** When `cfg.gate` is set but `Gate` init throws, the CLI now `process.exit(1)` with a `Refusing to run ungoverned` stderr line instead of continuing with `policy=null`. Closes a silent-escape hatch where a misconfigured gate produced an unmitigated child agent.
+- **`src/loop.js` — halt no longer leaves dangling `tool_calls` in `msgs`.** New `sealDanglingToolCalls()` walks the last assistant `tool_calls` array and appends a synthetic `[halted:<rule>]` `role:'tool'` reply for every id without a matching tool result. The returned `result.msgs` is now a valid OpenAI transcript safe to feed back into another provider call — even when halt fires mid-way through a multi-tool round. `[HALT:]` still never reaches the LLM (the existing contract is unchanged; synthetic replies use `[halted:]` lowercase to keep that signal distinct).
+- **`src/loop.js` — `halt:null` → `halt:unknown`.** When adopters throw `new HaltError('msg')` without a `rule`, the returned `error` string is now the stable `halt:unknown` instead of the literal `halt:null`. Same change in the `loop:done{rule}` event and `_reportError('halt', ..., {rule})` extra.
+- **`src/bareguard-adapter.js` — `safeStringify` in `onToolResult` (and `wrapTool` shim).** Replaces raw `JSON.stringify(result)` which threw on circular tool results and returned `undefined` for function/bigint results — the throw then surfaced as a `loop:error{source:'onToolResult'}` for what was really a serialization quirk. Falls back to `String(value)` on `JSON.stringify` throw or `undefined` result.
+- **`src/errors.js` — `HaltError` no longer stores `rule`/`decision` twice.** Previously written to both `this.decision`/`this.rule` AND `this.context.decision`/`this.context.rule`. Public surface is unchanged (`err.rule`, `err.decision`); `err.context` is now the adopter-supplied context only.
+
+### Changed
+
+- **`src/loop.js` — `COST_PER_1K` table refreshed for Claude 4.x current generation.** Added `claude-opus-4-7` ($0.015/$0.075), `claude-sonnet-4-6` ($0.003/$0.015), `claude-haiku-4-5` alias (already had the dated `claude-haiku-4-5-20251001`). Without this, every Claude call in the field flowed through `_default` rates and `onLlmResult` reported inaccurate `costUsd` into bareguard's budget. Last-updated comment bumped to 2026-05-18.
+- **`src/bareguard-adapter.js` — `filterTools` is now parallel.** Replaced sequential `for (await gate.allows(...))` with a `Promise.all` map. Noticeable startup-time win for large MCP catalogs (50+ tools); identical semantics since `gate.allows` is config-driven and pure.
+- **`src/bareguard-adapter.js` — `warnedWrap` hoisted to module scope.** Was per-`wireGate`-call, so each spawned subprocess re-armed the deprecation warning. Now one warning per process across all `wireGate` calls. (Moot for `bin/cli.js` after the migration above, but still right.)
+
+### Added
+
+- **`test/integration-bareguard.test.js` — three new cases.**
+  - **`policy deny does not fire onToolResult`** — locks in the no-double-record contract (gate.check already saw the attempt; bareguard records denies internally).
+  - **`halt seals dangling tool_calls with synthetic [halted] replies`** — uses a policy that halts on the second tool of a multi-tool round, asserts c1 has its real reply, c2 has a `[halted:<rule>]` synthetic, every assistant `tool_call.id` is covered.
+  - **`HaltError without a rule yields error: "halt:unknown"`** — bareguard decision with `severity:'halt'` and no `rule` resolves to the `halt:unknown` token rather than `halt:null`.
+
+### Documentation
+
+- **`bareagent.context.md`** updated for barebrowse v0.9.0 (no code change — `tools/browse.js` is a pass-through to `barebrowse/bareagent`). Gotcha #13 bumped from 17 to 20 core browsing tools (21 with `assess`); added `reload`, `wait_for`, `downloads`; noted `reload`/`wait_for` join the action-tool set that auto-returns a snapshot with the 300ms settle delay; noted `downloads` returns a frozen JSON snapshot of `page.downloads` (stable view, not a live reference); explained that `onDialog` is intentionally not exposed as a tool — its callback shape doesn't fit a request/response loop, so adopters drop to `import { connect }` directly or read `page.dialogLog` after the fact. Recipe 7 privacy paragraph ("18th tool" → "21st tool"). Recipe 7b CLI reference picks up `reload [--no-cache]`, a new Downloads row, and `--port=N` / `--download-path=DIR` open flags. Behavioral note (not surfaced — `[ref=N]` format unchanged): refs are now flat across all frames in the merged tree, routed to the right CDP session automatically.
+- **`bareagent.context.md`** Gotcha #13 also documents `pruneMode: 'act'|'read'` on `browse` / `snapshot` — `act` (default) keeps interactive elements; pass `'read'` for paragraph-heavy pages (articles, docs, blogs). Notes the auto-hint when `act` collapses a content-heavy page.
+- **`bareagent.context.md` halt-mechanics paragraphs corrected.** Two stale notes (§ "Halt decisions surface as deny strings", §error-mapping table) still claimed halts were fed to the LLM as `[HALT:]` deny strings — the v0.10.0 BA2 change made halts throw `HaltError` and Loop catches it cleanly. Both paragraphs now match the post-0.10.0 behavior. The halt-detection recipe also documents the new `halt:unknown` token and the synthetic `[halted:<rule>]` tool replies on `result.msgs`.
+- **`src/loop.js`** — `Loop.run()` `@returns` JSDoc now documents `cost`, `msgs`, the `halt:<rule>` error contract, and the post-halt msgs-sealing guarantee.
+- **`src/bareguard-adapter.js`** — `formatDeny` JSDoc corrected to `(decision, toolName) => string` (implementation was already passing both; doc claimed `(decision)` only). `filterTools` JSDoc cross-references the `mcp_invoke` meta-tool asymmetry: `filterTools` is bulk-only, MCP inner names must be gated via bareguard's `tools.denyArgPatterns: { mcp_invoke: [/"name":"…"/] }` (the gov surface that `src/mcp-bridge.js` already documents).
+
 ## [0.10.2] — 2026-05-12
 
 **Bareguard 0.4.2 alignment.** Bareguard shipped both items called out in 0.10.1's known-limitations note: `limits.maxToolRounds` (sibling primitive that ticks only on non-`llm` records, no more `maxTurns: N*2` workaround) and field-shape fallback on `bashCheck` / `fsCheck` / `netCheck` (read either flat `action.cmd` or nested `action.args.cmd`/`.command`). Bareagent's `actionTranslator` snippets simplified accordingly.

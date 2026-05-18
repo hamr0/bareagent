@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.10.2 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.10.3 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -13,14 +13,15 @@ bareagent is a lightweight agent orchestration library (~2.4K lines of core, one
 npm install bare-agent
 ```
 
-Six entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError
+Eight entry points:
+- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
+- `require('bare-agent/errors')` — same error classes via a stable subpath (v0.10.1+) for adopters who want to import only the error surface
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools
-- `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration)
+- `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
 
 ## Which components do I need?
 
@@ -279,9 +280,9 @@ if (result.error?.startsWith('halt:')) {
 
 **Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
 
-Halt-severity decisions (budget exhausted, `limits.maxTurns`, gate terminated) throw a typed `HaltError` from the policy closure; Loop catches it, emits `loop:error{source:'halt'}` + `loop:done{halted:true, rule}`, and returns `{ error: 'halt:<rule>' }`. The halt is **never** fed back to the LLM as a tool message — adopters check `result.error` to react.
+Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
 
-Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `onToolResult` / `onLlmResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
+Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
 
 **`actionTranslator` for bash/fs primitive activation (v0.10.1+).** Bareguard's `bashCheck` / `fsCheck` / `netCheck` only fire when `action.type === 'bash'` / `'read'` / `'write'` / `'fetch'`. The default action shape is `{type: toolName, args, _ctx}` which matches `tools.denylist` / `tools.allowlist` but does NOT activate those primitives. Adopters who want both pass `wireGate(gate, { actionTranslator })`. Since bareguard 0.4.1+, the primitives read fields from either flat (`action.cmd`) or nested (`action.args.cmd` / `.command`) shapes, so you can pass args through verbatim:
 
@@ -304,9 +305,9 @@ const { policy, onToolResult } = wireGate(gate, {
 
 **`Loop({ maxRounds })` throws (v0.10.1+).** The pre-v0.8 option is now an explicit error pointing at bareguard's `limits.maxTurns`. Silent-ignore migration foot-gun removed.
 
-**Halt decisions surface as deny strings.** When bareguard halts (budget exhausted, `limits.maxTurns` hit, content rule fired with `severity: 'halt'`), the policy returns `[HALT: <rule>] <reason>` and Loop feeds it to the LLM as the tool result. Subsequent rounds halt the same way; the LLM typically gives up and the loop exits. To detect halts earlier, watch the `loop:error` stream or wire `onError` and match on the deny string.
+**Halt decisions throw `HaltError` and Loop exits cleanly (v0.10.0+).** When bareguard halts (budget exhausted, `limits.maxTurns`/`maxToolRounds` hit, content rule fired with `severity: 'halt'`), `wireGate.policy` throws a typed `HaltError`. Loop's outer handler catches it, emits `loop:error{source:'halt'}` + `loop:done{halted:true, rule, cost}`, calls `onError`, and returns `{ error: 'halt:<rule>', msgs }` — **even when `throwOnError:true`** (halt is a governed exit, not a runtime failure). The halt **never** reaches the LLM as a tool message. Adopters react via `result.error?.startsWith('halt:')` or the `loop:done{halted:true}` event. When the throwing code path lacks a rule, the token is the stable `halt:unknown` (not `halt:null`). On a mid-round halt, the returned `result.msgs` is sealed: every dangling assistant `tool_calls` id gets a synthetic `[halted:<rule>]` `role:'tool'` reply so the transcript is valid OpenAI shape (safe to feed back into another provider call). The `[halted:]` lowercase tag is distinct from the legacy `[HALT:]` string — that one is reserved for the pre-0.10 deny-string mode and is now dead code in bareagent.
 
-**Same gate covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all pass through `wrapTools` and `policy` — bareguard does no MCP-specific parsing, just glob-matches `tools.allowlist` / `tools.denylist` on the canonical name string.
+**Same gate covers every tool source.** MCP tools from `createMCPBridge`, browsing tools from `createBrowsingTools`, mobile tools from `createMobileTools`, and any user-defined tool all flow through `policy` (`gate.check`) before invocation and `onToolResult` (`gate.record`) after — bareguard does no MCP-specific parsing, just glob-matches `tools.allowlist` / `tools.denylist` on the canonical name string.
 
 **Migration map (v0.7 → v0.8):**
 
@@ -318,7 +319,7 @@ const { policy, onToolResult } = wireGate(gate, {
 | `pathAllowlist({ allow, deny })` | `new Gate({ fs: { readScope: allow, deny } })` |
 | `commandAllowlist({ allow })` | `new Gate({ bash: { allow } })` |
 | `combinePolicies(a, b, c)` | Stack primitives in one Gate config — they compose as one eval |
-| `MaxCostError` / `MaxRoundsError` | Watch for `[HALT: budget.maxCostUsd]` / `[HALT: limits.maxTurns]` deny strings, or detect halts via `humanChannel` |
+| `MaxCostError` / `MaxRoundsError` | `try { ... } catch { ... }` → check `result.error?.startsWith('halt:')` (e.g. `halt:budget.maxCostUsd`, `halt:limits.maxTurns`). HaltError is also catchable via `require('bare-agent').HaltError` if your wiring throws it explicitly. |
 
 **Policy return values (Loop's contract is unchanged):**
 
@@ -335,7 +336,11 @@ const { policy, onToolResult } = wireGate(gate, {
 The policy signature accepts a third arg `ctx` — an opaque blob you pass per-call via `loop.run(msgs, tools, { ctx })`. `wireGate` forwards it as `_ctx` on every `gate.check({ type, args, _ctx })`, and you can branch on it inside bareguard's `humanChannel` callback or via custom primitives.
 
 ```javascript
-await loop.run(messages, wrapTools(tools), {
+// Tools were pre-filtered once at startup via filterTools (catalog pre-filter);
+// runtime per-call governance comes from policy + onToolResult, both wired on
+// the Loop constructor. ctx is forwarded as the third arg to policy and into
+// onLlmResult / onToolResult → bareguard's gate.record as `_ctx`.
+await loop.run(messages, tools, {
   ctx: { senderId, chatId, isOwner, adminGroupIds },
 });
 ```
@@ -344,17 +349,15 @@ For routing rules that don't fit bareguard's primitives (e.g. "owner can do anyt
 
 ### Catalog pre-filter (omit denied tools from the LLM's view)
 
-Bareguard's `gate.allows(...)` is a pure predicate (no audit write, no budget delta) you can use to drop denied tools from the catalog before the LLM sees them. v0.1.1 added a string shorthand:
+`wireGate(gate).filterTools(tools)` drops denied tools from the catalog before the LLM sees them. It calls `gate.allows(name)` in parallel for every tool — a pure predicate (no audit write, no budget delta) — and returns the filtered array. Bulk only: handles tools registered by name (native, MCP bulk-loaded, shell, browsing, mobile). For MCP meta-tools (`mcp_invoke`), inner names live inside `args.name` and are gated via `tools.denyArgPatterns` instead — see the MCP recipe below.
 
 ```javascript
-const visibleTools = (await Promise.all(
-  allTools.map(async (t) => (await gate.allows(t.name)) ? t : null)
-)).filter(Boolean);
-
-const result = await loop.run(messages, wrapTools(visibleTools));
+const { filterTools } = wireGate(gate);
+const visibleTools = await filterTools(allTools);
+const result = await loop.run(messages, visibleTools);
 ```
 
-For arg-aware filtering (e.g. drop `send_message` only when chat_id matches a specific group), pass the full action shape: `gate.allows({ type: 'send_message', args: { chat_id } })`. This is a context optimization, not a gov mechanism — gov decisions still happen at invoke time via `gate.check`.
+For arg-aware *filtering* (rare — usually you want arg-aware *gating*, which is policy's job), drop to `gate.allows({ type: 'send_message', args: { chat_id } })` directly. Pre-filter is a context optimization; gov decisions still happen at invoke time via `policy` (= `gate.check`).
 
 ### Checkpoint vs bareguard's humanChannel
 
@@ -553,7 +556,7 @@ Tools are validated at the start of `run()`. Missing `name` or `execute` throws 
 - **Loop throws by default** (v0.3.0+) — provider errors re-thrown as-is. Use `try/catch` or `.catch()`.
 - **Loop `throwOnError: false`** — opt into v0.2.x behavior where errors are returned in `result.error` instead of thrown.
 - **Loop throws at setup** — missing provider, malformed tools.
-- **Halt decisions don't throw** — turn cap, budget cap, content rules return as `[HALT: <rule>]` deny strings via the policy adapter (v0.8.0+). Watch the `loop:error` stream or wire `humanChannel` to detect halts at source.
+- **Halt decisions throw `HaltError` but Loop catches it cleanly (v0.10.0+)** — turn cap (`limits.maxTurns`/`maxToolRounds`), budget cap (`budget.maxCostUsd`), and content rules with `severity:'halt'` throw `HaltError` from `wireGate.policy`; Loop catches it, emits `loop:done{halted:true, rule}`, and returns `{ error: 'halt:<rule>' }`. **Even with `throwOnError:true`** Loop does NOT propagate — halt is a governed exit. Halt never reaches the LLM as a tool message. Detect via `result.error?.startsWith('halt:')`, the `loop:done{halted:true}` event, the `loop:error{source:'halt'}` event, or wire `humanChannel` for ask-then-decide flows.
 - All errors are prefixed `[ComponentName]` for easy identification.
 - See `docs/errors.md` in the repo for a full error reference with triggers and fixes.
 
@@ -566,10 +569,11 @@ Error
     ├── ToolError           code: 'TOOL_ERROR', retryable: false
     ├── TimeoutError        code: 'ETIMEDOUT', retryable: true
     ├── ValidationError     code: 'VALIDATION_ERROR', retryable: false
-    └── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    ├── CircuitOpenError    code: 'CIRCUIT_OPEN', retryable: true
+    └── HaltError           code: 'HALT', retryable: false — { rule, decision }
 ```
 
-Halt classes (`MaxCostError`, `MaxRoundsError`) were removed in v0.8.0 — bareguard halt decisions surface as deny strings now, not exceptions.
+Halt classes (`MaxCostError`, `MaxRoundsError`) were removed in v0.8.0. **In v0.10.0**, `HaltError` was added and `wireGate.policy` throws it on halt-severity decisions. Loop catches it in its outer handler and returns a clean exit (see the halt-mechanics paragraphs above) — adopters who *want* to catch the halt class explicitly can import it from `require('bare-agent').HaltError` or `require('bare-agent/errors').HaltError` (identity-equal across module boundaries, v0.10.1+). `err.rule` and `err.decision` are the stable public surface; do not read from `err.context.rule` / `err.context.decision` — those were removed in 0.10.3 as redundant.
 
 All error classes extend `Error` — `instanceof Error` always works. The `retryable` property integrates with `Retry`'s fast path: `err.retryable === true` auto-retries, `err.retryable === false` bails immediately.
 
@@ -624,13 +628,18 @@ Both projects kept their own memory/store implementations. Neither needed multi-
 5. **Ollama tool call IDs are synthetic** — `call_${Date.now()}`. Works fine but IDs aren't stable across retries.
 6. **Loop's `chat()` is stateful** — it accumulates the full conversation history including tool calls and tool results across turns. For long conversations, use `run()` with your own message management to control what stays in context.
 7. **CLIPipe `_formatPrompt()` flattens all messages** — System messages become `System: content` plaintext in stdin. If your CLI tool expects system prompts via a dedicated flag (e.g. `claude --system`), use `systemPromptFlag` to separate them. Without it, structured output prompts embedded in system messages will break.
-8. **Loop `run()` throws by default (v0.3.0+)** — Provider errors and maxRounds exhaustion throw instead of returning `result.error`. Use `try/catch` or pass `throwOnError: false` for the old behavior.
+8. **Loop `run()` throws by default (v0.3.0+)** — Provider errors throw instead of returning `result.error`. Use `try/catch` or pass `throwOnError: false` for the old behavior. **Halt-severity governance exits are the exception**: even with `throwOnError:true`, Loop catches `HaltError` and returns `{ error: 'halt:<rule>' }` cleanly (v0.10.0+). `Loop({ maxRounds })` was removed in v0.8 and now throws at construction (v0.10.1+) with a migration message pointing at `new Gate({ limits: { maxTurns | maxToolRounds } })`. The internal `HARD_ROUND_LIMIT = 100` is a safety net only — wire bareguard for real iteration bounds.
 9. **StateMachine `getStatus()` returns `null` for unregistered IDs** — It does not throw. Always null-check before accessing `.status`.
 10. **Planner expects JSON array `[{id, action, dependsOn}]`** — Not `{steps: [...]}`. If the LLM wraps steps in an object, Planner's parser will reject it.
 11. **Loop injects system prompt as a message, not an option** — `{ role: 'system', content: '...' }` is prepended at index 0 of the messages array passed to `provider.generate()`. It is NOT passed in `options.system`. If your tests assert on `options.system`, they will break — assert on `messages[0]` instead.
 12. **JsonlTransport must be imported from `bare-agent/transports`** — Not from `bare-agent` main export. Importing from main will throw `ERR_PACKAGE_PATH_NOT_EXPORTED`.
-13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (17 tools: browse, goto, snapshot, click, type, press, scroll, select, hover, back, forward, drag, upload, tabs, switchTab, pdf, screenshot, plus assess if `wearehere` is installed). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
+13. **Browsing tools require `close()`** — `createBrowsingTools()` launches a browser (20 tools as of barebrowse v0.9.0: browse, goto, snapshot, click, type, press, scroll, select, hover, back, forward, **reload**, drag, upload, tabs, switchTab, pdf, screenshot, **wait_for**, **downloads**, plus **assess** if `wearehere` is installed → 21 total). Always call `close()` in a `finally` block to release resources. Returns `null` if `barebrowse` is not installed. Action tools (click, type, press, scroll, hover, goto, back, forward, **reload**, drag, upload, select, switchTab, **wait_for**) auto-return a fresh snapshot with a 300ms settle delay so the LLM always sees the result. `downloads` returns a JSON snapshot of `page.downloads` frozen at request time (stable view, not a live reference). `onDialog` is intentionally not exposed as a tool — its callback shape doesn't fit a request/response loop; drop to `import { connect }` directly if a flow needs to override confirm/prompt replies, or read `page.dialogLog` after the fact. `browse` and `snapshot` accept `pruneMode: 'act'|'read'` — `act` (default) keeps interactive elements for clicking/filling; pass `'read'` when the page is paragraph-heavy (article, doc, blog) to keep prose. If `act` collapses a content-heavy page, the snapshot includes a hint to retry with `pruneMode: 'read'`. For multi-step flows, CLI session mode (`npx barebrowse open/click/snapshot/close`) is more token-efficient — snapshots go to `.barebrowse/*.yml`, agent reads only when needed instead of inline in conversation.
 14. **Mobile tools require `close()`** — `createMobileTools()` connects to a device. Always call `close()` in a `finally` block. Returns `null` if `baremobile` is not installed. Action tools auto-return a snapshot (unlike browsing tools where you call snapshot separately). Refs reset every snapshot — never cache them.
+15. **`bin/cli.js` (`spawn` child agents) fails closed on gate-wiring errors (v0.10.3+)** — when a child config sets `cfg.gate` but `Gate` init or `wireGate` throws, the CLI now `process.exit(1)` with `[cli] failed to wire bareguard: ... Refusing to run ungoverned (cfg.gate set).` instead of continuing with `policy=null`. Children without `cfg.gate` are unchanged (no governance asked, none enforced). If you previously relied on the silent-fallback behavior (you shouldn't have — it was a silent escape hatch), drop `cfg.gate` from the child config to opt in.
+16. **`bin/cli.js` uses BA1 callbacks since v0.10.3** — children record LLM cost into bareguard's audit, thread `_ctx`, and pre-filter tools via `gate.allows`. Pre-0.10.3 children used the deprecated `wrapTools` path which silently dropped LLM cost from `budget.maxCostUsd` and printed a deprecation warning per first tool call. No config change needed; the upgrade is transparent.
+17. **Halt-path `msgs` is sealed (v0.10.3+)** — when Loop catches `HaltError` mid-round, every dangling assistant `tool_calls.id` from the halted round gets a synthetic `{ role:'tool', tool_call_id, content: '[halted:<rule>]' }` appended so the returned `result.msgs` is valid OpenAI shape. Safe to feed back into another provider call without protocol errors. The `[halted:<rule>]` tag is lowercase — distinct from the legacy `[HALT:]` deny strings (removed in 0.10.0, do not match on the old form).
+18. **`HaltError` with no `rule` resolves to `halt:unknown` (v0.10.3+)** — `new HaltError('msg')` without a `{ rule }` option still produces a stable `result.error = 'halt:unknown'` and `loop:done{halted:true, rule:'unknown'}`. Pre-0.10.3 produced the literal `'halt:null'` which broke string-matching consumers. The `_reportError('halt', ...)` extra carries the same `rule:'unknown'` token.
+19. **Cost table is hand-curated** (`src/loop.js:COST_PER_1K`) — refreshed 2026-05-18 for Claude 4.x (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`) and the GPT-4.1 / o3-mini line. Unknown models fall through to `_default` ($0.002 in / $0.008 out per 1K). If you use a model not in the table and care about `result.cost` accuracy or `budget.maxCostUsd` enforcement via `onLlmResult`, add it.
 
 ## Cross-language SDKs
 
@@ -820,7 +829,7 @@ try {
 }
 ```
 
-**Privacy assessment:** If `wearehere` is installed (`npm install wearehere`), an 18th tool `assess` is automatically available. It scans any URL for privacy risks and returns a compact JSON:
+**Privacy assessment:** If `wearehere` is installed (`npm install wearehere`), a 21st tool `assess` is automatically available. It scans any URL for privacy risks and returns a compact JSON:
 
 ```javascript
 // The assess tool is included in browsing.tools automatically
@@ -870,12 +879,13 @@ npx barebrowse close
 | Category | Commands |
 |---|---|
 | **Session** | `open <url> [flags]`, `close`, `status` |
-| **Navigation** | `goto <url>`, `back`, `forward`, `snapshot [--mode=act\|read]`, `screenshot`, `pdf` |
+| **Navigation** | `goto <url>`, `back`, `forward`, `reload [--no-cache]`, `snapshot [--mode=act\|read]`, `screenshot`, `pdf` |
 | **Interaction** | `click <ref>`, `type <ref> <text>`, `fill <ref> <text>`, `press <key>`, `scroll <dy>`, `hover <ref>`, `select <ref> <value>`, `drag <from> <to>`, `upload <ref> <files..>` |
 | **Tabs** | `tabs`, `tab <index>` |
+| **Downloads** | `downloads` (JSON array of captured downloads — `savedPath`, `state`, ...) |
 | **Debugging** | `eval <expr>`, `wait-idle`, `wait-for --text=X --selector=Y`, `console-logs`, `network-log`, `dialog-log`, `save-state` |
 
-**Open flags:** `--mode=headless|headed|hybrid`, `--proxy=URL`, `--viewport=WxH`, `--storage-state=FILE`, `--no-cookies`, `--browser=firefox|chromium`, `--timeout=N`
+**Open flags:** `--mode=headless|headed|hybrid`, `--port=N` (attach to running browser), `--proxy=URL`, `--viewport=WxH`, `--storage-state=FILE`, `--download-path=DIR`, `--no-cookies`, `--browser=firefox|chromium`, `--timeout=N`
 
 **Snapshot `.yml` format** contains page content with `[ref=N]` markers on interactive elements (links, buttons, inputs). The ref numbers are stable within a snapshot — use them with `click`, `type`, `drag`, `upload`, and other ref-based commands.
 
@@ -943,17 +953,20 @@ const gate = new Gate({
 });
 await gate.init();
 
-const { policy, wrapTools } = wireGate(gate);
-const { tools } = createShellTools();
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+const { tools: shellTools } = createShellTools();
+const tools = await filterTools(shellTools);  // drop shell_exec (denylisted above) before the LLM sees it
 
 const loop = new Loop({
   provider: new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' }),
   policy,
+  onLlmResult,
+  onToolResult,
 });
 
 const result = await loop.run(
   [{ role: 'user', content: 'What is in /tmp and how many README files are there under /home/me/code?' }],
-  wrapTools(tools),
+  tools,
 );
 ```
 
@@ -1032,15 +1045,18 @@ const gate = new Gate({
 });
 await gate.init();
 
-const { policy, wrapTools } = wireGate(gate);
+const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);
+const gatedTools = await filterTools(bridge.tools);
 
 const loop = new Loop({
   provider,
   system: bridge.systemContext,
   policy,
+  onLlmResult,
+  onToolResult,
 });
 
-await loop.run(messages, wrapTools(bridge.tools));
+await loop.run(messages, gatedTools);
 ```
 
 MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `send_message`). Bareguard glob-matches the canonical name string against `tools.allowlist` / `tools.denylist`; no MCP-specific parsing.

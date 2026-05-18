@@ -63,9 +63,13 @@ async function runConfigMode(cfgPath) {
   // Tools — registry resolved by name from a curated set of built-ins.
   const tools = await resolveTools(cfg.tools || [], { stream });
 
-  // Bareguard Gate (optional but strongly recommended for spawn children)
+  // Bareguard Gate (optional but strongly recommended for spawn children).
+  // Fail-closed: if the config asks for a gate but wiring fails, exit non-zero
+  // rather than run an ungoverned child agent.
   let policy = null;
-  let wrapToolsFn = (t) => t;
+  let onLlmResult = null;
+  let onToolResult = null;
+  let gatedTools = tools;
   if (cfg.gate) {
     try {
       const { Gate } = require('bareguard');
@@ -95,9 +99,12 @@ async function runConfigMode(cfgPath) {
       await gate.init();
       const wired = wireGate(gate);
       policy = wired.policy;
-      wrapToolsFn = wired.wrapTools;
+      onLlmResult = wired.onLlmResult;
+      onToolResult = wired.onToolResult;
+      gatedTools = await wired.filterTools(tools);
     } catch (err) {
-      process.stderr.write(`[cli] failed to wire bareguard: ${err.message}. Continuing without policy gate.\n`);
+      process.stderr.write(`[cli] failed to wire bareguard: ${err.message}. Refusing to run ungoverned (cfg.gate set).\n`);
+      process.exit(1);
     }
   }
 
@@ -111,13 +118,14 @@ async function runConfigMode(cfgPath) {
     system: cfg.systemPrompt || null,
     stream,
     policy,
+    onLlmResult,
+    onToolResult,
     onError: (err, meta) => {
       process.stderr.write(`[loop:error ${meta.source}] ${err.message}\n`);
     },
   });
 
-  const wrapped = wrapToolsFn(tools);
-  await loop.run([initialMessage], wrapped);
+  await loop.run([initialMessage], gatedTools);
   // Stream's loop:done event has already been emitted; exit clean.
   process.exit(0);
 }
