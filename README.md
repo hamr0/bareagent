@@ -169,6 +169,21 @@ Halts also fire `loop:error` on the stream (`source: 'halt'`) and the `onError` 
 
 ---
 
+## Examples
+
+Runnable scripts in [`examples/`](examples/) — each is self-contained and the file's top docstring documents flags and required env vars.
+
+| File | What it shows |
+|---|---|
+| [`with-bareguard.mjs`](examples/with-bareguard.mjs) | End-to-end Loop + bareguard wiring: budget cap, fs scope, bash allowlist, audit log, humanChannel. The canonical governed-loop reference. |
+| [`mcp-bridge-poc.js`](examples/mcp-bridge-poc.js) | Auto-discover MCP servers from your IDE configs and expose them as bareagent tools. First run writes `.mcp-bridge.json` (edit to deny tools). |
+| [`mcp-bridge-concurrent.js`](examples/mcp-bridge-concurrent.js) | Soak test: fan out concurrent `barebrowse_browse` calls against real domains (Amazon, Wikipedia, GitHub, a dead host) and verify resilience. |
+| [`orchestrator/`](examples/orchestrator/) | Multi-agent dispatch via `spawn`. Three configs, one system prompt — no orchestrator class, no role types. Roles are JSON files. |
+| [`wake.sh`](examples/wake.sh) + [`wake.md`](examples/wake.md) | Reference cron + jq script for firing deferred actions. The runtime half of `createDeferTool` — bareagent emits, `wake.sh` fires. |
+| [`replay-job.js`](examples/replay-job.js) | Supervised replay POC: record a browser task once with the LLM driving, then replay against fresh snapshots with the LLM as locator-only. Falls back to full reasoning when the locator misses, and patches the trace. |
+
+---
+
 ## Cross-language usage
 
 Not using Node.js? Spawn bare-agent as a subprocess from any language. Ready-made wrappers in [`contrib/`](contrib/README.md) for Python, Go, Rust, Ruby, and Java — copy one file, no package registry needed.

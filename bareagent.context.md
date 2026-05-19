@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.10.3 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.10.4 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -618,6 +618,21 @@ For full recipes with code examples, see `docs/02-features/usage-guide.md` § "P
 | CLIPipe | ✓ | — |
 
 Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/03-logs/bareagent-eval-multis.md`.
+
+## Examples
+
+Runnable reference scripts in `examples/`. Each is self-contained; the top-of-file docstring documents flags and required env vars. Recipes below are the prose form; these are the executable form.
+
+| File | Demonstrates | Recipe cross-ref |
+|---|---|---|
+| `examples/with-bareguard.mjs` | Loop + bareguard end-to-end: budget cap, fs scope, bash allowlist, audit log, humanChannel. Canonical governed-loop reference. | § Wiring with bareguard |
+| `examples/mcp-bridge-poc.js` | Auto-discover MCP servers from IDE configs, run a Loop with the discovered tools, persist allow/deny in `.mcp-bridge.json`. | Recipe 9 |
+| `examples/mcp-bridge-concurrent.js` | Concurrent stress test against real public domains via `barebrowse_browse` (Amazon, Wikipedia, GitHub, a dead host). Validates bridge resilience under fan-out. | Recipe 9 |
+| `examples/orchestrator/` | Multi-agent dispatch via `spawn`. Three configs (orchestrator + two specialists), one system prompt — no orchestrator class, no role types. Roles are JSON files. Wired with bareguard via `cfg.gate`. | § Multi-agent: spawn + defer + wake |
+| `examples/wake.sh` + `examples/wake.md` | Reference cron + `jq` script for firing deferred actions. The runtime half of `createDeferTool`. | § Multi-agent: spawn + defer + wake |
+| `examples/replay-job.js` | Supervised replay POC: record a browser task once with the LLM driving, then replay against fresh snapshots with the LLM acting only as a locator. On locator miss, falls back to full Loop reasoning and patches the trace. Stub points for fingerprint fast-path, postState assertion, and trace-confidence are inline in the file header. | Recipe 7 |
+
+Stale example removed in 0.10.4: `examples/mcp-bridge-gov.js` (used a hard-coded path to the retired `mcp-gov` project; superseded by `with-bareguard.mjs` and bareguard's `policy` + `tools.denyArgPatterns` for MCP gating).
 
 ## Gotchas
 

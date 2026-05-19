@@ -4,6 +4,26 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-05-19
+
+**Examples audit + new replay-job POC.** No code change to `src/` — examples directory cleaned up post the v0.8 → v0.10 governance migration (mcp-gov retired, bareguard owns gating). One new POC added to demonstrate supervised replay as a composition pattern on top of barebrowse + Loop + Memory; not promoted to a core component.
+
+### Added
+
+- **`examples/replay-job.js`** — supervised-replay POC for repeatable browser jobs. Record once with the LLM driving (free reasoning, captures `{intent, tool, args}` per step into `.jobs/<name>.json`), then replay against fresh snapshots with the LLM acting only as a locator (one structured-output call per ref-bearing step: "map this intent to a ref in this snapshot, or return null"). On locator miss, falls back to full Loop reasoning from that point and splices the new sub-trace into the saved trace — that's the self-healing path. The example header inlines the named next-steps (fingerprint fast-path, postState assertion, trace-confidence, Scheduler hookup) so the optimization path is legible without bloating the file. Composes only existing primitives (Loop, Memory-style JSON store, barebrowse tools) — no new `src/` surface.
+- **README "Examples" section** — six-row table between Recipes and Cross-language usage. One-line-per-example with what it demonstrates. Earns examples a first-class entry on the npm landing page, not just a `tree` listing.
+- **`bareagent.context.md` "Examples" subsection** (between Production usage and Gotchas) — named pointers with recipe cross-refs so an LLM reading the codebase to answer "how do I demonstrate X" lands on the right file.
+- **`.gitignore`** — added `.jobs/` (replay-job's trace store, written at record time, sibling of `.barebrowse/` and `.mcp-bridge.json`).
+
+### Removed
+
+- **`examples/mcp-bridge-gov.js`** — superseded and unrunnable. Used a hard-coded absolute path (`/home/hamr/PycharmProjects/mcp-gov/...`) to a retired project, so it never ran on anyone else's machine. The concept it demonstrated (per-server, per-operation MCP gating) is now expressed natively via `wireGate(gate).policy` + `tools.denyArgPatterns: { mcp_invoke: [...] }` — see `examples/with-bareguard.mjs` (canonical bareguard wiring) and `bareagent.context.md` § "MCP catalog: bulk vs metaTools" for the bulk-vs-metaTools governance asymmetry.
+
+### Documentation
+
+- **Examples audit** (verdict, not just the diff): of the six surviving entries, all pull weight — `with-bareguard.mjs` is the gov reference, `mcp-bridge-poc.js` is the bridge entry-point, `mcp-bridge-concurrent.js` is the soak test, `orchestrator/` is the multi-agent reference (its own README already documents the `cfg.gate` wiring), `wake.sh` + `wake.md` are Defer's runtime companion, `replay-job.js` is the new composition POC. No further deletions warranted.
+- **PRD (`docs/01-product/prd.md`) intentionally not updated** — it's a design doc covering components, providers, consumption modes, data formats, and package structure. It has no `examples/` references today and adding one is out of scope; runnable scripts are documented in README + context.md where adopters actually look.
+
 ## [0.10.3] — 2026-05-18
 
 **0.10.3 hardening pass.** Code-review surfaced one critical regression in `bin/cli.js` (still on the deprecated `wrapTools` path → every spawned child agent lost LLM-cost recording AND printed the deprecation warning AND silently ran ungoverned when bareguard wiring failed) plus a clutch of loose ends: `HaltError` mid-round left dangling `tool_calls` in the returned `msgs` (OpenAI protocol violation if reused), `halt:null` for adopters who throw `HaltError` without a `rule`, `JSON.stringify` of circular tool results crashed `onToolResult`, current Claude 4.x model IDs missing from the cost table, `filterTools` serialized on large MCP catalogs, JSDoc drift, `HaltError` storing `rule`/`decision` in two places. All addressed without API breakage.

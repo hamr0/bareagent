@@ -5,5 +5,6 @@ node_modules/
 contrib/python/__pycache__/
 .barebrowse/
 .mcp-bridge.json
+.jobs/
 .claude/stash/
 .idea/
