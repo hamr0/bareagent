@@ -4,6 +4,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+Docs-only. No `src/` change. Not published.
+
+### Added
+
+- **PRD §17 "Future / Deferred Features" + §17.1 "Lightweight inter-agent message signing (signed A2A)."** Establishes the future-features home in the PRD and parks zero-infra Ed25519 sign/verify of the canonical A2A request body (no CA, no Hydra, no token introspection) as a *deferred — YAGNI until bare-agent talks to external peers* feature. Documents where it comes from ([bindu](https://github.com/GetBindu/bindu)'s `X-DID-Signature` slice of its mTLS + OAuth2 + DID stack — we'd borrow only the signature layer, rejecting the infra), what it covers (peer authentication + message integrity for A2A over §5.3's transport), and what it explicitly does not (not confidentiality/TLS, not authorization — that stays in bareguard, which authorizes the action not the actor; not app/user auth — §9's stance is unchanged). Cross-references bareguard's `docs/identity-and-the-gate.md`.
+
 ## [0.10.4] — 2026-05-19
 
 **Examples audit + new replay-job POC.** No code change to `src/` — examples directory cleaned up post the v0.8 → v0.10 governance migration (mcp-gov retired, bareguard owns gating). One new POC added to demonstrate supervised replay as a composition pattern on top of barebrowse + Loop + Memory; not promoted to a core component.

@@ -1412,3 +1412,51 @@ scheduler.start(async (job) => {
 | **v0.1 scope** | 8 components (no Router, no Tool.define) | Cut bloat, add back if demand appears |
 | **JSON-RPC** | Deferred to v0.2 | JSONL subprocess covers cross-language for now |
 | **License** | MIT | Maximum adoption |
+
+---
+
+## 17. Future / Deferred Features
+
+Not in scope now. Recorded so the idea isn't lost and the boundary stays clear.
+
+### 17.1 Lightweight inter-agent message signing (signed A2A)
+
+**Status:** deferred — YAGNI until bare-agent actually makes or accepts calls
+across a trust boundary (i.e. to/from an agent run by someone you don't control).
+Today the only multi-agent shape is bare-agent orchestrating *its own* sub-agents
+(one trust domain — no auth needed). Build this only when the networked transport
+(§5.3 `bare-agent serve` / JSON-RPC over HTTP) starts talking to *external* peers.
+
+**Where it comes from.** [bindu](https://github.com/GetBindu/bindu) ("identity,
+communication & payments layer for AI agents") secures every A2A request with a
+three-layer model: mTLS (X.509 from a step-ca PKI) + OAuth2 scopes (Ory Hydra) +
+an Ed25519 **`X-DID-Signature`** over the canonical request body, with W3C DIDs as
+the identity. That's correct for an open "agent internet" where strangers' agents
+transact in USDC — but it requires two long-running infra services (step-ca,
+Hydra), which is the opposite of the bare philosophy ("embed it, don't run it;
+no daemon; zero/one dep").
+
+**What we'd borrow — and only this.** Just the signature slice, infra-free:
+Ed25519 **sign / verify of the canonical JSON body** using Node's built-in
+WebCrypto (`node:crypto`), **zero new deps**. Operator-managed keypairs (or
+`did:key`); **no CA, no PKI server, no Hydra, no token introspection, no general
+DID-method resolution.** This is the "bare" answer to bindu's `X-DID-Signature`.
+
+**What it covers (and what it doesn't).**
+- ✓ **Peer authentication** — the receiving agent verifies the sender holds the
+  private key for the claimed identity (defeats impersonation).
+- ✓ **Message integrity / non-repudiation** — the body wasn't altered in transit;
+  the sender can't later deny it (useful once actions are consequential).
+- Maps to **A2A** — §9 already defers the A2A *protocol* to the A2A SDK; this adds
+  the *trust* layer for A2A calls over §5.3's transport, without infra.
+- ✗ **Not** transport confidentiality (that's TLS, terminate at the edge).
+- ✗ **Not** authorization — what a verified peer may *do* is policed by **bareguard**
+  (it authorizes the action; identity is settled here, upstream of it). See
+  bareguard's `docs/identity-and-the-gate.md`.
+- ✗ **Not** app/user auth — §9's "Authentication / auth → wrap checkpoint" stance is
+  unchanged. This is *peer* (agent↔agent) identity on the networked transport only.
+
+**Sketch:** a `baresign`-style helper (~50 LOC) — `sign(body, privKey) → header`,
+`verify(body, header) → principal | null` — wired as middleware on `serve` and as
+a header on outbound JSON-RPC. Could ship as an optional submodule or sibling
+package rather than core, mirroring how bareguard keeps its hash-chain a POC/flag.
