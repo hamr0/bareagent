@@ -68,5 +68,5 @@ node --test test/e2e.test.js                # E2E composition tests
 
 **Open-source only.** No vendor lock-in. Every line of code must have a purpose -- no speculative code, no premature abstractions.
 
-For full development and testing standards, see `/home/hamr/Documents/PycharmProjects/gitdone/.claude/memory/AGENT_RULES.md`.
+For full development and testing standards, see `.claude/memory/AGENT_RULES.md`.
 For detailed docs, see `docs/KNOWLEDGE_BASE.md`.
