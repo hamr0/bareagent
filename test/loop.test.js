@@ -860,4 +860,51 @@ describe('Loop', () => {
       assert.equal(reply, 'yes');
     });
   });
+
+  describe('Checkpoint approval (fail-closed)', () => {
+    const { Checkpoint } = require('../src/checkpoint');
+
+    // One tool call to `danger`, then a final text turn. `executed` flips iff the
+    // tool actually ran past the checkpoint gate.
+    function dangerSetup(reply) {
+      let executed = false;
+      const tool = { name: 'danger', execute: async () => { executed = true; return 'ran'; } };
+      const provider = {
+        _n: 0,
+        async generate() {
+          this._n++;
+          return this._n === 1
+            ? { text: '', toolCalls: [{ id: 't1', name: 'danger', arguments: {} }], usage: {} }
+            : { text: 'final', toolCalls: [], usage: {} };
+        },
+      };
+      const cp = new Checkpoint({ tools: ['danger'], send: async () => {}, waitForReply: async () => reply, timeout: 0 });
+      return { tool, provider, cp, ran: () => executed };
+    }
+
+    for (const reply of ['yes', 'y', 'YES', ' approve ']) {
+      it(`approves on explicit affirmative ${JSON.stringify(reply)}`, async () => {
+        const s = dangerSetup(reply);
+        await new Loop({ provider: s.provider, checkpoint: s.cp }).run([{ role: 'user', content: 'go' }], [s.tool]);
+        assert.equal(s.ran(), true);
+      });
+    }
+
+    for (const reply of ['no', 'n', 'denied', 'reject', 'wait', '', null]) {
+      it(`denies on non-affirmative ${JSON.stringify(reply)}`, async () => {
+        const s = dangerSetup(reply);
+        await new Loop({ provider: s.provider, checkpoint: s.cp }).run([{ role: 'user', content: 'go' }], [s.tool]);
+        assert.equal(s.ran(), false);
+      });
+    }
+
+    it('a non-string reply denies without throwing out of run()', async () => {
+      const s = dangerSetup({ weird: 1 });
+      // throwOnError:true would surface a .toLowerCase() throw if it regressed.
+      const result = await new Loop({ provider: s.provider, checkpoint: s.cp, throwOnError: true })
+        .run([{ role: 'user', content: 'go' }], [s.tool]);
+      assert.equal(s.ran(), false);
+      assert.equal(result.error, null);
+    });
+  });
 });

@@ -279,7 +279,13 @@ class Loop {
             continue;
           }
           this._safeEmit({ type: 'checkpoint:reply', data: { reply } });
-          if (!reply || reply.toLowerCase() === 'no' || reply.toLowerCase() === 'n') {
+          // Fail-closed: approve ONLY on an explicit affirmative. Any other reply —
+          // an unrecognized string ("denied", "wait"), empty, or a non-string — denies.
+          // A human approval gate must never approve on ambiguous input, and reading
+          // .toLowerCase() off a non-string here used to throw out of run().
+          const approved = typeof reply === 'string'
+            && ['yes', 'y', 'approve', 'approved'].includes(reply.trim().toLowerCase());
+          if (!approved) {
             msgs.push({ role: 'tool', tool_call_id: tc.id, content: 'User denied this action.' });
             continue;
           }

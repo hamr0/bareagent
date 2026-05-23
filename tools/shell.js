@@ -91,9 +91,37 @@ async function* walk(dir, recursive) {
   }
 }
 
+// Conservative ReDoS guard. Rejects the classic catastrophic-backtracking shape:
+// a quantifier (* + {n,}) applied to a group whose body itself contains an
+// unbounded quantifier — e.g. (a+)+, (a*)*, (.+)* . JS RegExp has no execution
+// timeout, and grep runs the pattern against attacker-influenceable file content
+// on the main thread, so one such pattern blocks the whole event loop. Errs toward
+// rejection; the agent simply rephrases. (Single-level nesting only — does not
+// detect deeply nested groups or overlapping alternation like (a|a)*.)
+const UNBOUNDED_QUANT = /[*+]|\{\d+,\}/;
+function looksCatastrophic(pattern) {
+  // A quantifier binds to the atom immediately before it — no whitespace between
+  // `)` and the quantifier in a real regex.
+  const groupQuant = /\(([^()]*)\)(?:[*+]|\{\d+,\})/g;
+  let m;
+  while ((m = groupQuant.exec(pattern)) !== null) {
+    // Drop escaped literals (\+ \* \{ …) so a group like (\+)+ — one-or-more
+    // literal plus signs, which is linear — isn't mistaken for a nested quantifier.
+    const body = m[1].replace(/\\./g, '');
+    if (UNBOUNDED_QUANT.test(body)) return true;
+  }
+  return false;
+}
+
 async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i' }) {
   const resolved = path.resolve(expandHome(rawPath));
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
+  if (looksCatastrophic(pattern)) {
+    throw new Error(
+      `shell_grep: pattern rejected — nested unbounded quantifier (e.g. "(a+)+") risks catastrophic ` +
+      `backtracking that would block the process. Simplify the regex.`,
+    );
+  }
   let re;
   try {
     re = new RegExp(pattern, flags);

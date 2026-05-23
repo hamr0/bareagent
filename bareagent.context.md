@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.10.4 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.11.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -175,7 +175,11 @@ env-vars `BAREGUARD_AUDIT_PATH`, `BAREGUARD_PARENT_RUN_ID`,
 `BAREGUARD_BUDGET_FILE`, `BAREGUARD_SPAWN_DEPTH+1` are threaded
 automatically. Child stderr is captured and re-emitted as
 `{type: 'child:stderr', text, ts}` events on the parent's stream — one
-JSONL channel per child, no two-stream split.
+JSONL channel per child, no two-stream split. **The child config must
+declare a `gate` block (v0.11.0)** — `bin/cli.js` refuses a gate-less
+config (`exit 1`) rather than run a child with no policy/budget/depth
+limits, since the parent gate only sees the config *path*, not its
+contents. Set `"ungoverned": true` in the config to explicitly opt out.
 
 **`defer({ action, when })`** — append a JSONL record to the queue file
 (default `./bareagent-defers.jsonl`, override `BAREAGENT_DEFER_QUEUE`).
@@ -239,6 +243,13 @@ Bareguard governs both forms, with one quirk for metaTools: it sees
 invoked tool name lives in `args.name`. To deny specific MCP tools when
 using metaTools, use `tools.denyArgPatterns: { mcp_invoke: [/"name":"linear_admin_/] }`
 or `content.denyPatterns` over the serialized action.
+
+**Vetting server commands (v0.11.0).** Connecting to a server runs its
+`command`, and discovery reads `.mcp.json` from the cwd (an untrusted
+repo) as well as your home/IDE configs. Pass `confirmServer(name, def)
+=> boolean` to `createMCPBridge` to approve each server **before its
+command is spawned** (return `false` to skip it; a throw fails closed).
+Default trusts all discovered servers — unchanged behavior.
 
 ## Wiring with bareguard
 
@@ -383,6 +394,8 @@ const loop = new Loop({ provider, checkpoint });
 
 Set `timeout: 0` to opt out and keep the old "hang forever" behaviour.
 
+**Approval is fail-closed (v0.11.0).** The Loop proceeds **only** when `waitForReply` resolves to an explicit affirmative — `"yes"`, `"y"`, `"approve"`, or `"approved"` (trimmed, case-insensitive). Every other reply denies, including unrecognized strings (`"ok"`, `"sure"`, `"denied"`), empty, and non-strings. Wire your transport to return one of the affirmatives on approval; before v0.11 any non-`"no"` reply was treated as approval.
+
 ### Unified error surfacing — three hooks, one principle
 
 *No silent failures.* Every previously-silent failure path in bareagent now routes through one of three operator hooks:
@@ -524,6 +537,8 @@ new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 
 All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens).
 
+**Error body (v0.11.0):** on an HTTP error the OpenAI/Anthropic/Ollama providers throw a `ProviderError` whose `message` carries the upstream error string. The full parsed response is **not** attached to `err.body` by default (so an unexpected field can't leak through logs that dump the error object). Pass `{ exposeErrorBody: true }` to attach it for debugging.
+
 **Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. Pricing covers OpenAI and Anthropic models; unknown models use a default average. To adjust rates, edit `COST_PER_1K` at the top of `src/loop.js`.
 
 ## Store options
@@ -537,6 +552,8 @@ new JsonFile({ path: './memory.json' })
 
 // Custom — implement { store, search, get, delete }
 ```
+
+**JsonFile scaling:** `search()` is an O(n) substring scan (no index) and every `store()`/`delete()` rewrites the whole file. Fine for hundreds–low-thousands of entries; for larger or write-heavy memory use `SQLite` (FTS5 index, incremental writes). JsonFile warns once past ~10k entries.
 
 ## Tool format
 

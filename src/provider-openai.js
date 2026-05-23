@@ -5,10 +5,22 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 
 class OpenAIProvider {
+  /**
+   * @param {object} [options]
+   * @param {string} [options.apiKey]
+   * @param {string} [options.model='gpt-4o-mini']
+   * @param {string} [options.baseUrl='https://api.openai.com/v1']
+   * @param {boolean} [options.exposeErrorBody=false] - Attach the full upstream
+   *   response to `err.body` on HTTP errors. Off by default so an unexpected
+   *   field in an error payload can't leak through logs that dump the error
+   *   object; `err.message` still carries the API's error message. Turn on for
+   *   debugging only.
+   */
   constructor(options = {}) {
     this.apiKey = options.apiKey?.trim();
     this.model = options.model || 'gpt-4o-mini';
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
+    this.exposeErrorBody = options.exposeErrorBody === true;
   }
 
   /**
@@ -73,7 +85,7 @@ class OpenAIProvider {
             if (res.statusCode >= 400) {
               return reject(new ProviderError(
                 `[OpenAIProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: parsed }
+                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
               ));
             }
             resolve(parsed);

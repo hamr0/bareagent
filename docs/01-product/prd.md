@@ -286,6 +286,8 @@ Configuration:
 Integration with Loop:
   Loop checks checkpoint.shouldAsk() before each tool call.
   If true: calls checkpoint.ask(), waits for reply, then proceeds or aborts.
+  Fail-closed: proceeds ONLY on an explicit affirmative reply; any other
+  reply (unrecognized, empty, non-string) aborts the tool call.
   State machine transitions to 'waiting_for_input' during the pause.
 ```
 

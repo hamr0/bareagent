@@ -4,11 +4,36 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
-Docs-only. No `src/` change. Not published.
+## [0.11.0] — 2026-05-23
+
+**Security hardening pass.** A `/security` audit + empirical stress-testing (each finding reproduced against the real code with mock providers, then re-verified after the fix) surfaced one governance-bypass plus a spread of fail-open defaults. All are now fail-closed. Three carry an intentional, consumer-visible behavior change — see **Changed** — each with an explicit opt-out. Full non-`src` regression suite green (324 tests).
+
+### Security
+
+- **`bin/cli.js` — config-mode is now fail-closed without a gate.** Previously a config with no `gate` block ran with `policy=null` — no allowlist, budget, depth, or rate limits — and the LLM-callable `spawn` tool only ever passes the parent gate a *path string*, so a gate-less child config silently escaped all governance (and recursive `spawn` was unbounded, since `maxDepth` is only enforced by a wired Gate). The CLI now refuses such a config (`exit 1`). The prior `cfg.gate`-set-but-wiring-failed fail-closed (0.10.3) only covered the case where a gate was *declared*; this closes the no-gate case it left open. Opt out with `"ungoverned": true`.
+- **`bin/cli.js` — `gate.humanChannel` string is confined to the config directory.** A string `humanChannel` is `require()`d; the resolved path is now rejected if it escapes the config dir (e.g. `"../../evil.js"`), so a JSON config (data) can no longer load arbitrary code that would execute *outside* the gate.
+- **`src/loop.js` — Checkpoint approval is fail-closed.** The human-approval gate previously denied only on empty / `"no"` / `"n"` and **approved every other reply** — including `"denied"`, `"wait"`, or a non-string (which threw `.toLowerCase()` out of `run()`). It now proceeds **only** on an explicit affirmative (`yes`/`y`/`approve`/`approved`, trimmed, case-insensitive); anything else denies.
+- **`src/provider-*.js` — upstream error body no longer attached by default.** On HTTP errors providers attached the full parsed response to `err.body`, so an unexpected field could leak through logs that dump the error object. `err.body` is now `undefined` by default (the API's error message still rides on `err.message`). Re-enable for debugging with `new XProvider({ exposeErrorBody: true })`.
+- **`tools/shell.js` — `shell_grep` rejects catastrophic-backtracking patterns.** JS `RegExp` has no execution timeout and grep runs the pattern over file content on the main thread, so a nested-unbounded-quantifier pattern (e.g. `(a+)+`) would block the whole event loop. Such patterns are now rejected before compilation (escaped literals like `(\+)+` are correctly exempted).
+- **`src/mcp-bridge.js` — opt-in `confirmServer` vetting.** Connecting to an MCP server runs its `command`, and discovery reads configs from the cwd (a `.mcp.json` in an untrusted repo) as well as home/IDE configs. Pass `confirmServer(name, def) => boolean` to vet each server **before its command is spawned**; a throw fails closed. Default is unchanged (all discovered servers trusted) — flipping it would break the bridge's core discover-and-connect behavior.
+
+### Changed
+
+- **CLI config-mode requires a `gate`.** A config with no `gate` is refused; set `"ungoverned": true` to explicitly run without governance (warns on stderr). Existing configs that already declare a gate (e.g. `examples/orchestrator/`) are unaffected.
+- **Checkpoint approves only on an explicit affirmative.** Transports whose `waitForReply` returned a non-`yes` affirmative (e.g. `"ok"`, `"sure"`) now read as a deny — return `"yes"`/`"y"`/`"approve"`.
+- **Provider `err.body` is omitted by default** — pass `exposeErrorBody: true` to restore the pre-0.11 behavior.
 
 ### Added
 
-- **PRD §17 "Future / Deferred Features" + §17.1 "Lightweight inter-agent message signing (signed A2A)."** Establishes the future-features home in the PRD and parks zero-infra Ed25519 sign/verify of the canonical A2A request body (no CA, no Hydra, no token introspection) as a *deferred — YAGNI until bare-agent talks to external peers* feature. Documents where it comes from ([bindu](https://github.com/GetBindu/bindu)'s `X-DID-Signature` slice of its mTLS + OAuth2 + DID stack — we'd borrow only the signature layer, rejecting the infra), what it covers (peer authentication + message integrity for A2A over §5.3's transport), and what it explicitly does not (not confidentiality/TLS, not authorization — that stays in bareguard, which authorizes the action not the actor; not app/user auth — §9's stance is unchanged). Cross-references bareguard's `docs/identity-and-the-gate.md`.
+- **`createMCPBridge({ confirmServer })`** — see Security above.
+- **Provider `{ exposeErrorBody }` option** (OpenAI / Anthropic / Ollama).
+- **CLI `"ungoverned": true`** config flag — explicit opt-out of the new fail-closed gate requirement.
+
+### Documentation
+
+- **`src/store-jsonfile.js`** — documented the scaling ceiling (O(n) substring scan + whole-file rewrite per write) in the class JSDoc, pointing write-heavy / large-memory users at `SQLiteStore`; added a one-time runtime warning past 10k entries.
+- **PRD §17 "Future / Deferred Features" + §17.1 "Lightweight inter-agent message signing (signed A2A)."** (previously unreleased) Parks zero-infra Ed25519 sign/verify of the canonical A2A request body as a *deferred — YAGNI until bare-agent talks to external peers* feature. Borrows only the `X-DID-Signature` slice of [bindu](https://github.com/GetBindu/bindu)'s mTLS + OAuth2 + DID stack (rejecting the infra): peer authentication + message integrity for A2A over §5.3's transport — explicitly **not** confidentiality/TLS, **not** authorization (that stays in bareguard, which authorizes the action not the actor), **not** app/user auth (§9 unchanged). Cross-references bareguard's `docs/identity-and-the-gate.md`.
+- **`bareagent.context.md`** — documented the fail-closed Checkpoint approval, CLI gate requirement, `exposeErrorBody`, and `confirmServer`.
 
 ## [0.10.4] — 2026-05-19
 

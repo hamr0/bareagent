@@ -96,6 +96,20 @@ describe('JsonFileStore', () => {
     assert.equal(store.get(id), null);
   });
 
+  it('warns once about scaling past the large-store threshold', () => {
+    const store = new JsonFileStore({ path: join(dir, 'big.json') });
+    const orig = console.warn;
+    const warnings = [];
+    console.warn = (...a) => warnings.push(a.join(' '));
+    try {
+      for (let i = 0; i < 10002; i++) store.store(`x${i}`);
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(warnings.length, 1, 'should warn exactly once');
+    assert.match(warnings[0], /SQLiteStore/);
+  });
+
   it('persists across instances', () => {
     const path = join(dir, 'mem.json');
     const store1 = new JsonFileStore({ path });

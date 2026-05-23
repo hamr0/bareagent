@@ -380,4 +380,42 @@ describe('createMCPBridge', () => {
       await b2.close();
     }
   });
+
+  it('confirmServer:false skips a server (command never spawned, no tools)', async () => {
+    const seen = [];
+    const bridge = await createMCPBridge({
+      configPaths: [configPath], bridgePath, timeout: 5000,
+      confirmServer: (name, def) => { seen.push({ name, hasCommand: !!def.command }); return false; },
+    });
+    try {
+      assert.deepEqual(seen, [{ name: 'mock', hasCommand: true }], 'hook gets name + def before spawn');
+      assert.equal(bridge.tools.length, 0, 'denied server contributes no tools');
+      assert.deepEqual(bridge.servers, [], 'denied server is not connected');
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it('confirmServer:true preserves normal discovery', async () => {
+    const bridge = await freshBridge({
+      configPaths: [configPath], bridgePath, timeout: 5000, confirmServer: () => true,
+    });
+    try {
+      assert.ok(bridge.tools.length > 0, 'approved server connects as usual');
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it('a throwing confirmServer fails closed (server skipped)', async () => {
+    const bridge = await createMCPBridge({
+      configPaths: [configPath], bridgePath, timeout: 5000,
+      confirmServer: () => { throw new Error('vet error'); },
+    });
+    try {
+      assert.equal(bridge.tools.length, 0, 'a throw must deny, not allow');
+    } finally {
+      await bridge.close();
+    }
+  });
 });

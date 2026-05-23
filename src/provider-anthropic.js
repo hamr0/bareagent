@@ -8,12 +8,15 @@ class AnthropicProvider {
    * @param {object} options
    * @param {string} options.apiKey - Anthropic API key (required).
    * @param {string} [options.model='claude-haiku-4-5-20251001'] - Model ID.
+   * @param {boolean} [options.exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
    * @throws {Error} `[AnthropicProvider] requires apiKey` — when apiKey is missing.
    */
   constructor(options = {}) {
     if (!options.apiKey) throw new Error('[AnthropicProvider] requires apiKey');
     this.apiKey = options.apiKey.trim();
     this.model = options.model || 'claude-haiku-4-5-20251001';
+    // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
+    this.exposeErrorBody = options.exposeErrorBody === true;
   }
 
   /**
@@ -126,7 +129,7 @@ class AnthropicProvider {
             if (res.statusCode >= 400) {
               return reject(new ProviderError(
                 `[AnthropicProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: parsed }
+                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
               ));
             }
             resolve(parsed);

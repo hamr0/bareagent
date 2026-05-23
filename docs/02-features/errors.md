@@ -139,7 +139,7 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 
 | Error | When | Fix |
 |-------|------|-----|
-| `[OpenAIProvider] HTTP NNN` / `[OpenAIProvider] <api message>` | OpenAI API returned a 4xx/5xx response | Check API key, model name, rate limits. Error has `.status` and `.body` properties |
+| `[OpenAIProvider] HTTP NNN` / `[OpenAIProvider] <api message>` | OpenAI API returned a 4xx/5xx response | Check API key, model name, rate limits. Error has a `.status`; the API message rides on `.message`. The full response body is attached to `.body` only when the provider is constructed with `{ exposeErrorBody: true }` (off by default since v0.11.0). |
 | `[OpenAIProvider] Invalid JSON response` | Response body is not valid JSON | Likely a network issue or proxy interference. Includes first 200 chars of the response |
 
 ## AnthropicProvider
@@ -147,7 +147,7 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 | Error | When | Fix |
 |-------|------|-----|
 | `[AnthropicProvider] requires apiKey` | `new AnthropicProvider()` called without `apiKey` | Pass your API key: `new AnthropicProvider({ apiKey })` |
-| `[AnthropicProvider] HTTP NNN` / `[AnthropicProvider] <api message>` | Anthropic API returned a 4xx/5xx response | Check API key, model name, rate limits. Error has `.status` and `.body` properties |
+| `[AnthropicProvider] HTTP NNN` / `[AnthropicProvider] <api message>` | Anthropic API returned a 4xx/5xx response | Check API key, model name, rate limits. Error has a `.status`; the API message rides on `.message`. The full response body is attached to `.body` only when the provider is constructed with `{ exposeErrorBody: true }` (off by default since v0.11.0). |
 | `[AnthropicProvider] Invalid JSON response` | Response body is not valid JSON | Likely a network issue. Includes first 200 chars of the response |
 
 ## OllamaProvider

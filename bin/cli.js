@@ -23,7 +23,9 @@
  *        "provider":      "openai" | "anthropic" | "ollama",
  *        "model":         "gpt-4o-mini" (etc),
  *        "tools":         ["shell_read", "shell_grep", "spawn", "defer", ...],
- *        "gate":          { ...bareguard config; humanChannel headless-defaults to deny }
+ *        "gate":          { ...bareguard config; humanChannel headless-defaults to deny },
+ *        "ungoverned":    false  // omit/false ⇒ a config with no `gate` is refused;
+ *                                // set true to explicitly run without governance (not recommended)
  *      }
  */
 
@@ -81,7 +83,16 @@ async function runConfigMode(cfgPath) {
       let humanChannel = cfg.gate.humanChannel;
       if (typeof humanChannel === 'string') {
         // Allow `humanChannel: "./my-channel.js"` — load from a file relative to config.
-        const fnPath = path.resolve(path.dirname(cfgPath), humanChannel);
+        // Confine the resolved path to the config directory: a JSON config (data)
+        // must not be able to require() arbitrary code elsewhere on disk (e.g.
+        // "../../evil.js"), which would execute outside the gate.
+        const cfgDir = path.resolve(path.dirname(cfgPath));
+        const fnPath = path.resolve(cfgDir, humanChannel);
+        if (fnPath !== cfgDir && !fnPath.startsWith(cfgDir + path.sep)) {
+          throw new Error(
+            `gate.humanChannel must resolve inside the config directory (${cfgDir}); refusing to load ${fnPath}`,
+          );
+        }
         humanChannel = require(fnPath);
       }
       if (typeof humanChannel !== 'function') {
@@ -106,6 +117,23 @@ async function runConfigMode(cfgPath) {
       process.stderr.write(`[cli] failed to wire bareguard: ${err.message}. Refusing to run ungoverned (cfg.gate set).\n`);
       process.exit(1);
     }
+  } else if (cfg.ungoverned === true) {
+    // Explicit opt-out. A config-driven / spawned agent runs with no policy,
+    // budget, depth, or rate limits — every configured tool executes unchecked.
+    process.stderr.write(
+      '[cli] WARNING: running UNGOVERNED (cfg.ungoverned=true) — no policy/budget/depth/rate limits. ' +
+      'All configured tools run unchecked.\n',
+    );
+  } else {
+    // Fail-closed: a config with no `gate` is rejected rather than silently run
+    // ungoverned. This is the path the LLM-callable `spawn` tool drives — without
+    // it, a gate-less child config bypasses all governance (and recursive spawn is
+    // unbounded, since maxDepth is only enforced by a wired Gate).
+    process.stderr.write(
+      '[cli] refusing to run: config has no `gate` block. A config-driven / spawned agent must be governed.\n' +
+      '      Add a bareguard `gate` config, or set `"ungoverned": true` to explicitly opt out (not recommended).\n',
+    );
+    process.exit(1);
   }
 
   // Read ONE input record from stdin (JSON or raw string). Treat blank stdin

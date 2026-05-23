@@ -431,6 +431,13 @@ function buildMetaTools(tools, discoveredAt) {
  * @param {string[]} [opts.servers] - Limit to these server names.
  * @param {number} [opts.timeout=15000] - Per-server init timeout in ms.
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
+ * @param {(name: string, def: object) => boolean | Promise<boolean>} [opts.confirmServer]
+ *   Vet each discovered server BEFORE its `command` is spawned. Connecting to an
+ *   MCP server runs its command, and discovery reads configs from the cwd (a
+ *   `.mcp.json` in an untrusted repo) as well as the user's home/IDE configs.
+ *   Return false to skip a server (its command is never executed). A throw is
+ *   treated as a deny (fail-closed). Default: every discovered server is trusted
+ *   (unchanged behavior) — pass this to gate command execution.
  * @returns {Promise<{tools: Array, metaTools: Array, servers: string[], systemContext: string, denied: Array, close: Function}>}
  */
 async function createMCPBridge(opts = {}) {
@@ -443,6 +450,15 @@ async function createMCPBridge(opts = {}) {
   }
   const bridgePath = opts.bridgePath || DEFAULT_BRIDGE_PATH();
   const timeout = opts.timeout || 15000;
+
+  // Vet a server before spawning its command. Fail-closed: an undefined hook
+  // trusts all (unchanged behavior); a throw denies.
+  const confirmServer = typeof opts.confirmServer === 'function' ? opts.confirmServer : null;
+  const vetServer = async (name, def) => {
+    if (!confirmServer) return true;
+    try { return (await confirmServer(name, def)) === true; }
+    catch { return false; }
+  };
 
   let config = readBridgeConfig(bridgePath);
   const needsRefresh = opts.refresh || !config || isExpired(config);
@@ -469,6 +485,9 @@ async function createMCPBridge(opts = {}) {
 
       await Promise.all(toDiscover.map(async ([name, def]) => {
         try {
+          // Denied by confirmServer: skip silently — this is the caller's own
+          // decision, not a connection failure, so it must not land in `errors`.
+          if (!(await vetServer(name, def))) return;
           const result = await connectAndListTools(name, def, timeout);
           freshTools.set(name, result.mcpTools);
           connectResults.set(name, result.client);
@@ -525,6 +544,8 @@ async function createMCPBridge(opts = {}) {
       .map(([t]) => t);
 
     try {
+      // Denied by confirmServer: skip silently (the caller's decision, not a failure).
+      if (!(await vetServer(name, serverConf))) return;
       const { mcpTools, client } = await connectAndListTools(name, serverConf, timeout);
 
       // Only wrap tools that are allowed in config

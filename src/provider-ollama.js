@@ -7,6 +7,8 @@ class OllamaProvider {
   constructor(options = {}) {
     this.model = options.model || 'llama3.2';
     this.url = options.url || 'http://localhost:11434';
+    // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
+    this.exposeErrorBody = options.exposeErrorBody === true;
   }
 
   /**
@@ -70,7 +72,7 @@ class OllamaProvider {
             if (res.statusCode >= 400) {
               return reject(new ProviderError(
                 `[OllamaProvider] ${parsed.error || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: parsed }
+                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
               ));
             }
             resolve(parsed);

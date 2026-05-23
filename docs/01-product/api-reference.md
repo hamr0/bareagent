@@ -148,6 +148,8 @@ new Checkpoint({
 
 **ask(question, context) -> string | null**
 
+Approval is **fail-closed** (v0.11.0): the Loop runs a gated tool only when `waitForReply` resolves to an explicit affirmative — `yes`/`y`/`approve`/`approved` (trimmed, case-insensitive). Any other reply (unrecognized string, empty, or non-string) denies.
+
 ---
 
 ## Memory
@@ -216,6 +218,8 @@ new Stream({
 
 All implement: `generate(messages, tools, options) -> { text, toolCalls, usage }`
 
+OpenAI / Anthropic / Ollama also accept `{ exposeErrorBody: true }` — attach the full upstream response to `err.body` on HTTP errors (off by default since v0.11.0; the API message is always on `err.message`).
+
 ### OpenAI
 
 ```javascript
@@ -269,7 +273,7 @@ const { JsonFile } = require('bare-agent/stores');
 new JsonFile({ path: './memory.json' })
 ```
 
-Zero deps. Case-insensitive substring search. Score always 1.
+Zero deps. Case-insensitive substring search. Score always 1. O(n) scan + whole-file rewrite per write — fine for hundreds–low-thousands of entries; use SQLiteStore for larger/write-heavy memory (warns once past ~10k entries).
 
 ### Custom Store
 
@@ -294,3 +298,5 @@ echo '{"method":"run","params":{"goal":"What is 2+2?"}}' | \
 Input: JSONL on stdin. `params.goal` (string) or `params.messages` (array).
 Output: JSONL events on stdout. Read until `loop:done` or `loop:error`.
 API keys from env vars: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
+
+**Config mode** (`--config <path>`, used by the `spawn` tool) loads a JSON specialist definition `{ systemPrompt, provider, model, tools, gate }`. Since v0.11.0 the config **must** declare a `gate` block — a gate-less config is refused (`exit 1`) rather than run with no policy/budget/depth limits. Set `"ungoverned": true` to explicitly opt out (warns on stderr).

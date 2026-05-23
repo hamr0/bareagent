@@ -142,6 +142,35 @@ describe('createShellTools', () => {
         /invalid regex/
       );
     });
+
+    it('rejects catastrophic-backtracking patterns instead of hanging', async () => {
+      const { tools } = createShellTools();
+      // Input that would force exponential backtracking on a nested-quantifier
+      // regex. The guard must reject the pattern fast (no event-loop block).
+      const f = path.join(TMP, 'redos.txt');
+      fs.writeFileSync(f, 'a'.repeat(60) + '!');
+      for (const evil of ['(a+)+$', '(a*)*b', '(.+)*x', '(\\d+)+$']) {
+        const t0 = Date.now();
+        await assert.rejects(
+          () => findTool(tools, 'shell_grep').execute({ pattern: evil, path: f, flags: '' }),
+          /catastrophic backtracking/,
+          `expected ${evil} to be rejected`,
+        );
+        assert.ok(Date.now() - t0 < 1000, `${evil} should reject fast, took ${Date.now() - t0}ms`);
+      }
+    });
+
+    it('still accepts safe quantified patterns', async () => {
+      const { tools } = createShellTools();
+      const f = path.join(TMP, 'safe.txt');
+      fs.writeFileSync(f, 'foo123\nbar\n(abc)+ literal');
+      // single quantifiers, quantified groups with no inner quantifier, and groups
+      // whose only inner "quantifier" is an escaped literal (e.g. (\+)+) are all fine
+      for (const ok of ['foo\\d+', '(abc)+', '[a-z]+', 'ba.*', '(\\+)+']) {
+        const r = await findTool(tools, 'shell_grep').execute({ pattern: ok, path: f, flags: '' });
+        assert.ok(Array.isArray(r.hits), `${ok} should run`);
+      }
+    });
   });
 
   describe('shell_exec', () => {
