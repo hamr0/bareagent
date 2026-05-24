@@ -15,6 +15,12 @@ const { AnthropicProvider } = require('../src/provider-anthropic');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+// SQLiteStore is an optional backend that requires better-sqlite3 (not a
+// declared dependency). Skip its suite when the driver isn't installed
+// (e.g. a minimal CI install) — mirrors the API-key-gated suites below.
+let SQLITE_AVAILABLE = true;
+try { require('better-sqlite3'); } catch { SQLITE_AVAILABLE = false; }
+
 // Chunks simulating a multi-turn agent session
 const CHUNKS = [
   { content: 'User asked about flights to Berlin. Found 3 options: Lufthansa €340, Ryanair €89, EasyJet €120.', metadata: { type: 'task', source: 'flight_search' } },
@@ -25,7 +31,7 @@ const CHUNKS = [
   { content: 'Budget for the trip is maximum €800 total including flights, hotel, and food.', metadata: { type: 'preference', source: 'conversation' } },
 ];
 
-describe('Memory + SQLiteStore integration', () => {
+describe('Memory + SQLiteStore integration', { skip: SQLITE_AVAILABLE ? false : 'better-sqlite3 not installed (optional backend)' }, () => {
   let dir, memory;
 
   beforeEach(() => {
