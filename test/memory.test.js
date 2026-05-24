@@ -9,6 +9,11 @@ const { Memory } = require('../src/memory');
 const { JsonFileStore } = require('../src/store-jsonfile');
 const { SQLiteStore } = require('../src/store-sqlite');
 
+// SQLiteStore needs the optional better-sqlite3 driver (not a declared
+// dependency). Skip its suite when the driver is absent (e.g. minimal CI).
+let SQLITE_AVAILABLE = true;
+try { require('better-sqlite3'); } catch { SQLITE_AVAILABLE = false; }
+
 // --- Memory (wrapper) ---
 
 describe('Memory', () => {
@@ -129,7 +134,7 @@ describe('JsonFileStore', () => {
 
 // --- SQLiteStore ---
 
-describe('SQLiteStore', () => {
+describe('SQLiteStore', { skip: SQLITE_AVAILABLE ? false : 'better-sqlite3 not installed (optional backend)' }, () => {
   let dir;
   let store;
 
