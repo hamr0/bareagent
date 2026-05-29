@@ -43,7 +43,7 @@ fi
 # Reconstruct status by folding all lines per id (latest wins) and filter
 # to records whose `when` <= now AND status == "pending". One JSON object
 # per output line.
-PENDING=$(jq -c '
+PENDING=$(jq -n -c '
   reduce inputs as $r ({};
     .[$r.id] |= (. // {}) + $r
   )

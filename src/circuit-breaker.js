@@ -2,27 +2,42 @@
 
 const { CircuitOpenError } = require('./errors');
 
+/**
+ * @typedef {'closed'|'open'|'half-open'} CircuitState
+ * @typedef {{ state: CircuitState, failures: number, openedAt: number, generation: number }} CircuitEntry
+ */
+
 class CircuitBreaker {
   /**
    * @param {object} [options={}]
    * @param {number} [options.threshold=5] - Failures before opening.
    * @param {number} [options.resetAfter=60000] - Ms before half-open probe.
-   * @param {function} [options.onStateChange] - Callback(key, from, to).
+   * @param {((key: string, from: CircuitState, to: CircuitState) => void)} [options.onStateChange] - Callback(key, from, to).
    */
   constructor(options = {}) {
     this.threshold = options.threshold || 5;
     this.resetAfter = options.resetAfter || 60000;
     this.onStateChange = options.onStateChange || null;
+    /** @type {Map<string, CircuitEntry>} */
     this._keys = new Map();
   }
 
+  /**
+   * @param {string} key
+   * @returns {CircuitEntry}
+   */
   _getEntry(key) {
     if (!this._keys.has(key)) {
       this._keys.set(key, { state: 'closed', failures: 0, openedAt: 0, generation: 0 });
     }
-    return this._keys.get(key);
+    return /** @type {CircuitEntry} */ (this._keys.get(key));
   }
 
+  /**
+   * @param {CircuitEntry} entry
+   * @param {string} key
+   * @param {CircuitState} newState
+   */
   _setState(entry, key, newState) {
     const from = entry.state;
     if (from === newState) return;
@@ -98,12 +113,13 @@ class CircuitBreaker {
 
   /**
    * Wrap a provider so generate() goes through the circuit breaker.
-   * @param {object} provider - Provider with generate().
+   * @param {{ generate: (...args: any[]) => Promise<any> }} provider - Provider with generate().
    * @param {string} [key] - Circuit key.
-   * @returns {object} Wrapped provider with generate().
+   * @returns {{ generate: (...args: any[]) => Promise<any> }} Wrapped provider with generate().
    */
   wrapProvider(provider, key) {
     return {
+      /** @param {...any} args */
       generate: (...args) => this.call(() => provider.generate(...args), key),
     };
   }

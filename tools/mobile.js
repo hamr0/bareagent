@@ -1,5 +1,13 @@
 'use strict';
 
+/** @typedef {import('../types').ToolDef} ToolDef */
+
+/**
+ * A connected baremobile page/device handle. baremobile ships no types, so the
+ * surface used here is described structurally; all calls resolve to `any`.
+ * @typedef {any} MobilePage
+ */
+
 /**
  * Creates mobile control tools via baremobile (optional dep).
  * Returns { tools, close } or null if baremobile is not installed.
@@ -12,14 +20,16 @@
  * @param {string} [opts.platform] - 'android' (default) or 'ios'
  * @param {string} [opts.device] - Device serial or 'auto'
  * @param {boolean} [opts.termux] - Use Termux ADB on-device mode
- * @returns {Promise<{tools: Array, close: Function}|null>}
+ * @returns {Promise<{tools: ToolDef[], close: Function}|null>}
  */
 async function createMobileTools(opts = {}) {
   const platform = opts.platform || 'android';
 
+  /** @type {(opts: object) => Promise<MobilePage>} */
   let connectFn;
   try {
     if (platform === 'ios') {
+      // baremobile/ios is declared as an ambient `any` module in types/shims.d.ts.
       ({ connect: connectFn } = await import('baremobile/ios'));
     } else {
       ({ connect: connectFn } = await import('baremobile'));
@@ -31,6 +41,7 @@ async function createMobileTools(opts = {}) {
   const SETTLE_MS = 1000;
   const settle = () => new Promise((r) => setTimeout(r, SETTLE_MS));
 
+  /** @type {MobilePage|null} */
   let _page = null;
 
   async function getPage() {
@@ -38,6 +49,7 @@ async function createMobileTools(opts = {}) {
     return _page;
   }
 
+  /** @param {(page: MobilePage) => any} fn */
   async function actionAndSnapshot(fn) {
     const page = await getPage();
     await fn(page);
@@ -45,6 +57,7 @@ async function createMobileTools(opts = {}) {
     return await page.snapshot();
   }
 
+  /** @type {ToolDef[]} */
   const tools = [
     {
       name: 'mobile_snapshot',
@@ -65,7 +78,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['ref'],
       },
-      execute: async ({ ref }) => actionAndSnapshot((page) => page.tap(ref)),
+      execute: async (/** @type {{ ref: number }} */ { ref }) => actionAndSnapshot((page) => page.tap(ref)),
     },
     {
       name: 'mobile_type',
@@ -79,7 +92,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['ref', 'text'],
       },
-      execute: async ({ ref, text, clear }) => actionAndSnapshot((page) => page.type(ref, text, { clear })),
+      execute: async (/** @type {{ ref: number, text: string, clear?: boolean }} */ { ref, text, clear }) => actionAndSnapshot((page) => page.type(ref, text, { clear })),
     },
     {
       name: 'mobile_press',
@@ -91,7 +104,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['key'],
       },
-      execute: async ({ key }) => actionAndSnapshot((page) => page.press(key)),
+      execute: async (/** @type {{ key: string }} */ { key }) => actionAndSnapshot((page) => page.press(key)),
     },
     {
       name: 'mobile_scroll',
@@ -104,7 +117,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['ref', 'direction'],
       },
-      execute: async ({ ref, direction }) => actionAndSnapshot((page) => page.scroll(ref, direction)),
+      execute: async (/** @type {{ ref: number, direction: string }} */ { ref, direction }) => actionAndSnapshot((page) => page.scroll(ref, direction)),
     },
     {
       name: 'mobile_swipe',
@@ -120,7 +133,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['x1', 'y1', 'x2', 'y2'],
       },
-      execute: async ({ x1, y1, x2, y2, duration }) => actionAndSnapshot((page) => page.swipe(x1, y1, x2, y2, duration)),
+      execute: async (/** @type {{ x1: number, y1: number, x2: number, y2: number, duration?: number }} */ { x1, y1, x2, y2, duration }) => actionAndSnapshot((page) => page.swipe(x1, y1, x2, y2, duration)),
     },
     {
       name: 'mobile_long_press',
@@ -132,7 +145,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['ref'],
       },
-      execute: async ({ ref }) => actionAndSnapshot((page) => page.longPress(ref)),
+      execute: async (/** @type {{ ref: number }} */ { ref }) => actionAndSnapshot((page) => page.longPress(ref)),
     },
     {
       name: 'mobile_launch',
@@ -144,7 +157,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['pkg'],
       },
-      execute: async ({ pkg }) => {
+      execute: async (/** @type {{ pkg: string }} */ { pkg }) => {
         const page = await getPage();
         await page.launch(pkg);
         await new Promise((r) => setTimeout(r, 2000));
@@ -184,7 +197,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['x', 'y'],
       },
-      execute: async ({ x, y }) => actionAndSnapshot((page) => page.tapXY(x, y)),
+      execute: async (/** @type {{ x: number, y: number }} */ { x, y }) => actionAndSnapshot((page) => page.tapXY(x, y)),
     },
   ];
 
@@ -202,7 +215,7 @@ async function createMobileTools(opts = {}) {
           },
           required: ['action'],
         },
-        execute: async ({ action, extras }) => actionAndSnapshot((page) => page.intent(action, extras || {})),
+        execute: async (/** @type {{ action: string, extras?: object }} */ { action, extras }) => actionAndSnapshot((page) => page.intent(action, extras || {})),
       },
       {
         name: 'mobile_tap_grid',
@@ -214,7 +227,7 @@ async function createMobileTools(opts = {}) {
           },
           required: ['cell'],
         },
-        execute: async ({ cell }) => actionAndSnapshot((page) => page.tapGrid(cell)),
+        execute: async (/** @type {{ cell: string }} */ { cell }) => actionAndSnapshot((page) => page.tapGrid(cell)),
       },
       {
         name: 'mobile_grid',
@@ -241,7 +254,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['passcode'],
       },
-      execute: async ({ passcode }) => actionAndSnapshot((page) => page.unlock(passcode)),
+      execute: async (/** @type {{ passcode: string }} */ { passcode }) => actionAndSnapshot((page) => page.unlock(passcode)),
     });
   }
 
@@ -256,7 +269,7 @@ async function createMobileTools(opts = {}) {
       },
       required: ['text'],
     },
-    execute: async ({ text }) => {
+    execute: async (/** @type {{ text: string }} */ { text }) => {
       const page = await getPage();
       const ref = page.findByText(text);
       return ref !== null && ref !== undefined ? ref : null;
@@ -276,7 +289,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['text'],
       },
-      execute: async ({ text, timeout }) => {
+      execute: async (/** @type {{ text: string, timeout?: number }} */ { text, timeout }) => {
         const page = await getPage();
         return await page.waitForText(text, timeout || 10000);
       },
@@ -293,7 +306,7 @@ async function createMobileTools(opts = {}) {
         },
         required: ['ref', 'state'],
       },
-      execute: async ({ ref, state, timeout }) => {
+      execute: async (/** @type {{ ref: number, state: string, timeout?: number }} */ { ref, state, timeout }) => {
         const page = await getPage();
         return await page.waitForState(ref, state, timeout || 10000);
       },

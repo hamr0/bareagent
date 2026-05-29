@@ -1,17 +1,48 @@
 'use strict';
 
+/** @typedef {import('./state').StateMachine} StateMachine */
+/** @typedef {import('./retry').Retry} Retry */
+
+/**
+ * @typedef {object} Step
+ * @property {string} id - Unique step identifier.
+ * @property {string} action - Description of the step to execute.
+ * @property {string[]} [dependsOn] - Ids of steps that must complete first.
+ */
+
+/**
+ * @typedef {object} TrackingEntry
+ * @property {Step} step - The (cloned) step being tracked.
+ * @property {string} status - Lifecycle status: pending/running/done/failed.
+ * @property {*} result - Result returned by executeFn on success.
+ * @property {string|undefined} error - Error message on failure.
+ */
+
+/**
+ * @typedef {object} RunPlanOptions
+ * @property {number} [concurrency=Infinity] - Max parallel steps per wave.
+ * @property {StateMachine} [stateMachine] - StateMachine instance for lifecycle tracking.
+ * @property {(step: Step) => void} [onStepStart] - Callback fired when a step begins.
+ * @property {(step: Step, result: any) => void} [onStepDone] - Callback fired on success.
+ * @property {(step: Step, error: Error) => void} [onStepFail] - Callback fired on failure.
+ * @property {(waveNumber: number, steps: Step[]) => void} [onWaveStart] - Callback fired before each wave executes.
+ * @property {Retry} [stepRetry] - Optional Retry instance wrapping each step execution.
+ */
+
+/**
+ * @typedef {object} StepResult
+ * @property {string} id - Step id.
+ * @property {string} status - Final status.
+ * @property {*} [result] - Result value if the step succeeded.
+ * @property {string} [error] - Error message if the step failed.
+ */
+
 /**
  * Execute a step DAG with wave-based parallelism.
- * @param {Array<{id: string, action: string, dependsOn?: string[]}>} steps - Steps from Planner.
- * @param {function} executeFn - Async function called for each step: (step) => result.
- * @param {object} [options={}]
- * @param {number} [options.concurrency=Infinity] - Max parallel steps per wave.
- * @param {object} [options.stateMachine] - StateMachine instance for lifecycle tracking.
- * @param {function} [options.onStepStart] - Callback(step) fired when a step begins.
- * @param {function} [options.onStepDone] - Callback(step, result) fired on success.
- * @param {function} [options.onStepFail] - Callback(step, error) fired on failure.
- * @param {function} [options.onWaveStart] - Callback(waveNumber, steps) fired before each wave executes.
- * @returns {Promise<Array<{id: string, status: string, result?: *, error?: string}>>}
+ * @param {Step[]} steps - Steps from Planner.
+ * @param {(step: Step) => any} executeFn - Async function called for each step: (step) => result.
+ * @param {RunPlanOptions} [options={}]
+ * @returns {Promise<StepResult[]>}
  * @throws {Error} `[runPlan] steps must be a non-empty array` — when steps is not a non-empty array.
  * @throws {Error} `[runPlan] executeFn must be a function` — when executeFn is not a function.
  * @throws {Error} `[runPlan] duplicate step id: "X"` — when two steps share an id.
@@ -26,6 +57,7 @@ async function runPlan(steps, executeFn, options = {}) {
   }
 
   // Build tracking map (don't mutate input)
+  /** @type {Map<string, TrackingEntry>} */
   const tracking = new Map();
   for (const step of steps) {
     if (tracking.has(step.id)) {
@@ -59,7 +91,7 @@ async function runPlan(steps, executeFn, options = {}) {
       if (entry.status !== 'pending') continue;
       for (const dep of (entry.step.dependsOn || [])) {
         const depEntry = tracking.get(dep);
-        if (depEntry.status === 'failed') {
+        if (depEntry && depEntry.status === 'failed') {
           entry.status = 'failed';
           entry.error = `dependency '${dep}' failed`;
           stateMachine?.transition(id, 'start');
@@ -75,7 +107,7 @@ async function runPlan(steps, executeFn, options = {}) {
     for (const [id, entry] of tracking) {
       if (entry.status !== 'pending') continue;
       const deps = entry.step.dependsOn || [];
-      const allDone = deps.every(dep => tracking.get(dep).status === 'done');
+      const allDone = deps.every(/** @param {string} dep */ dep => tracking.get(dep)?.status === 'done');
       if (allDone) ready.push(entry);
     }
 
@@ -113,7 +145,8 @@ async function runPlan(steps, executeFn, options = {}) {
 
   // Return results in original order
   return steps.map(s => {
-    const entry = tracking.get(s.id);
+    const entry = /** @type {TrackingEntry} */ (tracking.get(s.id));
+    /** @type {StepResult} */
     const out = { id: s.id, status: entry.status };
     if (entry.result !== undefined) out.result = entry.result;
     if (entry.error !== undefined) out.error = entry.error;

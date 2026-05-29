@@ -3,12 +3,20 @@
 const https = require('https');
 const { ProviderError } = require('./errors');
 
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * @typedef {object} AnthropicOptions
+ * @property {string} [apiKey] - Anthropic API key (required).
+ * @property {string} [model='claude-haiku-4-5-20251001'] - Model ID.
+ * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
+ */
+
 class AnthropicProvider {
   /**
-   * @param {object} options
-   * @param {string} options.apiKey - Anthropic API key (required).
-   * @param {string} [options.model='claude-haiku-4-5-20251001'] - Model ID.
-   * @param {boolean} [options.exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
+   * @param {AnthropicOptions} [options]
    * @throws {Error} `[AnthropicProvider] requires apiKey` — when apiKey is missing.
    */
   constructor(options = {}) {
@@ -21,15 +29,17 @@ class AnthropicProvider {
 
   /**
    * Generate a response from the Anthropic API.
-   * @param {Array<object>} messages - Conversation messages (OpenAI format, auto-converted).
-   * @param {Array<object>} [tools=[]] - Tool definitions.
-   * @param {object} [options={}] - Options (temperature, maxTokens, system).
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @param {Message[]} messages - Conversation messages (OpenAI format, auto-converted).
+   * @param {ToolDef[]} [tools=[]] - Tool definitions.
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, system).
+   * @returns {Promise<GenerateResult>}
    * @throws {Error} `[AnthropicProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
     // Separate system message from conversation messages
+    /** @type {any} */
     let system;
+    /** @type {any[]} */
     const msgs = [];
     for (const m of messages) {
       if (m.role === 'system') {
@@ -42,6 +52,7 @@ class AnthropicProvider {
     // Override with options.system if provided
     if (options.system) system = options.system;
 
+    /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       max_tokens: options.maxTokens || 4096,
@@ -60,6 +71,7 @@ class AnthropicProvider {
     const data = await this._request(body);
 
     let text = '';
+    /** @type {import('../types').ToolCall[]} */
     const toolCalls = [];
     for (const block of data.content) {
       if (block.type === 'text') text += block.text;
@@ -78,6 +90,10 @@ class AnthropicProvider {
     };
   }
 
+  /**
+   * @param {Message} msg
+   * @returns {any}
+   */
   _toAnthropicMessage(msg) {
     // Convert OpenAI-format tool results → Anthropic tool_result blocks
     if (msg.role === 'tool') {
@@ -91,7 +107,8 @@ class AnthropicProvider {
       };
     }
     // Convert OpenAI-format assistant tool_calls → Anthropic tool_use content blocks
-    if (msg.role === 'assistant' && msg.tool_calls?.length > 0) {
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      /** @type {any[]} */
       const content = [];
       if (msg.content) content.push({ type: 'text', text: msg.content });
       for (const tc of msg.tool_calls) {
@@ -109,6 +126,10 @@ class AnthropicProvider {
     return { role: msg.role, content: msg.content };
   }
 
+  /**
+   * @param {Record<string, any>} body
+   * @returns {Promise<any>}
+   */
   _request(body) {
     return new Promise((resolve, reject) => {
       const payload = JSON.stringify(body);
@@ -126,10 +147,10 @@ class AnthropicProvider {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(chunks);
-            if (res.statusCode >= 400) {
+            if ((res.statusCode ?? 0) >= 400) {
               return reject(new ProviderError(
                 `[AnthropicProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
+                /** @type {any} */ ({ status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined })
               ));
             }
             resolve(parsed);

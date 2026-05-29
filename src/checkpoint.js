@@ -4,16 +4,20 @@ const { TimeoutError } = require('./errors');
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * @typedef {object} CheckpointOptions
+ * @property {Array<string>} [tools] - Tool names that require approval (exact match).
+ * @property {(toolName: string, args: any) => boolean} [shouldAsk] - Custom predicate — overrides tools list if set.
+ * @property {(question: string, context: any) => any} [send] - Async `(question, context) => void` to deliver the question.
+ * @property {(context: any) => any} [waitForReply] - Async `(context) => string` that resolves with the user's reply.
+ * @property {number} [timeout=300000] - Ms to wait before auto-denying. 0 disables.
+ */
+
 class Checkpoint {
   /**
-   * @param {object} options
-   * @param {Array<string>} [options.tools] - Tool names that require approval (exact match).
-   * @param {Function} [options.shouldAsk] - Custom predicate `(toolName, args) => bool` — overrides tools list if set.
-   * @param {Function} options.send - Async `(question, context) => void` to deliver the question.
-   * @param {Function} options.waitForReply - Async `(context) => string` that resolves with the user's reply.
-   * @param {number} [options.timeout=300000] - Ms to wait before auto-denying. 0 disables.
+   * @param {CheckpointOptions} [options={}]
    */
-  constructor(options = {}) {
+  constructor(options = /** @type {CheckpointOptions} */ ({})) {
     this.tools = new Set(options.tools || []);
     this.send = options.send || null;
     this.waitForReply = options.waitForReply || null;
@@ -21,6 +25,11 @@ class Checkpoint {
     this.timeout = options.timeout !== undefined ? options.timeout : DEFAULT_TIMEOUT_MS;
   }
 
+  /**
+   * @param {string} toolName - Name of the tool being invoked.
+   * @param {any} args - Arguments passed to the tool.
+   * @returns {boolean} Whether approval should be requested.
+   */
   shouldAsk(toolName, args) {
     if (this.shouldAskFn) return this.shouldAskFn(toolName, args);
     return this.tools.has(toolName);
@@ -31,7 +40,7 @@ class Checkpoint {
    * without a reply — the Loop catches this, auto-denies the tool call, and routes the
    * error through loop:error + onError. No silent hangs.
    * @param {string} question - The approval question to send.
-   * @param {object} [context={}] - Context passed to send and waitForReply.
+   * @param {{tool?: string, [key: string]: any}} [context={}] - Context passed to send and waitForReply.
    * @returns {Promise<string|null>} The user's reply, or null.
    * @throws {Error} `[Checkpoint] send and waitForReply callbacks required` — when callbacks are missing.
    * @throws {TimeoutError} When no reply arrives within `timeout` ms.

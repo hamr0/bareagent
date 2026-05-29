@@ -1,12 +1,21 @@
 'use strict';
 
+/** @typedef {import('../types').Provider} Provider */
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * @typedef {object} FallbackOptions
+ * @property {(error: any, index: number) => boolean} [shouldFallback] - Return false to stop.
+ * @property {(error: any, fromIndex: number, toIndex: number) => void} [onFallback] - Callback.
+ */
+
 class FallbackProvider {
   /**
    * Provider that tries multiple providers in order.
-   * @param {Array<object>} providers - Ordered list of providers with generate().
-   * @param {object} [options={}]
-   * @param {function} [options.shouldFallback] - (error, index) => boolean. Return false to stop.
-   * @param {function} [options.onFallback] - (error, fromIndex, toIndex) callback.
+   * @param {Provider[]} providers - Ordered list of providers with generate().
+   * @param {FallbackOptions} [options={}]
    * @throws {Error} `[FallbackProvider] requires at least one provider` — when providers is empty.
    */
   constructor(providers, options = {}) {
@@ -20,13 +29,14 @@ class FallbackProvider {
 
   /**
    * Generate using first available provider.
-   * @param {Array<object>} messages
-   * @param {Array<object>} [tools=[]]
-   * @param {object} [options={}]
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @param {Message[]} messages
+   * @param {ToolDef[]} [tools=[]]
+   * @param {Record<string, any>} [options={}]
+   * @returns {Promise<GenerateResult>}
    * @throws {AggregateError} When all providers fail.
    */
   async generate(messages, tools = [], options = {}) {
+    /** @type {any[]} */
     const errors = [];
 
     for (let i = 0; i < this.providers.length; i++) {

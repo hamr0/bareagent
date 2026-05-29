@@ -31,6 +31,8 @@
  *   per-family.
  */
 
+/** @typedef {import('../src/stream').Stream} Stream */
+
 const { spawn: cpSpawn } = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
@@ -57,6 +59,17 @@ function resolveCliPath() {
  * }
  *
  * Use this from library code; the LLM-callable tool below wraps it with blocking semantics.
+ *
+ * @typedef {Record<string, any> & {type?: string, text?: string, ts?: string, data?: any}} ChildEvent
+ *
+ * @typedef {object} SpawnChildOptions
+ * @property {string} [config] - Path to a bareagent config JSON file.
+ * @property {*} [input] - Optional JSON input passed to the child on stdin.
+ * @property {string} [cliPath] - Override the bareagent CLI path.
+ * @property {number} [timeoutMs] - Force-kill child after this many ms.
+ * @property {Stream} [stream] - bareagent Stream — child:stderr events get re-emitted here.
+ *
+ * @param {SpawnChildOptions} [opts]
  */
 function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
   if (typeof config !== 'string' || !config) {
@@ -81,8 +94,11 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
   }
   child.stdin.end();
 
+  /** @type {ChildEvent[]} */
   const events = [];
+  /** @type {((event: ChildEvent) => void)[]} */
   const lineSubscribers = [];
+  /** @param {(event: ChildEvent) => void} fn */
   const onLine = (fn) => { lineSubscribers.push(fn); return () => {
     const i = lineSubscribers.indexOf(fn);
     if (i >= 0) lineSubscribers.splice(i, 1);
@@ -100,7 +116,7 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
     }
     events.push(event);
     for (const fn of lineSubscribers) {
-      try { fn(event); } catch (err) {
+      try { fn(event); } catch (/** @type {any} */ err) {
         // never let a subscriber kill the read loop
         process.stderr.write(`[spawn] onLine subscriber threw: ${err.message}\n`);
       }
@@ -165,7 +181,9 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
       };
     }
     // Pluck the final loop:done event — that's the canonical child result.
-    const done = events.findLast?.(e => e.type === 'loop:done')
+    // `findLast` is es2023; the lib target may not declare it, so reach it via
+    // `any` while keeping the runtime fallback for older Node versions.
+    const done = /** @type {any} */ (events).findLast?.((/** @type {ChildEvent} */ e) => e.type === 'loop:done')
       || [...events].reverse().find(e => e.type === 'loop:done');
     if (done) {
       return {
@@ -191,6 +209,7 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
     };
   }
 
+  /** @param {NodeJS.Signals} [sig] */
   function kill(sig = 'SIGTERM') {
     try { child.kill(sig); } catch { /* already dead */ }
   }
@@ -204,8 +223,8 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
  * @param {object} [options]
  * @param {string} [options.cliPath] - Override the bareagent CLI path (default: ./bin/cli.js relative to this file).
  * @param {number} [options.timeoutMs] - Force-kill child after this many ms (default 10 min).
- * @param {object} [options.stream] - bareagent Stream instance — child:stderr events get re-emitted here.
- * @returns {{tool: object, spawnChild: Function}}
+ * @param {Stream} [options.stream] - bareagent Stream instance — child:stderr events get re-emitted here.
+ * @returns {{tool: import('../types').ToolDef, spawnChild: typeof spawnChild}}
  */
 function createSpawnTool(options = {}) {
   const tool = {
@@ -225,7 +244,7 @@ function createSpawnTool(options = {}) {
       },
       required: ['config'],
     },
-    execute: async ({ config, input }) => {
+    execute: async (/** @type {{config: string, input?: *}} */ { config, input }) => {
       const handle = spawnChild({
         config,
         input,

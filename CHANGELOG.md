@@ -4,6 +4,25 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-05-29
+
+### Added
+
+- **TypeScript declarations (`.d.ts`) generated from JSDoc.** Consumers now get full type information and editor autocomplete. Types are emitted by `tsc` from the existing JSDoc (`npm run build:types`), shipped to npm via a `prepublishOnly` hook, and resolved through `types` conditions on every `exports` subpath (`.`, `./errors`, `./providers`, `./stores`, `./transports`, `./tools`, `./mcp`, `./bareguard`) plus a top-level `types` field. Generated `.d.ts` are git-ignored (built on publish); hand-written shared shapes live in `types/` and ship with the package.
+- **`types/index.d.ts`** — shared cross-cutting type shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`, `Ctx`) referenced from JSDoc across the codebase. **`types/shims.d.ts`** — ambient `any` module declarations for deps that ship no types (`bareguard`, `better-sqlite3`, `barebrowse`, `baremobile`, `cron-parser`), so the typecheck runs without installing native/optional modules.
+
+### Tooling
+
+- **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
+- **CI typecheck guardrail.** New `.github/workflows/ci.yml` runs `npm run typecheck` (`tsc --checkJs`) + the test suite on every push and PR — previously nothing ran on PRs. `publish.yml` gained the same typecheck step before tests, so a type error blocks publish. `tsc` runs `checkJs` with `strictNullChecks` (full `strict` was evaluated but relaxed to null-checks-only: it caught ~95% annotation-completeness noise and ~5% genuine null-safety, which `strictNullChecks` retains). All JSDoc across `src/`, `tools/`, and `bin/` was annotated to type-check clean (JSDoc-only; no runtime behavior change).
+- **New scripts:** `typecheck` (`tsc --noEmit`), `build:types` (`tsc`), `prepublishOnly` (`npm run build:types`). New dev deps: `typescript`, `@types/node`.
+
+### Fixed
+
+- **`src/mcp-bridge.js` — a server that fails to connect no longer leaks its child process.** When `initialize` timed out (or `tools/list` failed), the error propagated out of `connectAndListTools` *before* the spawned child was returned to the caller, so `close()` never tracked it for teardown. The orphaned child kept its stdin pipe open and prevented the host process from exiting — most visibly, it hung `node --test`'s per-file wrapper *after every test had already passed* (the full unit run never terminated). The child is now killed on any connect failure before the error is re-thrown; the full unit suite (`node --test`, 324 tests) exits cleanly.
+- **`examples/wake.sh` — the first record in the defer queue is no longer silently dropped.** The status-fold ran `jq -c 'reduce inputs …'` without `-n`, so `jq` consumed the first queue line as its implicit input and folded only lines 2+. With a single pending defer — the common case — `PENDING` came back empty and the action never fired. Now `jq -n -c …` reads every record via `inputs`. Reference scheduler only; the library's own `readQueue` in `tools/defer.js` uses a separate JS fold that was already correct.
+- **`src/bareguard-adapter.js` — `filterTools` calls `gate.allows` through a `gate`-bound reference.** Type-annotation work flagged the unbound-method usage, so `gate.allows` is now bound to the Gate. Runtime behavior is unchanged: the prior `t => gate.allows(t.name)` was a *method* call that already preserved `this`, so it never crashed — this is a type-safety refactor, not a bug fix. (An earlier draft of this entry, and the commit message that introduced it, overstated it as a crash fix; corrected here after empirical re-test.)
+
 ## [0.11.0] — 2026-05-23
 
 **Security hardening pass.** A `/security` audit + empirical stress-testing (each finding reproduced against the real code with mock providers, then re-verified after the fix) surfaced one governance-bypass plus a spread of fail-open defaults. All are now fail-closed. Three carry an intentional, consumer-visible behavior change — see **Changed** — each with an explicit opt-out. Full non-`src` regression suite green (324 tests).

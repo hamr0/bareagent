@@ -9,10 +9,16 @@
  *   MOCK_CRASH_ON_TOOL=1   — crash (exit 1) when tools/call is received
  *   MOCK_SLOW_INIT=<ms>    — delay initialize response by N ms
  *   MOCK_MALFORMED=1       — send non-JSON garbage on first tools/call
+ *   MOCK_PID_FILE=<path>   — write this process's pid to the file at startup
+ *                            (lets a test assert the child was reaped, not leaked)
  */
 
 let buffer = '';
 process.stdin.setEncoding('utf8');
+
+if (process.env.MOCK_PID_FILE) {
+  require('fs').writeFileSync(process.env.MOCK_PID_FILE, String(process.pid));
+}
 
 const TOOLS = [
   { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },

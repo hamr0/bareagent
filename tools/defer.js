@@ -54,6 +54,7 @@ function generateId() {
  *   2. BAREAGENT_DEFER_QUEUE env var
  *   3. ./bareagent-defers.jsonl
  */
+/** @param {string} [option] */
 function resolveQueuePath(option) {
   return option
     || process.env.BAREAGENT_DEFER_QUEUE
@@ -68,6 +69,7 @@ function resolveQueuePath(option) {
  *
  * Returns { ok: true, iso } on success, { ok: false, error } on failure.
  */
+/** @param {*} when */
 function validateWhen(when) {
   if (typeof when !== 'string' || !when) {
     return { ok: false, error: 'when must be an ISO 8601 timestamp string' };
@@ -88,6 +90,7 @@ function validateWhen(when) {
  * Anything else is the LLM either confused or trying to defer something
  * meaningless.
  */
+/** @param {*} action */
 function validateAction(action) {
   if (!action || typeof action !== 'object' || Array.isArray(action)) {
     return { ok: false, error: 'action must be an object' };
@@ -102,6 +105,10 @@ function validateAction(action) {
  * Append one JSONL record to the queue file. fs.promises.appendFile is
  * atomic for writes < PIPE_BUF on POSIX (4KB on Linux); a JSON record
  * with a small action is well under that.
+ */
+/**
+ * @param {string} queuePath
+ * @param {Record<string, any>} record
  */
 async function appendRecord(queuePath, record) {
   const dir = path.dirname(path.resolve(queuePath));
@@ -121,10 +128,12 @@ async function appendRecord(queuePath, record) {
  * append-only status lines (latest wins). Exposed for tests + library
  * users; the wake script does its own jq-based fold.
  */
+/** @param {string} [queuePath] */
 async function readQueue(queuePath) {
   const path = resolveQueuePath(queuePath);
   try {
     const text = await fsp.readFile(path, 'utf8');
+    /** @type {Record<string, Record<string, any>>} */
     const records = {};
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
@@ -134,7 +143,7 @@ async function readQueue(queuePath) {
       records[r.id] = { ...records[r.id], ...r };
     }
     return Object.values(records);
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     if (err.code === 'ENOENT') return [];
     throw err;
   }
@@ -143,7 +152,7 @@ async function readQueue(queuePath) {
 /**
  * @param {object} [options]
  * @param {string} [options.queuePath] - Override queue file path.
- * @returns {{tool: object, readQueue: Function}}
+ * @returns {{tool: import('../types').ToolDef, readQueue: () => Promise<Record<string, any>[]>, queuePath: string}}
  */
 function createDeferTool(options = {}) {
   const queuePath = resolveQueuePath(options.queuePath);
@@ -166,7 +175,7 @@ function createDeferTool(options = {}) {
       },
       required: ['action', 'when'],
     },
-    execute: async ({ action, when }) => {
+    execute: async (/** @type {{action: *, when: *}} */ { action, when }) => {
       const a = validateAction(action);
       if (!a.ok) throw new Error(`[defer] ${a.error}`);
       const w = validateWhen(when);

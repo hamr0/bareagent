@@ -19,21 +19,28 @@ const LARGE_STORE_THRESHOLD = 10000;
  *   search(query, options)     → [{ id, content, metadata, score }]
  *   get(id)                    → { content, metadata }
  *   delete(id)                 → void
+ *
+ * @typedef {object} JsonRecord
+ * @property {number} id
+ * @property {any} content
+ * @property {Record<string, any>} metadata
+ * @property {string} createdAt
  */
+
 class JsonFileStore {
   /**
-   * @param {object} options
-   * @param {string} options.path - Path to JSON file (required).
+   * @param {{ path?: string }} [options]
    * @throws {Error} `[JsonFileStore] requires options.path` — when path is missing.
    */
   constructor(options = {}) {
     if (!options.path) throw new Error('[JsonFileStore] requires options.path');
     this._path = options.path;
+    /** @type {JsonRecord[]} */
     this._data = existsSync(this._path)
       ? JSON.parse(readFileSync(this._path, 'utf8'))
       : [];
     this._nextId = this._data.length
-      ? this._data.reduce((max, d) => Math.max(max, d.id), 0) + 1
+      ? this._data.reduce((/** @type {number} */ max, /** @type {JsonRecord} */ d) => Math.max(max, d.id), 0) + 1
       : 1;
     this._warnedLarge = false;
   }
@@ -42,6 +49,11 @@ class JsonFileStore {
     writeFileSync(this._path, JSON.stringify(this._data, null, 2));
   }
 
+  /**
+   * @param {any} content
+   * @param {Record<string, any>} [metadata]
+   * @returns {number} id
+   */
   store(content, metadata = {}) {
     const id = this._nextId++;
     this._data.push({ id, content, metadata, createdAt: new Date().toISOString() });
@@ -56,23 +68,36 @@ class JsonFileStore {
     return id;
   }
 
+  /**
+   * @param {string} query
+   * @param {{ limit?: number }} [options]
+   * @returns {Array<JsonRecord & { score: number }>}
+   */
   search(query, options = {}) {
     const limit = options.limit || 10;
     const q = (query || '').toLowerCase();
-    if (!q) return this._data.slice(0, limit).map(d => ({ ...d, score: 1 }));
+    if (!q) return this._data.slice(0, limit).map((/** @type {JsonRecord} */ d) => ({ ...d, score: 1 }));
     return this._data
-      .filter(d => d.content.toLowerCase().includes(q))
+      .filter((/** @type {JsonRecord} */ d) => d.content.toLowerCase().includes(q))
       .slice(0, limit)
-      .map(d => ({ ...d, score: 1 }));
+      .map((/** @type {JsonRecord} */ d) => ({ ...d, score: 1 }));
   }
 
+  /**
+   * @param {number} id
+   * @returns {{ id: number, content: any, metadata: Record<string, any> } | null}
+   */
   get(id) {
-    const item = this._data.find(d => d.id === id);
+    const item = this._data.find((/** @type {JsonRecord} */ d) => d.id === id);
     return item ? { id: item.id, content: item.content, metadata: item.metadata } : null;
   }
 
+  /**
+   * @param {number} id
+   * @returns {void}
+   */
   delete(id) {
-    this._data = this._data.filter(d => d.id !== id);
+    this._data = this._data.filter((/** @type {JsonRecord} */ d) => d.id !== id);
     this._save();
   }
 }

@@ -396,7 +396,10 @@ XDG would invite cross-project queue bleed.
 
 Status transitions are appends (the file is append-only); the wake script
 emits `{"id": "...", "status": "fired", "ts": "..."}` lines, and reconstruction
-reads the whole file folding by `id`.
+reads the whole file folding by `id`. (The reference `wake.sh` fold must run
+`jq -n` so `inputs` sees every record — without null-input the first queue line
+is consumed as `jq`'s implicit `.` and dropped from the fold, so a lone pending
+defer would never fire. Fixed in [Unreleased].)
 
 **Two-phase gate semantics (defense in depth):**
 
@@ -678,6 +681,26 @@ When users ask for these, point at this list.
 **Production deps in bareagent core: 0.** This is a hard target; if a real
 need surfaces during POC, deviation requires explicit justification in the
 PRD.
+
+### 18.1 Types & typecheck (v0.11+)
+
+Source stays **pure JS + JSDoc** — no `.ts` source, no build step for runtime.
+TypeScript is a **dev-only** dependency used two ways:
+
+- **`.d.ts` from JSDoc.** `tsc` emits declarations from the existing JSDoc
+  (`emitDeclarationOnly`), so consumers get types and autocomplete without the
+  library being authored in TypeScript. Declarations are generated on publish
+  (`prepublishOnly` → `build:types`), git-ignored, and resolved via `types`
+  conditions on every `exports` subpath. Shared shapes live in `types/`
+  (`index.d.ts` for cross-cutting interfaces; `shims.d.ts` for ambient `any`
+  declarations of untyped deps) and ship with the package.
+- **Typecheck guardrail.** `npm run typecheck` (`tsc --checkJs`, `strictNullChecks`)
+  validates the JSDoc against the implementation. It runs in CI on every push/PR
+  and gates publish. Full `strict` was trialled and relaxed to null-checks-only —
+  it surfaced ~95% annotation-completeness noise vs. ~5% genuine null-safety, the
+  latter retained by `strictNullChecks`. The dev rule "external deps must earn
+  their place" is preserved: `typescript`/`@types/node` are `devDependencies`,
+  never shipped or required at runtime.
 
 ## 19. Migration plan
 

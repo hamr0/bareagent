@@ -8,6 +8,8 @@
  */
 async function createBrowsingTools(opts = {}) {
   try {
+    // barebrowse is an optional dep; the subpath is declared as an ambient `any`
+    // module in types/shims.d.ts and resolves to `any` at runtime.
     const { createBrowseTools } = await import('barebrowse/bareagent');
     return createBrowseTools(opts);
   } catch {

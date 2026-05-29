@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.11.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.12.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -22,6 +22,8 @@ Eight entry points:
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
+
+**TypeScript:** bareagent is pure JS + JSDoc but ships `.d.ts` declarations (generated from that JSDoc, v0.11+). Every entry point above resolves types automatically — `import { Loop } from 'bare-agent'` and `import { OpenAI } from 'bare-agent/providers'` give full autocomplete and type-checking, including required-option enforcement (e.g. `new Loop({})` is a type error: `provider` is required). No `@types/bare-agent` needed. Shared shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`) are exported from the package's `types/`. The repo itself runs `tsc --checkJs` in CI on every push/PR so the JSDoc and the code can't drift.
 
 ## Which components do I need?
 
@@ -207,7 +209,9 @@ its own children — they all share the family count. Defaults: defer
 
 **Reference cron + wake script:** `examples/wake.sh` (with
 `examples/wake.md` for setup). The script folds the defer queue with
-`jq`, picks records where `when <= now() AND status === 'pending'`,
+`jq -n` (null-input, so `inputs` reads *every* record — without `-n` the
+first queue line is consumed as `jq`'s implicit input and silently
+skipped), picks records where `when <= now() AND status === 'pending'`,
 appends a `'fired'` line, and shells out to `bare-agent --config
 <orchestrator>` with the inner action as stdin.
 

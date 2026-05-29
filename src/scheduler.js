@@ -12,17 +12,41 @@ const { readFileSync, writeFileSync, existsSync } = require('node:fs');
  *   start(handler)  → begin tick loop (handler receives due jobs)
  *   stop()          → stop tick loop
  */
+
+/**
+ * @typedef {object} Job
+ * @property {number} id
+ * @property {string} type
+ * @property {string} schedule
+ * @property {*} action
+ * @property {string} status
+ * @property {string} nextRun
+ * @property {string} [createdAt]
+ */
+
+/**
+ * @typedef {object} SchedulerOptions
+ * @property {string|null} [file] - Path to JSON persistence file.
+ * @property {number} [interval=60000] - Tick interval in ms.
+ * @property {((err: any, job: Job) => void)|null} [onError] - Handler errors callback.
+ */
+
 class Scheduler {
+  /** @param {SchedulerOptions} [options={}] */
   constructor(options = {}) {
     this._file = options.file || null;
     this._interval = options.interval || 60000;
     this.onError = options.onError || null;
+    /** @type {Job[]} */
     this._jobs = this._file && existsSync(this._file)
       ? JSON.parse(readFileSync(this._file, 'utf8'))
       : [];
+    /** @type {NodeJS.Timeout|null} */
     this._timer = null;
+    /** @type {Set<number>} */
+    this._running = new Set();
     this._nextId = this._jobs.length
-      ? this._jobs.reduce((max, j) => Math.max(max, j.id), 0) + 1
+      ? this._jobs.reduce((/** @type {number} */ max, /** @type {Job} */ j) => Math.max(max, j.id), 0) + 1
       : 1;
   }
 
@@ -30,6 +54,7 @@ class Scheduler {
     if (this._file) writeFileSync(this._file, JSON.stringify(this._jobs, null, 2));
   }
 
+  /** @param {{ type?: string, schedule: string, action: * }} job */
   add(job) {
     const id = this._nextId++;
     const nextRun = this._parseSchedule(job.schedule);
@@ -46,13 +71,14 @@ class Scheduler {
     return id;
   }
 
+  /** @param {number} jobId */
   remove(jobId) {
-    this._jobs = this._jobs.filter(j => j.id !== jobId);
+    this._jobs = this._jobs.filter((/** @type {Job} */ j) => j.id !== jobId);
     this._save();
   }
 
   list() {
-    return this._jobs.map(j => ({ ...j }));
+    return this._jobs.map((/** @type {Job} */ j) => ({ ...j }));
   }
 
   /**
@@ -114,7 +140,9 @@ class Scheduler {
     const rel = schedule.match(/^(\d+)(s|m|h|d)$/);
     if (rel) {
       const [, n, unit] = rel;
-      const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[unit];
+      /** @type {Record<string, number>} */
+      const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+      const ms = units[unit];
       return new Date(Date.now() + Number(n) * ms);
     }
     // Cron: try cron-parser

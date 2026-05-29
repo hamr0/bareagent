@@ -3,7 +3,21 @@
 const http = require('http');
 const { ProviderError } = require('./errors');
 
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * @typedef {object} OllamaOptions
+ * @property {string} [model='llama3.2']
+ * @property {string} [url='http://localhost:11434']
+ * @property {boolean} [exposeErrorBody=false]
+ */
+
 class OllamaProvider {
+  /**
+   * @param {OllamaOptions} [options]
+   */
   constructor(options = {}) {
     this.model = options.model || 'llama3.2';
     this.url = options.url || 'http://localhost:11434';
@@ -13,13 +27,14 @@ class OllamaProvider {
 
   /**
    * Generate a response from a local Ollama instance.
-   * @param {Array<object>} messages - Conversation messages.
-   * @param {Array<object>} [tools=[]] - Tool definitions.
-   * @param {object} [options={}] - Options (temperature).
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @param {Message[]} messages - Conversation messages.
+   * @param {ToolDef[]} [tools=[]] - Tool definitions.
+   * @param {Record<string, any>} [options={}] - Options (temperature).
+   * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
+    /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       messages,
@@ -38,7 +53,7 @@ class OllamaProvider {
 
     return {
       text: msg.content || '',
-      toolCalls: (msg.tool_calls || []).map(tc => ({
+      toolCalls: (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
         id: tc.id || `call_${Date.now()}`,
         name: tc.function.name,
         arguments: typeof tc.function.arguments === 'string'
@@ -52,6 +67,11 @@ class OllamaProvider {
     };
   }
 
+  /**
+   * @param {string} path
+   * @param {Record<string, any>} body
+   * @returns {Promise<any>}
+   */
   _request(path, body) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.url + path);
@@ -69,10 +89,10 @@ class OllamaProvider {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(chunks);
-            if (res.statusCode >= 400) {
+            if ((res.statusCode ?? 0) >= 400) {
               return reject(new ProviderError(
                 `[OllamaProvider] ${parsed.error || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
+                /** @type {any} */ ({ status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined })
               ));
             }
             resolve(parsed);
