@@ -36,7 +36,12 @@ const { Loop } = require('../src/loop');
 const { Stream } = require('../src/stream');
 const { JsonlTransport } = require('../src/transport-jsonl');
 
+/** @typedef {import('../types').Provider} Provider */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').Ctx} Ctx */
+
 const args = process.argv.slice(2);
+/** @param {string} name */
 const flag = (name) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : undefined;
@@ -45,7 +50,7 @@ const flag = (name) => {
 const configPath = flag('config');
 
 if (configPath) {
-  runConfigMode(configPath).catch((err) => {
+  runConfigMode(configPath).catch((/** @type {any} */ err) => {
     process.stdout.write(JSON.stringify({ type: 'loop:error', data: { source: 'cli', error: err.message } }) + '\n');
     process.exit(1);
   });
@@ -55,6 +60,7 @@ if (configPath) {
 
 // ─── Mode 2: config-driven ────────────────────────────────────────────────
 
+/** @param {string} cfgPath */
 async function runConfigMode(cfgPath) {
   const cfg = readConfig(cfgPath);
   const stream = new Stream({ transport: new JsonlTransport() });
@@ -68,9 +74,12 @@ async function runConfigMode(cfgPath) {
   // Bareguard Gate (optional but strongly recommended for spawn children).
   // Fail-closed: if the config asks for a gate but wiring fails, exit non-zero
   // rather than run an ungoverned child agent.
-  let policy = null;
-  let onLlmResult = null;
-  let onToolResult = null;
+  /** @type {Function | undefined} */
+  let policy;
+  /** @type {Function | undefined} */
+  let onLlmResult;
+  /** @type {Function | undefined} */
+  let onToolResult;
   let gatedTools = tools;
   if (cfg.gate) {
     try {
@@ -97,7 +106,7 @@ async function runConfigMode(cfgPath) {
       }
       if (typeof humanChannel !== 'function') {
         let warned = false;
-        humanChannel = async (event) => {
+        humanChannel = async (/** @type {any} */ event) => {
           if (!warned) {
             process.stderr.write(`[cli] no humanChannel configured — ${event.kind} on ${event.rule} auto-denying.\n`);
             warned = true;
@@ -148,7 +157,7 @@ async function runConfigMode(cfgPath) {
     policy,
     onLlmResult,
     onToolResult,
-    onError: (err, meta) => {
+    onError: (/** @type {any} */ err, /** @type {any} */ meta) => {
       process.stderr.write(`[loop:error ${meta.source}] ${err.message}\n`);
     },
   });
@@ -158,6 +167,7 @@ async function runConfigMode(cfgPath) {
   process.exit(0);
 }
 
+/** @param {string} cfgPath */
 function readConfig(cfgPath) {
   const abs = path.resolve(cfgPath);
   let raw;
@@ -179,6 +189,10 @@ function readStdin() {
   });
 }
 
+/**
+ * @param {any} cfg
+ * @param {string} stdin
+ */
 function buildInitialMessage(cfg, stdin) {
   if (!stdin) {
     return { role: 'user', content: cfg.defaultPrompt || 'Begin.' };
@@ -195,7 +209,13 @@ function buildInitialMessage(cfg, stdin) {
   return { role: 'user', content: stdin };
 }
 
+/**
+ * @param {string[]} names
+ * @param {{ stream: InstanceType<typeof Stream> }} ctx
+ * @returns {Promise<ToolDef[]>}
+ */
 async function resolveTools(names, ctx) {
+  /** @type {ToolDef[]} */
   const tools = [];
   for (const name of names) {
     const resolved = await resolveOneTool(name, ctx);
@@ -204,6 +224,11 @@ async function resolveTools(names, ctx) {
   return tools;
 }
 
+/**
+ * @param {string} name
+ * @param {{ stream: InstanceType<typeof Stream> }} ctx
+ * @returns {Promise<ToolDef | ToolDef[] | null>}
+ */
 async function resolveOneTool(name, ctx) {
   switch (name) {
     case 'shell_read':
@@ -215,16 +240,16 @@ async function resolveOneTool(name, ctx) {
       return tools.find(t => t.name === name) || null;
     }
     case 'shell_*': {
-      const { createShellTools } = require('../tools/shell');
-      return createShellTools().tools;
+      const { createShellTools: createShellToolsAll } = require('../tools/shell');
+      return createShellToolsAll().tools;
     }
     case 'spawn': {
       const { createSpawnTool } = require('../tools/spawn');
-      return createSpawnTool({ stream: ctx.stream }).tool;
+      return /** @type {ToolDef} */ (createSpawnTool({ stream: ctx.stream }).tool);
     }
     case 'defer': {
       const { createDeferTool } = require('../tools/defer');
-      return createDeferTool().tool;
+      return /** @type {ToolDef} */ (createDeferTool().tool);
     }
     default:
       process.stderr.write(`[cli] unknown tool name in config: ${name}\n`);
@@ -269,6 +294,11 @@ function runStdioMode() {
 
 // ─── Shared: provider construction ────────────────────────────────────────
 
+/**
+ * @param {string} name
+ * @param {string} [model]
+ * @returns {Provider}
+ */
 function createProvider(name, model) {
   if (name === 'openai') {
     const { OpenAIProvider } = require('../src/provider-openai');

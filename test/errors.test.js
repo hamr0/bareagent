@@ -110,8 +110,11 @@ describe('Public API exports', () => {
     assert.equal(HaltFromSubpath, HaltError);
     // Verify package.json exports declares the subpath (resolution from
     // outside the package goes through exports; from inside we read the file).
+    // Since v0.11 each subpath is a conditional object { types, default } so
+    // consumers also get the generated .d.ts.
     const pkg = require('../package.json');
-    assert.equal(pkg.exports['./errors'], './src/errors.js');
+    assert.equal(pkg.exports['./errors'].default, './src/errors.js');
+    assert.equal(pkg.exports['./errors'].types, './src/errors.d.ts');
     assert.equal(pkg.exports['./package.json'], './package.json');
   });
 });

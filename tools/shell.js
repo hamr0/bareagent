@@ -12,6 +12,8 @@
  * Library ships zero baked-in allowlist — gating is the agent author's responsibility.
  */
 
+/** @typedef {import('../types').ToolDef} ToolDef */
+
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { exec, execFile } = require('node:child_process');
@@ -21,6 +23,10 @@ const DEFAULT_GREP_MAX_MATCHES = 200;
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_MAX_BUFFER = 1024 * 1024;     // 1 MB
 
+/**
+ * @param {string} p
+ * @returns {string}
+ */
 function expandHome(p) {
   if (!p) return p;
   if (p.startsWith('~/') || p === '~') {
@@ -30,6 +36,10 @@ function expandHome(p) {
   return p;
 }
 
+/**
+ * @param {string} rawPath
+ * @param {number} [maxBytes]
+ */
 async function readEntry(rawPath, maxBytes) {
   const resolved = path.resolve(expandHome(rawPath));
   const stat = await fs.stat(resolved);
@@ -56,6 +66,7 @@ async function readEntry(rawPath, maxBytes) {
 }
 
 // Probe the first 1KB for NUL bytes to skip binary files in grep walks.
+/** @param {string} filePath */
 async function isProbablyText(filePath) {
   try {
     const fh = await fs.open(filePath, 'r');
@@ -74,6 +85,11 @@ async function isProbablyText(filePath) {
   }
 }
 
+/**
+ * @param {string} dir
+ * @param {boolean} recursive
+ * @returns {AsyncGenerator<string>}
+ */
 async function* walk(dir, recursive) {
   let entries;
   try {
@@ -99,6 +115,7 @@ async function* walk(dir, recursive) {
 // rejection; the agent simply rephrases. (Single-level nesting only — does not
 // detect deeply nested groups or overlapping alternation like (a|a)*.)
 const UNBOUNDED_QUANT = /[*+]|\{\d+,\}/;
+/** @param {string} pattern */
 function looksCatastrophic(pattern) {
   // A quantifier binds to the atom immediately before it — no whitespace between
   // `)` and the quantifier in a real regex.
@@ -113,6 +130,16 @@ function looksCatastrophic(pattern) {
   return false;
 }
 
+/**
+ * @typedef {object} GrepArgs
+ * @property {string} pattern
+ * @property {string} path
+ * @property {boolean} [recursive]
+ * @property {number} [maxMatches]
+ * @property {string} [flags]
+ */
+
+/** @param {GrepArgs} args */
 async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i' }) {
   const resolved = path.resolve(expandHome(rawPath));
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
@@ -125,10 +152,11 @@ async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, 
   let re;
   try {
     re = new RegExp(pattern, flags);
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     throw new Error(`shell_grep: invalid regex — ${err.message}`);
   }
 
+  /** @type {{file: string, line: number, text: string}[]} */
   const hits = [];
   const stat = await fs.stat(resolved).catch(() => null);
   if (!stat) throw new Error(`shell_grep: path not found — ${rawPath}`);
@@ -162,6 +190,16 @@ async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, 
   return { hits, truncated, fileCount: files.length };
 }
 
+/**
+ * @typedef {object} RunArgvArgs
+ * @property {string[]} argv
+ * @property {string} [cwd]
+ * @property {number} [timeout]
+ * @property {number} [maxBuffer]
+ * @property {Record<string, string>} [env]
+ */
+
+/** @param {RunArgvArgs} args */
 function runArgv({ argv, cwd, timeout, maxBuffer, env }) {
   if (!Array.isArray(argv) || argv.length === 0 || typeof argv[0] !== 'string') {
     return Promise.reject(new Error('shell_run: argv must be a non-empty array of strings, starting with the command'));
@@ -203,6 +241,16 @@ function runArgv({ argv, cwd, timeout, maxBuffer, env }) {
   });
 }
 
+/**
+ * @typedef {object} ExecCommandArgs
+ * @property {string} command
+ * @property {string} [cwd]
+ * @property {number} [timeout]
+ * @property {number} [maxBuffer]
+ * @property {Record<string, string>} [env]
+ */
+
+/** @param {ExecCommandArgs} args */
 function execCommand({ command, cwd, timeout, maxBuffer, env }) {
   return new Promise((resolve) => {
     exec(
@@ -238,9 +286,10 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * Create the three shell tools. No options — configuration is per-call via tool args,
  * gating is the caller's responsibility via `new Loop({ policy })`.
  *
- * @returns {{tools: Array}}
+ * @returns {{tools: ToolDef[]}}
  */
 function createShellTools() {
+  /** @type {ToolDef[]} */
   const tools = [
     {
       name: 'shell_read',
@@ -253,7 +302,7 @@ function createShellTools() {
         },
         required: ['path'],
       },
-      execute: async ({ path: p, maxBytes }) => readEntry(p, maxBytes),
+      execute: async (/** @type {{path: string, maxBytes?: number}} */ { path: p, maxBytes }) => readEntry(p, maxBytes),
     },
     {
       name: 'shell_grep',
@@ -269,7 +318,7 @@ function createShellTools() {
         },
         required: ['pattern', 'path'],
       },
-      execute: async (args) => grepPath(args),
+      execute: async (/** @type {GrepArgs} */ args) => grepPath(args),
     },
     {
       name: 'shell_run',
@@ -289,7 +338,7 @@ function createShellTools() {
         },
         required: ['argv'],
       },
-      execute: async (args) => runArgv(args),
+      execute: async (/** @type {RunArgvArgs} */ args) => runArgv(args),
     },
     {
       name: 'shell_exec',
@@ -305,7 +354,7 @@ function createShellTools() {
         },
         required: ['command'],
       },
-      execute: async (args) => execCommand(args),
+      execute: async (/** @type {ExecCommandArgs} */ args) => execCommand(args),
     },
   ];
   return { tools };

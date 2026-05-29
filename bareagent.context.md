@@ -23,6 +23,8 @@ Eight entry points:
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
 
+**TypeScript:** bareagent is pure JS + JSDoc but ships `.d.ts` declarations (generated from that JSDoc, v0.11+). Every entry point above resolves types automatically — `import { Loop } from 'bare-agent'` and `import { OpenAI } from 'bare-agent/providers'` give full autocomplete and type-checking, including required-option enforcement (e.g. `new Loop({})` is a type error: `provider` is required). No `@types/bare-agent` needed. Shared shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`) are exported from the package's `types/`. The repo itself runs `tsc --checkJs` in CI on every push/PR so the JSDoc and the code can't drift.
+
 ## Which components do I need?
 
 | I want to... | Use these |

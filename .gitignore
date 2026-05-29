@@ -8,3 +8,10 @@ contrib/python/__pycache__/
 .jobs/
 .claude/stash/
 .idea/
+
+# Generated TypeScript declarations (emitted from JSDoc by `npm run build:types`,
+# shipped via prepublishOnly). Hand-written declarations under types/ are tracked.
+/index.d.ts
+/src/**/*.d.ts
+/tools/**/*.d.ts
+/bin/**/*.d.ts

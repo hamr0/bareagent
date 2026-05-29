@@ -3,16 +3,25 @@
 const { spawn } = require('child_process');
 const { ProviderError } = require('./errors');
 
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * @typedef {object} CLIPipeOptions
+ * @property {string} [command] - CLI command to spawn (required).
+ * @property {string[]} [args=[]] - Arguments to pass to the command.
+ * @property {string} [cwd] - Working directory for the child process.
+ * @property {Record<string, string>} [env] - Environment variables for the child process.
+ * @property {number} [timeout=30000] - Timeout in milliseconds.
+ * @property {string} [systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
+ * @property {(chunk: string) => void} [onChunk] - Called with each stdout chunk as it streams.
+ */
+
 class CLIPipeProvider {
   /**
    * Provider that pipes prompts to a CLI command via stdin and reads stdout.
-   * @param {object} options
-   * @param {string} options.command - CLI command to spawn (required).
-   * @param {string[]} [options.args=[]] - Arguments to pass to the command.
-   * @param {string} [options.cwd] - Working directory for the child process.
-   * @param {object} [options.env] - Environment variables for the child process.
-   * @param {number} [options.timeout=30000] - Timeout in milliseconds.
-   * @param {string} [options.systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
+   * @param {CLIPipeOptions} [options]
    * @throws {Error} `[CLIPipeProvider] requires command` — when options.command is missing.
    */
   constructor(options = {}) {
@@ -28,16 +37,17 @@ class CLIPipeProvider {
 
   /**
    * Generate a response by piping messages to the CLI command.
-   * @param {Array<object>} messages - Conversation messages in OpenAI format.
-   * @param {Array<object>} [tools=[]] - Unused (CLI commands don't support tools).
-   * @param {object} [options={}] - Unused.
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @param {Message[]} messages - Conversation messages in OpenAI format.
+   * @param {ToolDef[]} [tools=[]] - Unused (CLI commands don't support tools).
+   * @param {Record<string, any>} [options={}] - Unused.
+   * @returns {Promise<GenerateResult>}
    * @throws {Error} `[CLIPipeProvider] failed to spawn "cmd": ...` — when the command cannot be found or executed.
    * @throws {Error} `[CLIPipeProvider] process exited with code N: ...` — on non-zero exit.
    * @throws {Error} `[CLIPipeProvider] timed out after Nms` — when the process exceeds timeout.
    * @throws {Error} `[CLIPipeProvider] process produced no output` — when stdout is empty.
    */
   async generate(messages, tools = [], options = {}) {
+    /** @type {string[]} */
     let extraArgs = [];
     let promptMessages = messages;
 
@@ -61,7 +71,7 @@ class CLIPipeProvider {
 
   /**
    * Convert OpenAI-format messages to a plain text prompt.
-   * @param {Array<object>} messages
+   * @param {Message[]} messages
    * @returns {string}
    */
   _formatPrompt(messages) {
@@ -79,11 +89,11 @@ class CLIPipeProvider {
    */
   _spawn(prompt, extraArgs = []) {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.command, [...this.args, ...extraArgs], {
+      const child = spawn(this.command, [...this.args, ...extraArgs], /** @type {any} */ ({
         cwd: this.cwd,
         env: this.env,
         stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      }));
 
       let stdout = '';
       let stderr = '';
@@ -93,17 +103,17 @@ class CLIPipeProvider {
       child.stderr.on('data', d => { stderr += d; });
 
       child.on('error', err => {
-        reject(new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`, { status: 0 }));
+        reject(new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`, /** @type {any} */ ({ status: 0 })));
       });
 
       child.on('close', code => {
         if (killed) return; // timeout already rejected
         if (code !== 0) {
-          return reject(new ProviderError(`[CLIPipeProvider] process exited with code ${code}: ${stderr.trim()}`, { status: code }));
+          return reject(new ProviderError(`[CLIPipeProvider] process exited with code ${code}: ${stderr.trim()}`, /** @type {any} */ ({ status: code })));
         }
         const text = stdout.trim();
         if (!text) {
-          return reject(new ProviderError('[CLIPipeProvider] process produced no output', { status: 0 }));
+          return reject(new ProviderError('[CLIPipeProvider] process produced no output', /** @type {any} */ ({ status: 0 })));
         }
         resolve(text);
       });
@@ -115,7 +125,7 @@ class CLIPipeProvider {
         setTimeout(() => {
           try { child.kill('SIGKILL'); } catch (_) {}
         }, 1000);
-        reject(new ProviderError(`[CLIPipeProvider] timed out after ${this.timeout}ms`, { status: 0 }));
+        reject(new ProviderError(`[CLIPipeProvider] timed out after ${this.timeout}ms`, /** @type {any} */ ({ status: 0 })));
       }, this.timeout);
 
       child.on('close', () => clearTimeout(timer));

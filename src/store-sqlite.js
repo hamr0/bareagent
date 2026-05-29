@@ -10,11 +10,17 @@
  *   delete(id)                 → void
  *
  * Requires peer dep: better-sqlite3
+ *
+ * @typedef {object} ChunkRow
+ * @property {number} id
+ * @property {string} content
+ * @property {string} metadata - JSON-serialized metadata.
+ * @property {number} [rank] - FTS5 rank (search rows only).
  */
+
 class SQLiteStore {
   /**
-   * @param {object} options
-   * @param {string} options.path - Path to SQLite database file (required).
+   * @param {{ path?: string }} [options]
    * @throws {Error} `[SQLiteStore] requires options.path` — when path is missing.
    * @throws {Error} `[SQLiteStore] requires better-sqlite3` — when peer dep is not installed.
    */
@@ -77,6 +83,11 @@ class SQLiteStore {
     );
   }
 
+  /**
+   * @param {any} content
+   * @param {Record<string, any>} [metadata]
+   * @returns {number} id
+   */
   store(content, metadata = {}) {
     const result = this._insertStmt.run(
       content,
@@ -86,10 +97,15 @@ class SQLiteStore {
     return Number(result.lastInsertRowid);
   }
 
+  /**
+   * @param {string} query
+   * @param {{ limit?: number }} [options]
+   * @returns {Array<{ id: number, content: string, metadata: Record<string, any>, score: number }>}
+   */
   search(query, options = {}) {
     const limit = options.limit || 10;
     if (!query) {
-      return this._allStmt.all(limit).map(row => ({
+      return this._allStmt.all(limit).map((/** @type {ChunkRow} */ row) => ({
         id: row.id,
         content: row.content,
         metadata: JSON.parse(row.metadata),
@@ -100,14 +116,14 @@ class SQLiteStore {
     const ftsQuery = query
       .split(/\s+/)
       .filter(Boolean)
-      .map(w => `"${w.replace(/"/g, '""')}"`)
+      .map((/** @type {string} */ w) => `"${w.replace(/"/g, '""')}"`)
       .join(' OR ');
     try {
-      return this._searchStmt.all(ftsQuery, limit).map(row => ({
+      return this._searchStmt.all(ftsQuery, limit).map((/** @type {ChunkRow} */ row) => ({
         id: row.id,
         content: row.content,
         metadata: JSON.parse(row.metadata),
-        score: -row.rank, // FTS5 rank is negative (closer to 0 = better)
+        score: -(row.rank ?? 0), // FTS5 rank is negative (closer to 0 = better)
       }));
     } catch {
       // If FTS query fails (e.g. special characters), return empty
@@ -115,12 +131,20 @@ class SQLiteStore {
     }
   }
 
+  /**
+   * @param {number} id
+   * @returns {{ id: number, content: string, metadata: Record<string, any> } | null}
+   */
   get(id) {
-    const row = this._getStmt.get(id);
+    const row = /** @type {ChunkRow | undefined} */ (this._getStmt.get(id));
     if (!row) return null;
     return { id: row.id, content: row.content, metadata: JSON.parse(row.metadata) };
   }
 
+  /**
+   * @param {number} id
+   * @returns {void}
+   */
   delete(id) {
     this._deleteStmt.run(id);
   }

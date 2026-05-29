@@ -2,8 +2,38 @@
 
 const { ToolError, HaltError } = require('./errors');
 
+/** @typedef {import('../types').Provider} Provider */
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').ToolCall} ToolCall */
+/** @typedef {import('../types').Usage} Usage */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+/** @typedef {import('../types').Store} Store */
+/** @typedef {import('./checkpoint').Checkpoint} Checkpoint */
+/** @typedef {import('./retry').Retry} Retry */
+/** @typedef {import('./stream').Stream} Stream */
+
+/**
+ * @typedef {object} LoopOptions
+ * @property {Provider} provider
+ * @property {string} [system]
+ * @property {Checkpoint} [checkpoint]
+ * @property {Retry} [retry]
+ * @property {Stream} [stream]
+ * @property {Store} [store]
+ * @property {Function} [onToolCall]
+ * @property {Function} [onText]
+ * @property {Function} [onError]
+ * @property {boolean} [throwOnError]
+ * @property {Function} [policy]
+ * @property {Function} [onLlmResult]
+ * @property {Function} [onToolResult]
+ * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
+ */
+
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
 // Last updated: 2026-05-18. Source: public provider pricing pages.
+/** @type {Record<string, {in: number, out: number}>} */
 const COST_PER_1K = {
   // OpenAI
   'gpt-4o': { in: 0.0025, out: 0.01 },
@@ -33,6 +63,10 @@ const HARD_ROUND_LIMIT = 100;
 // synthetic `role:'tool'` reply for every tool_call_id that has no matching
 // reply. Halt-path only — keeps msgs a valid OpenAI transcript when the loop
 // exits between pushing assistant.tool_calls and finishing the per-tool loop.
+/**
+ * @param {Message[]} msgs
+ * @param {string} rule
+ */
 function sealDanglingToolCalls(msgs, rule) {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
@@ -50,6 +84,11 @@ function sealDanglingToolCalls(msgs, rule) {
   }
 }
 
+/**
+ * @param {string|null} model
+ * @param {Usage|null} usage
+ * @returns {number|null}
+ */
 function estimateCost(model, usage) {
   if (!usage || !model) return null;
   const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
@@ -61,19 +100,15 @@ function estimateCost(model, usage) {
 
 class Loop {
   /**
-   * @param {object} options
-   * @param {object} options.provider - LLM provider (must implement generate()).
-   * @param {string} [options.system] - System prompt prepended to messages.
-   * @param {object} [options.checkpoint] - Checkpoint instance for human-in-the-loop.
-   * @param {object} [options.retry] - Retry instance for backoff on failures.
-   * @param {object} [options.stream] - Stream instance for event emission.
-   * @param {object} [options.store] - Store instance for validate() health check.
-   * @param {Function} [options.policy] - Async (toolName, args, ctx) => true | string. Recommended wiring: closure that delegates to a bareguard Gate (`require('bare-agent/bareguard').wireGate(gate).policy`). Anything other than `true` denies; a string is fed to the LLM verbatim as the deny reason. A throw of `HaltError` exits the loop cleanly. All policy/budget/audit decisions live in bareguard — Loop just calls the closure and respects the verdict.
-   * @param {Function} [options.onLlmResult] - Async ({model, provider, usage, costUsd, durationMs, ctx}) called after every successful provider.generate. Wire via `wireGate(gate).onLlmResult` so `budget.maxCostUsd` covers token-only workloads. Errors route through `_reportError` but never kill the loop.
-   * @param {Function} [options.onToolResult] - Async ({name, args, result, error, durationMs, ctx}) called after every tool.execute (success and failure). Wire via `wireGate(gate).onToolResult` so `gate.record` sees `ctx`. Errors route through `_reportError` but never kill the loop.
+   * `policy` is async `(toolName, args, ctx) => true | string`. Recommended wiring: a closure
+   * that delegates to a bareguard Gate (`require('bare-agent/bareguard').wireGate(gate).policy`).
+   * Anything other than `true` denies; a string is fed to the LLM verbatim as the deny reason.
+   * A throw of `HaltError` exits the loop cleanly. `onLlmResult`/`onToolResult` forward usage and
+   * tool outcomes to `gate.record` (via wireGate) and never kill the loop on error.
+   * @param {LoopOptions} options
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
    */
-  constructor(options = {}) {
+  constructor(options = /** @type {LoopOptions} */ ({})) {
     if (!options.provider) throw new Error('[Loop] requires a provider');
     if (options.maxRounds !== undefined) {
       throw new Error(
@@ -106,12 +141,18 @@ class Loop {
     this.onLlmResult = options.onLlmResult || null;
     this.onToolResult = options.onToolResult || null;
     this._stopped = false;
+    /** @type {Message[]} */
     this._history = []; // for chat() stateful mode
   }
 
   // Unified error emitter — every silent-ish failure path routes through here so
   // operators see callback throws, checkpoint timeouts, stream listener errors
   // in one place: loop:error stream event + onError callback.
+  /**
+   * @param {string} source
+   * @param {any} err
+   * @param {Record<string, any>} [extra]
+   */
   _reportError(source, err, extra = {}) {
     const message = err?.message || String(err);
     this._safeEmit({ type: 'loop:error', data: { source, error: message, ...extra } });
@@ -125,6 +166,7 @@ class Loop {
   }
 
   // Swallow-proof stream emit: a throwing listener must not corrupt Loop state.
+  /** @param {{type: string, data?: any, ts?: string}} event */
   _safeEmit(event) {
     if (!this.stream) return;
     try {
@@ -138,6 +180,11 @@ class Loop {
   }
 
   // Fire a user callback without letting its throw kill the loop.
+  /**
+   * @param {string} name
+   * @param {Function|null} fn
+   * @param {...any} args
+   */
   _safeCall(name, fn, ...args) {
     if (!fn) return;
     try {
@@ -149,10 +196,10 @@ class Loop {
 
   /**
    * Run the think/act/observe loop.
-   * @param {Array<object>} messages - Conversation messages in OpenAI format.
-   * @param {Array<object>} [tools=[]] - Tool definitions with name, execute, description, parameters.
-   * @param {object} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object, cost: number, error: string|null, msgs: Array<object>}>}
+   * @param {Message[]} messages - Conversation messages in OpenAI format.
+   * @param {ToolDef[]} [tools=[]] - Tool definitions with name, execute, description, parameters.
+   * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[]}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -244,7 +291,7 @@ class Loop {
       msgs.push({
         role: 'assistant',
         content: result.text || null,
-        tool_calls: result.toolCalls.map(tc => ({
+        tool_calls: result.toolCalls.map((/** @type {ToolCall} */ tc) => ({
           id: tc.id,
           type: 'function',
           function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
@@ -381,11 +428,12 @@ class Loop {
 
   /**
    * Health check — validates provider, store, and tools without throwing.
-   * @param {Array<object>} [tools=[]] - Tool definitions to validate.
+   * @param {ToolDef[]} [tools=[]] - Tool definitions to validate.
    * @returns {Promise<{provider: {ok: boolean, error?: string}, store: {ok: boolean, error?: string, skipped: boolean}, tools: {ok: boolean, errors?: string[]}}>}
    * Never throws — all failures captured in return value.
    */
   async validate(tools = []) {
+    /** @type {{provider: {ok: boolean, error?: string}, store: {ok: boolean, error?: string, skipped: boolean}, tools: {ok: boolean, errors?: string[]}}} */
     const result = {
       provider: { ok: false },
       store: { ok: false, skipped: false },
@@ -421,6 +469,7 @@ class Loop {
     }
 
     // Tools check
+    /** @type {string[]} */
     const toolErrors = [];
     for (const tool of tools) {
       if (typeof tool.name !== 'string' || !tool.name) {
@@ -442,6 +491,13 @@ class Loop {
     return result;
   }
 
+  /**
+   * Stateful single-turn chat that maintains conversation history across calls.
+   * @param {string} text - User message.
+   * @param {ToolDef[]} [tools=[]] - Tool definitions.
+   * @param {Record<string, any>} [options={}] - Per-run overrides.
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[]}>}
+   */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });
     const result = await this.run(this._history, tools, options);

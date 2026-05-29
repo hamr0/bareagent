@@ -6,6 +6,60 @@ const { join } = require('node:path');
 const { homedir } = require('node:os');
 const { ToolError } = require('./errors');
 
+/** @typedef {import('../types').ToolDef} ToolDef */
+
+/**
+ * A server definition as found in an IDE/MCP config file.
+ * @typedef {object} ServerDef
+ * @property {string} command
+ * @property {string[]} [args]
+ * @property {Record<string, string>} [env]
+ * @property {string} [cwd]
+ */
+
+/**
+ * Raw tool descriptor as returned by an MCP server's tools/list.
+ * @typedef {object} McpTool
+ * @property {string} name
+ * @property {string} [description]
+ * @property {Record<string, any>} [inputSchema]
+ */
+
+/**
+ * Per-server entry persisted in .mcp-bridge.json.
+ * @typedef {object} BridgeServerEntry
+ * @property {string} command
+ * @property {string[]} args
+ * @property {Record<string, string>} [env]
+ * @property {string} [cwd]
+ * @property {Record<string, string>} tools - tool name -> "allow" | "deny"
+ */
+
+/**
+ * Persisted bridge config (.mcp-bridge.json).
+ * @typedef {object} BridgeConfig
+ * @property {string} discovered - ISO timestamp
+ * @property {string} ttl
+ * @property {Record<string, BridgeServerEntry>} servers
+ */
+
+/**
+ * A denied-tool descriptor surfaced to the LLM.
+ * @typedef {object} DeniedTool
+ * @property {string} server
+ * @property {string} tool
+ * @property {string} description
+ */
+
+/**
+ * JSON-RPC stdio client over a spawned MCP server.
+ * @typedef {object} RpcClient
+ * @property {(method: string, params?: object) => Promise<any>} rpc
+ * @property {(method: string, params?: object) => void} notify
+ * @property {import('node:child_process').ChildProcessWithoutNullStreams} child
+ * @property {string} stderr
+ */
+
 // --- Config discovery (from IDE configs) ---
 
 const DEFAULT_CONFIG_PATHS = [
@@ -16,8 +70,13 @@ const DEFAULT_CONFIG_PATHS = [
   () => join(homedir(), '.cursor', 'mcp.json'),                        // Cursor
 ];
 
+/**
+ * @param {string[]} [configPaths]
+ * @returns {Map<string, ServerDef>}
+ */
 function discoverServers(configPaths) {
   const paths = configPaths || DEFAULT_CONFIG_PATHS.map(fn => fn());
+  /** @type {Map<string, ServerDef>} */
   const servers = new Map();
 
   for (const p of paths) {
@@ -40,14 +99,21 @@ function discoverServers(configPaths) {
 const DEFAULT_BRIDGE_PATH = () => join(process.cwd(), '.mcp-bridge.json');
 const DEFAULT_TTL = '24h';
 
+/** @param {string} [ttl] */
 function parseTTL(ttl) {
   const match = (ttl || DEFAULT_TTL).match(/^(\d+)(s|m|h|d)$/);
   if (!match) return 24 * 60 * 60 * 1000;
   const n = parseInt(match[1]);
-  const unit = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[match[2]];
+  /** @type {Record<string, number>} */
+  const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  const unit = units[match[2]];
   return n * unit;
 }
 
+/**
+ * @param {string} filePath
+ * @returns {BridgeConfig|null}
+ */
 function readBridgeConfig(filePath) {
   try {
     return JSON.parse(readFileSync(filePath, 'utf8'));
@@ -56,10 +122,15 @@ function readBridgeConfig(filePath) {
   }
 }
 
+/**
+ * @param {string} filePath
+ * @param {BridgeConfig} config
+ */
 function writeBridgeConfig(filePath, config) {
   writeFileSync(filePath, JSON.stringify(config, null, 2) + '\n');
 }
 
+/** @param {BridgeConfig|null} config */
 function isExpired(config) {
   if (!config || !config.discovered) return true;
   const ttlMs = parseTTL(config.ttl);
@@ -73,8 +144,13 @@ function isExpired(config) {
  * - New tools on existing server: added as "allow"
  * - Removed tools on existing server: removed from config
  * - Existing tools: user's allow/deny preserved
+ * @param {BridgeConfig|null} existing
+ * @param {Map<string, ServerDef>} discovered
+ * @param {Map<string, McpTool[]>} freshTools
+ * @returns {BridgeConfig}
  */
 function mergeBridgeConfig(existing, discovered, freshTools) {
+  /** @type {BridgeConfig} */
   const merged = {
     discovered: new Date().toISOString(),
     ttl: existing?.ttl || DEFAULT_TTL,
@@ -86,6 +162,7 @@ function mergeBridgeConfig(existing, discovered, freshTools) {
     const existingServer = existing?.servers?.[name];
     const existingTools = existingServer?.tools || {};
 
+    /** @type {Record<string, string>} */
     const tools = {};
     for (const t of serverTools) {
       tools[t.name] = existingTools[t.name] || 'allow';
@@ -105,8 +182,13 @@ function mergeBridgeConfig(existing, discovered, freshTools) {
 
 // --- Env resolution ---
 
+/**
+ * @param {Record<string, string>} [env]
+ * @returns {Record<string, string>}
+ */
 function resolveEnv(env) {
   if (!env) return {};
+  /** @type {Record<string, string>} */
   const resolved = {};
   for (const [k, v] of Object.entries(env)) {
     resolved[k] = typeof v === 'string'
@@ -118,6 +200,11 @@ function resolveEnv(env) {
 
 // --- JSON-RPC stdio client ---
 
+/**
+ * @param {string} name
+ * @param {ServerDef} def
+ * @returns {RpcClient}
+ */
 function createRpcClient(name, def) {
   const { command, args = [], env, cwd } = def;
   const mergedEnv = { ...process.env, ...resolveEnv(env) };
@@ -128,6 +215,7 @@ function createRpcClient(name, def) {
     ...(cwd && { cwd }),
   });
 
+  /** @type {Map<number, {resolve: (v: any) => void, reject: (e: any) => void}>} */
   const pending = new Map();
   let nextId = 1;
   let buffer = '';
@@ -167,6 +255,11 @@ function createRpcClient(name, def) {
     pending.clear();
   });
 
+  /**
+   * @param {string} method
+   * @param {object} [params]
+   * @returns {Promise<any>}
+   */
   function rpc(method, params = {}) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
@@ -176,6 +269,10 @@ function createRpcClient(name, def) {
     });
   }
 
+  /**
+   * @param {string} method
+   * @param {object} [params]
+   */
   function notify(method, params = {}) {
     const msg = JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n';
     child.stdin.write(msg);
@@ -186,6 +283,10 @@ function createRpcClient(name, def) {
 
 // --- Content unwrapping ---
 
+/**
+ * @param {Array<{type?: string, text?: string}>|any} content
+ * @returns {string|any}
+ */
 function unwrapContent(content) {
   if (!Array.isArray(content) || content.length === 0) return '';
   if (content.length === 1 && content[0].type === 'text') return content[0].text;
@@ -197,6 +298,12 @@ function unwrapContent(content) {
 // Runtime arg-dependent policy has moved to Loop-level (new Loop({ policy })).
 // mcp-bridge retains only the static .mcp-bridge.json allow/deny filter below —
 // that decides which tools are exposed to the Loop in the first place.
+/**
+ * @param {string} serverName
+ * @param {McpTool[]} mcpTools
+ * @param {(method: string, params?: object) => Promise<any>} rpc
+ * @returns {ToolDef[]}
+ */
 function wrapTools(serverName, mcpTools, rpc) {
   return mcpTools.map(t => ({
     name: `${serverName}_${t.name}`,
@@ -216,6 +323,7 @@ function wrapTools(serverName, mcpTools, rpc) {
 
 // --- Server lifecycle ---
 
+/** @param {import('node:child_process').ChildProcess} child */
 async function killServer(child) {
   if (child.exitCode !== null) return;
 
@@ -228,7 +336,9 @@ async function killServer(child) {
   // Short grace, then SIGTERM, then SIGKILL. Each wait clears its timer
   // promptly when the child closes so we don't block the event loop after
   // exit (which kept node:test's file-level wrapper hanging).
+  /** @param {number} ms @returns {Promise<void>} */
   const waitClose = (ms) => new Promise(resolve => {
+    /** @type {NodeJS.Timeout} */
     let timer;
     const onClose = () => { clearTimeout(timer); resolve(); };
     child.once('close', onClose);
@@ -254,6 +364,12 @@ async function killServer(child) {
 
 // --- Connect + list tools from a server ---
 
+/**
+ * @param {string} name
+ * @param {ServerDef} def
+ * @param {number} [timeout]
+ * @returns {Promise<{mcpTools: McpTool[], client: RpcClient}>}
+ */
 async function connectAndListTools(name, def, timeout = 15000) {
   const client = createRpcClient(name, def);
 
@@ -278,10 +394,18 @@ async function connectAndListTools(name, def, timeout = 15000) {
 
 // --- System context for LLM ---
 
+/**
+ * @param {string[]} servers
+ * @param {ToolDef[]} tools
+ * @param {DeniedTool[]} denied
+ * @returns {string}
+ */
 function buildSystemContext(servers, tools, denied) {
+  /** @type {string[]} */
   const lines = [];
   lines.push(`MCP Bridge: ${tools.length} tools available from ${servers.length} server(s): ${servers.join(', ')}.`);
 
+  /** @type {Record<string, string[]>} */
   const byServer = {};
   for (const t of tools) {
     const sep = t.name.indexOf('_');
@@ -328,9 +452,9 @@ function buildSystemContext(servers, tools, denied) {
  * tool name doesn't travel as `action.type` — that's a deliberate v0.9
  * trade for one consistent gate-check call per LLM tool invocation.
  *
- * @param {Array} tools - The bulk-loaded, name-prefixed tools array.
- * @param {string} discoveredAt - ISO timestamp from .mcp-bridge.json.
- * @returns {Array} [mcp_discover, mcp_invoke]
+ * @param {ToolDef[]} tools - The bulk-loaded, name-prefixed tools array.
+ * @param {string} [discoveredAt] - ISO timestamp from .mcp-bridge.json.
+ * @returns {ToolDef[]} [mcp_discover, mcp_invoke]
  */
 function buildMetaTools(tools, discoveredAt) {
   // Catalog descriptors: same info the LLM would see for bulk-loaded tools,
@@ -364,7 +488,7 @@ function buildMetaTools(tools, discoveredAt) {
         },
       },
     },
-    execute: async ({ server } = {}) => {
+    execute: async (/** @type {{ server?: string }} */ { server } = {}) => {
       const filtered = server
         ? catalog.filter(t => t.server === server)
         : catalog;
@@ -394,7 +518,7 @@ function buildMetaTools(tools, discoveredAt) {
       },
       required: ['name'],
     },
-    execute: async ({ name, args }) => {
+    execute: async (/** @type {{ name: string, args?: object }} */ { name, args }) => {
       const tool = byName.get(name);
       if (!tool) {
         throw new ToolError(`mcp_invoke: unknown tool "${name}". Call mcp_discover for the current catalog.`, {
@@ -431,14 +555,14 @@ function buildMetaTools(tools, discoveredAt) {
  * @param {string[]} [opts.servers] - Limit to these server names.
  * @param {number} [opts.timeout=15000] - Per-server init timeout in ms.
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
- * @param {(name: string, def: object) => boolean | Promise<boolean>} [opts.confirmServer]
+ * @param {(name: string, def: ServerDef) => boolean | Promise<boolean>} [opts.confirmServer]
  *   Vet each discovered server BEFORE its `command` is spawned. Connecting to an
  *   MCP server runs its command, and discovery reads configs from the cwd (a
  *   `.mcp.json` in an untrusted repo) as well as the user's home/IDE configs.
  *   Return false to skip a server (its command is never executed). A throw is
  *   treated as a deny (fail-closed). Default: every discovered server is trusted
  *   (unchanged behavior) — pass this to gate command execution.
- * @returns {Promise<{tools: Array, metaTools: Array, servers: string[], systemContext: string, denied: Array, close: Function}>}
+ * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, close: Function}>}
  */
 async function createMCPBridge(opts = {}) {
   if ('policy' in opts) {
@@ -454,6 +578,7 @@ async function createMCPBridge(opts = {}) {
   // Vet a server before spawning its command. Fail-closed: an undefined hook
   // trusts all (unchanged behavior); a throw denies.
   const confirmServer = typeof opts.confirmServer === 'function' ? opts.confirmServer : null;
+  /** @param {string} name @param {ServerDef} def @returns {Promise<boolean>} */
   const vetServer = async (name, def) => {
     if (!confirmServer) return true;
     try { return (await confirmServer(name, def)) === true; }
@@ -475,12 +600,16 @@ async function createMCPBridge(opts = {}) {
     // If discovered.size === 0 but config exists, fall through and use the existing config
     // rather than wiping it on a transient discovery failure.
     if (discovered.size > 0) {
+      /** @type {Map<string, McpTool[]>} */
       const freshTools = new Map();
+      /** @type {Map<string, RpcClient>} */
       const connectResults = new Map();
+      /** @type {Array<{server: string, error: string}>} */
       const errors = [];
 
-      const toDiscover = opts.servers
-        ? [...discovered.entries()].filter(([n]) => opts.servers.includes(n))
+      const reqServers = opts.servers;
+      const toDiscover = reqServers
+        ? [...discovered.entries()].filter(([n]) => reqServers.includes(n))
         : [...discovered.entries()];
 
       await Promise.all(toDiscover.map(async ([name, def]) => {
@@ -518,24 +647,38 @@ async function createMCPBridge(opts = {}) {
     }
   }
 
+  // At this point config is guaranteed non-null: it either existed, was just
+  // written by the refresh branch, or we returned early above.
+  if (!config) {
+    return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+  }
+  /** @type {BridgeConfig} */
+  const cfg = config;
+
   // Filter to requested servers
-  const serverNames = opts.servers
-    ? opts.servers.filter(n => config.servers[n])
-    : Object.keys(config.servers);
+  const reqServers2 = opts.servers;
+  const serverNames = reqServers2
+    ? reqServers2.filter(n => cfg.servers[n])
+    : Object.keys(cfg.servers);
 
   if (serverNames.length === 0) {
     return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
   }
 
   // Connect to servers and wrap only allowed tools
+  /** @type {ToolDef[]} */
   const tools = [];
+  /** @type {import('node:child_process').ChildProcess[]} */
   const children = [];
+  /** @type {string[]} */
   const connected = [];
+  /** @type {DeniedTool[]} */
   const denied = [];
+  /** @type {Array<{server: string, error: string}>} */
   const errors = [];
 
   await Promise.all(serverNames.map(async (name) => {
-    const serverConf = config.servers[name];
+    const serverConf = cfg.servers[name];
     const allowedToolNames = Object.entries(serverConf.tools)
       .filter(([, perm]) => perm === 'allow')
       .map(([t]) => t);

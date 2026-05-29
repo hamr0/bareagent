@@ -1,5 +1,22 @@
 'use strict';
 
+/** @typedef {import('../types').Provider} Provider */
+
+/**
+ * @typedef {object} Step
+ * @property {string} id - Unique step identifier.
+ * @property {string} action - Description of the step to execute.
+ * @property {string[]} dependsOn - Ids of steps that must complete first.
+ * @property {string} status - Lifecycle status (e.g. 'pending').
+ */
+
+/**
+ * @typedef {object} PlannerOptions
+ * @property {Provider} provider - LLM provider (must implement generate()).
+ * @property {string} [prompt] - Custom planning prompt override.
+ * @property {number} [cacheTTL] - Cache time-to-live in ms. 0 disables caching.
+ */
+
 const PLAN_PROMPT = `You are a planning agent. Break the user's goal into concrete steps.
 
 Rules:
@@ -16,12 +33,10 @@ Output format:
 
 class Planner {
   /**
-   * @param {object} options
-   * @param {object} options.provider - LLM provider (must implement generate()).
-   * @param {string} [options.prompt] - Custom planning prompt override.
+   * @param {PlannerOptions} options
    * @throws {Error} `[Planner] requires a provider` — when options.provider is missing.
    */
-  constructor(options = {}) {
+  constructor(options = /** @type {PlannerOptions} */ ({})) {
     if (!options.provider) throw new Error('[Planner] requires a provider');
     this.provider = options.provider;
     this.prompt = options.prompt || PLAN_PROMPT;
@@ -32,8 +47,8 @@ class Planner {
   /**
    * Generate a step DAG from a goal.
    * @param {string} goal - The user's goal to decompose.
-   * @param {object} [context={}] - Optional context with info field.
-   * @returns {Promise<Array<{id: string, action: string, dependsOn: string[], status: string}>>}
+   * @param {{info?: string}} [context={}] - Optional context with info field.
+   * @returns {Promise<Step[]>}
    * @throws {Error} `[Planner] could not parse plan` — when LLM output is not parseable JSON.
    * @throws {Error} `[Planner] expected JSON array` — when parsed result is not an array.
    * @throws {Error} `[Planner] step missing id or action` — when a step lacks required fields.
@@ -74,6 +89,10 @@ class Planner {
     this._cache.clear();
   }
 
+  /**
+   * @param {string} text - Raw LLM output to parse into steps.
+   * @returns {Step[]}
+   */
   _parse(text) {
     // Extract JSON array from response (handle markdown code blocks)
     const cleaned = text.replace(/^```(?:json)?\s*\n?/m, '').replace(/\n?```\s*$/m, '').trim();
@@ -93,7 +112,7 @@ class Planner {
     const ids = new Set(steps.map(s => s.id));
     return steps.map(s => {
       if (!s.id || !s.action) throw new Error(`[Planner] step missing id or action: ${JSON.stringify(s)}`);
-      const deps = (s.dependsOn || []).filter(d => ids.has(d));
+      const deps = (s.dependsOn || []).filter(/** @param {string} d */ d => ids.has(d));
       return { id: s.id, action: s.action, dependsOn: deps, status: 'pending' };
     });
   }

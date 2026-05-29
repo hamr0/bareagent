@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
+/** @typedef {import('../types').Provider} Provider */
+
 const args = process.argv.slice(2);
+/** @param {string} name */
 const flag = (name) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args[i + 1] : undefined;
@@ -10,6 +13,7 @@ const flag = (name) => {
 const providerName = flag('provider') || 'openai';
 const model = flag('model');
 
+/** @returns {Provider} */
 function createProvider() {
   if (providerName === 'openai') {
     const { OpenAIProvider } = require('../src/provider-openai');
@@ -21,7 +25,7 @@ function createProvider() {
   if (providerName === 'anthropic') {
     const { AnthropicProvider } = require('../src/provider-anthropic');
     return new AnthropicProvider({
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey: process.env.ANTHROPIC_API_KEY || '',
       ...(model && { model }),
     });
   }

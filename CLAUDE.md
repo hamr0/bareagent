@@ -48,7 +48,11 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 npm test                                    # All tests (unit + integration + e2e)
 node --test test/integration*.test.js       # Integration only (needs API keys)
 node --test test/e2e.test.js                # E2E composition tests
+npm run typecheck                           # tsc --checkJs (strictNullChecks) over JSDoc — runs in CI
+npm run build:types                         # emit .d.ts from JSDoc (auto-runs on prepublishOnly)
 ```
+
+Source is pure JS + JSDoc; `.d.ts` are generated (git-ignored, shipped on publish). Keep JSDoc accurate — CI runs `npm run typecheck` on every push/PR and gates publish. Shared type shapes live in `types/`.
 
 ## Key Patterns
 

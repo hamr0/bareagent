@@ -4,6 +4,20 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript declarations (`.d.ts`) generated from JSDoc.** Consumers now get full type information and editor autocomplete. Types are emitted by `tsc` from the existing JSDoc (`npm run build:types`), shipped to npm via a `prepublishOnly` hook, and resolved through `types` conditions on every `exports` subpath (`.`, `./errors`, `./providers`, `./stores`, `./transports`, `./tools`, `./mcp`, `./bareguard`) plus a top-level `types` field. Generated `.d.ts` are git-ignored (built on publish); hand-written shared shapes live in `types/` and ship with the package.
+- **`types/index.d.ts`** — shared cross-cutting type shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`, `Ctx`) referenced from JSDoc across the codebase. **`types/shims.d.ts`** — ambient `any` module declarations for deps that ship no types (`bareguard`, `better-sqlite3`, `barebrowse`, `baremobile`, `cron-parser`), so the typecheck runs without installing native/optional modules.
+
+### Tooling
+
+- **CI typecheck guardrail.** New `.github/workflows/ci.yml` runs `npm run typecheck` (`tsc --checkJs`) + the test suite on every push and PR — previously nothing ran on PRs. `publish.yml` gained the same typecheck step before tests, so a type error blocks publish. `tsc` runs `checkJs` with `strictNullChecks` (full `strict` was evaluated but relaxed to null-checks-only: it caught ~95% annotation-completeness noise and ~5% genuine null-safety, which `strictNullChecks` retains). All JSDoc across `src/`, `tools/`, and `bin/` was annotated to type-check clean (JSDoc-only; no runtime behavior change).
+- **New scripts:** `typecheck` (`tsc --noEmit`), `build:types` (`tsc`), `prepublishOnly` (`npm run build:types`). New dev deps: `typescript`, `@types/node`.
+
+### Fixed
+
+- **`src/bareguard-adapter.js` — `filterTools` no longer crashes on a bound-`this` Gate.** While annotating types, `gate.allows` had been extracted to a local and called unbound, losing `this` (bareguard's `allows` reads `this._initialized`). It is now called via a `gate`-bound reference. Caught by the real-bareguard integration test.
+
 ## [0.11.0] — 2026-05-23
 
 **Security hardening pass.** A `/security` audit + empirical stress-testing (each finding reproduced against the real code with mock providers, then re-verified after the fix) surfaced one governance-bypass plus a spread of fail-open defaults. All are now fail-closed. Three carry an intentional, consumer-visible behavior change — see **Changed** — each with an explicit opt-out. Full non-`src` regression suite green (324 tests).

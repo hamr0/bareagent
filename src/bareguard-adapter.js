@@ -2,10 +2,34 @@
 
 const { HaltError } = require('./errors');
 
+/** @typedef {import('../types').Ctx} Ctx */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').Usage} Usage */
+
+/**
+ * A bareguard Gate instance. Comes from the ambient `bareguard` module, so its
+ * methods are accessed structurally here.
+ * @typedef {object} Gate
+ * @property {(action: any) => (GateDecision | Promise<GateDecision>)} check
+ * @property {(action: any, outcome?: any) => any} record
+ * @property {(toolName: string) => (boolean | Promise<boolean>)} [allows]
+ */
+
+/**
+ * A decision returned by `gate.check`.
+ * @typedef {object} GateDecision
+ * @property {string} [outcome] - 'allow' when permitted.
+ * @property {string} [severity] - 'halt' for halt-severity denials.
+ * @property {string} [rule] - The matched rule name.
+ * @property {string} [reason] - Human-readable reason.
+ * @property {Record<string, any>} [context] - Arbitrary structured context.
+ */
+
 // Safe-stringify for tool results: tools can return circular structures or
 // values that include functions / undefined / bigints. Falling back to String()
 // keeps gate.record from throwing inside onToolResult (which would surface as a
 // loop:error{source:'onToolResult'} for what is really a serialization quirk).
+/** @param {any} value */
 function safeStringify(value) {
   if (typeof value === 'string') return value;
   try {
@@ -46,7 +70,7 @@ let warnedWrap = false;
  * throw HaltError from the policy closure; Loop catches it and exits cleanly with
  * loop:error{source:'halt'} + loop:done — the deny is NOT fed back to the LLM.
  *
- * @param {object} gate - A bareguard Gate instance (must have .check, .record, .allows).
+ * @param {Gate} gate - A bareguard Gate instance (must have .check, .record, .allows).
  * @param {object} [options]
  * @param {Function} [options.formatDeny] - (decision, toolName) => string. Transforms
  *   the deny string fed to the LLM. The second arg is the bareagent tool name (handy
@@ -93,6 +117,11 @@ function wireGate(gate, options = {}) {
   const formatDeny = options.formatDeny || defaultFormatDeny;
   const translate = options.actionTranslator || defaultActionTranslator;
 
+  /**
+   * @param {string} toolName
+   * @param {any} args
+   * @param {Ctx} ctx
+   */
   const policy = async (toolName, args, ctx) => {
     const decision = await gate.check(translate(toolName, args, ctx));
     if (decision.outcome === 'allow') return true;
@@ -105,6 +134,15 @@ function wireGate(gate, options = {}) {
     return formatDeny(decision, toolName);
   };
 
+  /**
+   * @param {object} arg
+   * @param {string|null} [arg.model]
+   * @param {string|null} [arg.provider]
+   * @param {Usage} [arg.usage]
+   * @param {number} [arg.costUsd]
+   * @param {number|null} [arg.durationMs]
+   * @param {Ctx} [arg.ctx]
+   */
   const onLlmResult = async ({ model, provider, usage, costUsd, durationMs, ctx }) => {
     // LLM rounds bypass actionTranslator — they always use the canonical
     // {type:'llm'} action so budget rules can match without translator collusion.
@@ -118,6 +156,15 @@ function wireGate(gate, options = {}) {
     );
   };
 
+  /**
+   * @param {object} arg
+   * @param {string} arg.name
+   * @param {any} [arg.args]
+   * @param {any} [arg.result]
+   * @param {Error|null} [arg.error]
+   * @param {number|null} [arg.durationMs]
+   * @param {Ctx} [arg.ctx]
+   */
   const onToolResult = async ({ name, args, result, error, durationMs, ctx }) => {
     const action = translate(name, args, ctx);
     if (error) {
@@ -133,6 +180,10 @@ function wireGate(gate, options = {}) {
     }
   };
 
+  /**
+   * @param {ToolDef[]} tools
+   * @returns {Promise<ToolDef[]>}
+   */
   const filterTools = async (tools) => {
     if (!Array.isArray(tools)) {
       throw new Error('[wireGate.filterTools] expects an array of tools');
@@ -140,13 +191,20 @@ function wireGate(gate, options = {}) {
     if (typeof gate.allows !== 'function') {
       throw new Error('[wireGate.filterTools] gate must have .allows (bareguard >= 0.2)');
     }
+    // Bind to the Gate so `this` stays correct (bareguard's allows reads
+    // this._initialized) — extracting the method unbound would crash.
+    const allows = gate.allows.bind(gate);
     // Parallel: gate.allows is config-driven and pure, so concurrent calls are
     // safe. Matters for large MCP catalogs (50+ tools) where sequential awaits
     // were noticeable overhead on every startup.
-    const verdicts = await Promise.all(tools.map(t => gate.allows(t.name)));
+    const verdicts = await Promise.all(tools.map(t => allows(t.name)));
     return tools.filter((_, i) => verdicts[i]);
   };
 
+  /**
+   * @param {ToolDef} tool
+   * @returns {ToolDef}
+   */
   function wrapTool(tool) {
     if (!warnedWrap) {
       warnedWrap = true;
@@ -161,7 +219,7 @@ function wireGate(gate, options = {}) {
     const original = tool.execute;
     return {
       ...tool,
-      execute: async (args) => {
+      execute: async (/** @type {any} */ args) => {
         const action = { type: tool.name, args };
         const startedAt = Date.now();
         try {
@@ -182,6 +240,10 @@ function wireGate(gate, options = {}) {
     };
   }
 
+  /**
+   * @param {ToolDef[]} tools
+   * @returns {ToolDef[]}
+   */
   function wrapTools(tools) {
     if (!Array.isArray(tools)) {
       throw new Error('[wireGate.wrapTools] expects an array of tools');
@@ -192,6 +254,11 @@ function wireGate(gate, options = {}) {
   return { policy, onLlmResult, onToolResult, filterTools, wrapTool, wrapTools };
 }
 
+/**
+ * @param {GateDecision} decision
+ * @param {string} toolName
+ * @returns {string}
+ */
 function defaultFormatDeny(decision, toolName) {
   const tag = `[deny: ${decision.rule}]`;
   return decision.reason ? `${tag} ${decision.reason}` : `${tag} ${toolName} denied`;
@@ -202,6 +269,11 @@ function defaultFormatDeny(decision, toolName) {
 // does NOT activate `bash`/`fs`/`net` primitives — those require `action.type`
 // to be `bash`/`read`/`write`/etc. and read fields like `action.cmd` /
 // `action.path` at the top level. Override via `wireGate(gate, { actionTranslator })`.
+/**
+ * @param {string} toolName
+ * @param {any} args
+ * @param {Ctx} ctx
+ */
 function defaultActionTranslator(toolName, args, ctx) {
   return { type: toolName, args, _ctx: ctx ?? null };
 }

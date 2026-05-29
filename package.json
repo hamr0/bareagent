@@ -3,9 +3,11 @@
   "version": "0.11.0",
   "files": [
     "index.js",
+    "index.d.ts",
     "src/",
     "bin/",
     "tools/",
+    "types/",
     "LICENSE",
     "NOTICE"
   ],
@@ -17,18 +19,19 @@
     "url": "git+https://github.com/hamr0/bareagent.git"
   },
   "main": "index.js",
+  "types": "./index.d.ts",
   "bin": {
     "bare-agent": "bin/cli.js"
   },
   "exports": {
-    ".": "./index.js",
-    "./errors": "./src/errors.js",
-    "./providers": "./src/providers.js",
-    "./stores": "./src/stores.js",
-    "./transports": "./src/transports.js",
-    "./tools": "./src/tools.js",
-    "./mcp": "./src/mcp.js",
-    "./bareguard": "./src/bareguard-adapter.js",
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./errors": { "types": "./src/errors.d.ts", "default": "./src/errors.js" },
+    "./providers": { "types": "./src/providers.d.ts", "default": "./src/providers.js" },
+    "./stores": { "types": "./src/stores.d.ts", "default": "./src/stores.js" },
+    "./transports": { "types": "./src/transports.d.ts", "default": "./src/transports.js" },
+    "./tools": { "types": "./src/tools.d.ts", "default": "./src/tools.js" },
+    "./mcp": { "types": "./src/mcp.d.ts", "default": "./src/mcp.js" },
+    "./bareguard": { "types": "./src/bareguard-adapter.d.ts", "default": "./src/bareguard-adapter.js" },
     "./package.json": "./package.json"
   },
   "engines": {
@@ -62,6 +65,13 @@
     }
   },
   "scripts": {
-    "test": "node --test --test-force-exit test/**/*.test.js"
+    "test": "node --test --test-force-exit test/**/*.test.js",
+    "typecheck": "tsc --noEmit",
+    "build:types": "tsc",
+    "prepublishOnly": "npm run build:types"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.7.0"
   }
 }

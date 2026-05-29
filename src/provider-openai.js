@@ -4,17 +4,26 @@ const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
 
+/** @typedef {import('../types').Message} Message */
+/** @typedef {import('../types').ToolDef} ToolDef */
+/** @typedef {import('../types').ToolCall} ToolCall */
+/** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * @typedef {object} OpenAIOptions
+ * @property {string} [apiKey]
+ * @property {string} [model='gpt-4o-mini']
+ * @property {string} [baseUrl='https://api.openai.com/v1']
+ * @property {boolean} [exposeErrorBody=false] - Attach the full upstream
+ *   response to `err.body` on HTTP errors. Off by default so an unexpected
+ *   field in an error payload can't leak through logs that dump the error
+ *   object; `err.message` still carries the API's error message. Turn on for
+ *   debugging only.
+ */
+
 class OpenAIProvider {
   /**
-   * @param {object} [options]
-   * @param {string} [options.apiKey]
-   * @param {string} [options.model='gpt-4o-mini']
-   * @param {string} [options.baseUrl='https://api.openai.com/v1']
-   * @param {boolean} [options.exposeErrorBody=false] - Attach the full upstream
-   *   response to `err.body` on HTTP errors. Off by default so an unexpected
-   *   field in an error payload can't leak through logs that dump the error
-   *   object; `err.message` still carries the API's error message. Turn on for
-   *   debugging only.
+   * @param {OpenAIOptions} [options]
    */
   constructor(options = {}) {
     this.apiKey = options.apiKey?.trim();
@@ -25,13 +34,14 @@ class OpenAIProvider {
 
   /**
    * Generate a response from the OpenAI API.
-   * @param {Array<object>} messages - Conversation messages.
-   * @param {Array<object>} [tools=[]] - Tool definitions.
-   * @param {object} [options={}] - Options (temperature, maxTokens).
-   * @returns {Promise<{text: string, toolCalls: Array, usage: object}>}
+   * @param {Message[]} messages - Conversation messages.
+   * @param {ToolDef[]} [tools=[]] - Tool definitions.
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens).
+   * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OpenAIProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
+    /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       messages,
@@ -51,7 +61,7 @@ class OpenAIProvider {
 
     return {
       text: msg.content || '',
-      toolCalls: (msg.tool_calls || []).map(tc => ({
+      toolCalls: (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
         id: tc.id,
         name: tc.function.name,
         arguments: JSON.parse(tc.function.arguments),
@@ -63,6 +73,11 @@ class OpenAIProvider {
     };
   }
 
+  /**
+   * @param {string} path
+   * @param {Record<string, any>} body
+   * @returns {Promise<any>}
+   */
   _request(path, body) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.baseUrl + path);
@@ -82,10 +97,10 @@ class OpenAIProvider {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(chunks);
-            if (res.statusCode >= 400) {
+            if ((res.statusCode ?? 0) >= 400) {
               return reject(new ProviderError(
                 `[OpenAIProvider] ${parsed.error?.message || `HTTP ${res.statusCode}`}`,
-                { status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined }
+                /** @type {any} */ ({ status: res.statusCode, body: this.exposeErrorBody ? parsed : undefined })
               ));
             }
             resolve(parsed);

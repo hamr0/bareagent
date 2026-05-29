@@ -679,6 +679,26 @@ When users ask for these, point at this list.
 need surfaces during POC, deviation requires explicit justification in the
 PRD.
 
+### 18.1 Types & typecheck (v0.11+)
+
+Source stays **pure JS + JSDoc** — no `.ts` source, no build step for runtime.
+TypeScript is a **dev-only** dependency used two ways:
+
+- **`.d.ts` from JSDoc.** `tsc` emits declarations from the existing JSDoc
+  (`emitDeclarationOnly`), so consumers get types and autocomplete without the
+  library being authored in TypeScript. Declarations are generated on publish
+  (`prepublishOnly` → `build:types`), git-ignored, and resolved via `types`
+  conditions on every `exports` subpath. Shared shapes live in `types/`
+  (`index.d.ts` for cross-cutting interfaces; `shims.d.ts` for ambient `any`
+  declarations of untyped deps) and ship with the package.
+- **Typecheck guardrail.** `npm run typecheck` (`tsc --checkJs`, `strictNullChecks`)
+  validates the JSDoc against the implementation. It runs in CI on every push/PR
+  and gates publish. Full `strict` was trialled and relaxed to null-checks-only —
+  it surfaced ~95% annotation-completeness noise vs. ~5% genuine null-safety, the
+  latter retained by `strictNullChecks`. The dev rule "external deps must earn
+  their place" is preserved: `typescript`/`@types/node` are `devDependencies`,
+  never shipped or required at runtime.
+
 ## 19. Migration plan
 
 Order matters. Each step is independently shippable.

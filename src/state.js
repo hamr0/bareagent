@@ -3,6 +3,7 @@
 const { readFileSync, writeFileSync } = require('fs');
 const { EventEmitter } = require('events');
 
+/** @type {Record<string, Record<string, string>>} */
 const TRANSITIONS = {
   pending:            { start: 'running', cancel: 'cancelled' },
   running:            { complete: 'done', fail: 'failed', pause: 'waiting_for_input', cancel: 'cancelled' },
@@ -11,10 +12,20 @@ const TRANSITIONS = {
   // done and cancelled are terminal
 };
 
+/**
+ * @typedef {object} Task
+ * @property {string} status
+ * @property {*} data
+ * @property {*} error
+ * @property {string} updatedAt
+ */
+
 class StateMachine extends EventEmitter {
+  /** @param {{ file?: string|null }} [options={}] */
   constructor(options = {}) {
     super();
     this.file = options.file || null;
+    /** @type {Map<string, Task>} */
     this.tasks = new Map();
     if (this.file) this._load();
   }
@@ -51,35 +62,40 @@ class StateMachine extends EventEmitter {
     return task.status;
   }
 
+  /** @param {string} taskId */
   getStatus(taskId) {
     return this.tasks.get(taskId) || null;
   }
 
+  /** @param {(event: { taskId: string, from: string, to: string, event: string, data: * }) => void} callback */
   onTransition(callback) {
     this.on('transition', callback);
     return () => this.off('transition', callback);
   }
 
   getAll() {
+    /** @type {Record<string, Task>} */
     const result = {};
     for (const [id, task] of this.tasks) result[id] = { ...task };
     return result;
   }
 
   _load() {
+    if (!this.file) return;
     try {
       const raw = readFileSync(this.file, 'utf8');
       const data = JSON.parse(raw);
-      for (const [id, task] of Object.entries(data)) this.tasks.set(id, task);
+      for (const [id, task] of Object.entries(data)) this.tasks.set(id, /** @type {Task} */ (task));
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
     }
   }
 
   _save() {
+    /** @type {Record<string, Task>} */
     const obj = {};
     for (const [id, task] of this.tasks) obj[id] = task;
-    writeFileSync(this.file, JSON.stringify(obj, null, 2) + '\n');
+    if (this.file) writeFileSync(this.file, JSON.stringify(obj, null, 2) + '\n');
   }
 }
 
