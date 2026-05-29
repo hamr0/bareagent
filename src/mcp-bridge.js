@@ -373,23 +373,32 @@ async function killServer(child) {
 async function connectAndListTools(name, def, timeout = 15000) {
   const client = createRpcClient(name, def);
 
-  const init = client.rpc('initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'bare-agent', version: '0.5.0' },
-  });
+  try {
+    const init = client.rpc('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'bare-agent', version: '0.5.0' },
+    });
 
-  let timerId;
-  const timer = new Promise((_, reject) => {
-    timerId = setTimeout(() => reject(new ToolError(`MCP server "${name}" init timed out after ${timeout}ms`)), timeout);
-  });
+    let timerId;
+    const timer = new Promise((_, reject) => {
+      timerId = setTimeout(() => reject(new ToolError(`MCP server "${name}" init timed out after ${timeout}ms`)), timeout);
+    });
 
-  try { await Promise.race([init, timer]); } finally { clearTimeout(timerId); }
-  client.notify('notifications/initialized');
+    try { await Promise.race([init, timer]); } finally { clearTimeout(timerId); }
+    client.notify('notifications/initialized');
 
-  const { tools: mcpTools } = await client.rpc('tools/list');
+    const { tools: mcpTools } = await client.rpc('tools/list');
 
-  return { mcpTools, client };
+    return { mcpTools, client };
+  } catch (err) {
+    // Connect failed (init timeout, tools/list error, etc.) — the child was
+    // spawned but never returned to the caller, so the caller can't track it
+    // for close(). Kill it here, or its open stdin pipe keeps the event loop
+    // alive and hangs the process on exit (notably node:test's file wrapper).
+    await killServer(client.child);
+    throw err;
+  }
 }
 
 // --- System context for LLM ---

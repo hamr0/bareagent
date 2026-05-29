@@ -396,7 +396,10 @@ XDG would invite cross-project queue bleed.
 
 Status transitions are appends (the file is append-only); the wake script
 emits `{"id": "...", "status": "fired", "ts": "..."}` lines, and reconstruction
-reads the whole file folding by `id`.
+reads the whole file folding by `id`. (The reference `wake.sh` fold must run
+`jq -n` so `inputs` sees every record — without null-input the first queue line
+is consumed as `jq`'s implicit `.` and dropped from the fold, so a lone pending
+defer would never fire. Fixed in [Unreleased].)
 
 **Two-phase gate semantics (defense in depth):**
 

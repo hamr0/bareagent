@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.11.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.12.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -209,7 +209,9 @@ its own children — they all share the family count. Defaults: defer
 
 **Reference cron + wake script:** `examples/wake.sh` (with
 `examples/wake.md` for setup). The script folds the defer queue with
-`jq`, picks records where `when <= now() AND status === 'pending'`,
+`jq -n` (null-input, so `inputs` reads *every* record — without `-n` the
+first queue line is consumed as `jq`'s implicit input and silently
+skipped), picks records where `when <= now() AND status === 'pending'`,
 appends a `'fired'` line, and shells out to `bare-agent --config
 <orchestrator>` with the inner action as stdin.
 

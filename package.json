@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "files": [
     "index.js",
     "index.d.ts",
@@ -24,14 +24,38 @@
     "bare-agent": "bin/cli.js"
   },
   "exports": {
-    ".": { "types": "./index.d.ts", "default": "./index.js" },
-    "./errors": { "types": "./src/errors.d.ts", "default": "./src/errors.js" },
-    "./providers": { "types": "./src/providers.d.ts", "default": "./src/providers.js" },
-    "./stores": { "types": "./src/stores.d.ts", "default": "./src/stores.js" },
-    "./transports": { "types": "./src/transports.d.ts", "default": "./src/transports.js" },
-    "./tools": { "types": "./src/tools.d.ts", "default": "./src/tools.js" },
-    "./mcp": { "types": "./src/mcp.d.ts", "default": "./src/mcp.js" },
-    "./bareguard": { "types": "./src/bareguard-adapter.d.ts", "default": "./src/bareguard-adapter.js" },
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./errors": {
+      "types": "./src/errors.d.ts",
+      "default": "./src/errors.js"
+    },
+    "./providers": {
+      "types": "./src/providers.d.ts",
+      "default": "./src/providers.js"
+    },
+    "./stores": {
+      "types": "./src/stores.d.ts",
+      "default": "./src/stores.js"
+    },
+    "./transports": {
+      "types": "./src/transports.d.ts",
+      "default": "./src/transports.js"
+    },
+    "./tools": {
+      "types": "./src/tools.d.ts",
+      "default": "./src/tools.js"
+    },
+    "./mcp": {
+      "types": "./src/mcp.d.ts",
+      "default": "./src/mcp.js"
+    },
+    "./bareguard": {
+      "types": "./src/bareguard-adapter.d.ts",
+      "default": "./src/bareguard-adapter.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {

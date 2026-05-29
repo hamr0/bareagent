@@ -301,6 +301,41 @@ describe('createMCPBridge', () => {
     }
   });
 
+  // Regression: a server whose init times out used to leak its child process —
+  // connectAndListTools threw before returning the client, so close() never
+  // tracked it, and the orphan's open stdin pipe hung the host process on exit
+  // (notably node:test's per-file wrapper, after all tests had passed).
+  it('reaps the child of a server that fails to connect (no leak)', async () => {
+    const pidFile = join(TMP, 'slow-init.pid');
+    const slowConfig = mockConfig(TMP, {
+      slowleak: {
+        command: 'node',
+        args: [MOCK_SERVER],
+        env: { MOCK_SLOW_INIT: '10000', MOCK_PID_FILE: pidFile },
+      },
+    });
+    const leakBridge = join(TMP, '.leak-bridge.json');
+    try {
+      const bridge = await createMCPBridge({ configPaths: [slowConfig], bridgePath: leakBridge, timeout: 300 });
+      assert.equal(bridge.servers.length, 0, 'slow server should fail to connect');
+      await bridge.close();
+
+      // The child wrote its pid at startup. After close(), it must be dead —
+      // before the fix it would still be alive (sleeping in MOCK_SLOW_INIT,
+      // then blocked on a never-closed stdin). Poll briefly for the signal to land.
+      const pid = parseInt(readFileSync(pidFile, 'utf8'), 10);
+      assert.ok(pid > 0, 'mock server should have recorded its pid');
+      const isAlive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+      const deadline = Date.now() + 2000;
+      while (isAlive(pid) && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 25));
+      }
+      assert.equal(isAlive(pid), false, `leaked child pid ${pid} still alive after close()`);
+    } finally {
+      cleanup(slowConfig, leakBridge, join(TMP, 'slow-init.pid'));
+    }
+  });
+
   it('filters servers by name', async () => {
     const multiConfig = mockConfig(TMP, {
       alpha: { command: 'node', args: [MOCK_SERVER] },
