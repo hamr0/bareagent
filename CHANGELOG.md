@@ -11,6 +11,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ### Tooling
 
+- **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 - **CI typecheck guardrail.** New `.github/workflows/ci.yml` runs `npm run typecheck` (`tsc --checkJs`) + the test suite on every push and PR — previously nothing ran on PRs. `publish.yml` gained the same typecheck step before tests, so a type error blocks publish. `tsc` runs `checkJs` with `strictNullChecks` (full `strict` was evaluated but relaxed to null-checks-only: it caught ~95% annotation-completeness noise and ~5% genuine null-safety, which `strictNullChecks` retains). All JSDoc across `src/`, `tools/`, and `bin/` was annotated to type-check clean (JSDoc-only; no runtime behavior change).
 - **New scripts:** `typecheck` (`tsc --noEmit`), `build:types` (`tsc`), `prepublishOnly` (`npm run build:types`). New dev deps: `typescript`, `@types/node`.
 
