@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Tooling
+
+- **`build:types` is now idempotent.** A new `prebuild:types` step (`scripts/clean-types.js`, pure Node, zero deps) removes previously-generated `.d.ts` under `src/`/`tools/`/`bin/` + the root `index.d.ts` before `tsc` re-emits them. Without it, a second local `build:types` (or a publish from a tree with stale declarations) failed with TS5055 ("would overwrite input file"), since `tsc` treats a co-located `.d.ts` as a declaration input. Hand-written `types/*.d.ts` are left untouched.
+
 ## [0.12.0] — 2026-05-29
 
 ### Added
