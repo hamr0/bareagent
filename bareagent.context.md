@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.12.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.12.1 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -16,7 +16,7 @@ npm install bare-agent
 Eight entry points:
 - `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
 - `require('bare-agent/errors')` — same error classes via a stable subpath (v0.10.1+) for adopters who want to import only the error surface
-- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback
+- `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback (the canonical short names; `*Provider` aliases — `OpenAIProvider`, `AnthropicProvider`, etc. — are also exported and match the class names, so either destructure works, v0.12.1+)
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue

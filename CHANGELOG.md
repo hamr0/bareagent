@@ -4,6 +4,16 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-05-30
+
+### Fixed
+
+- **`bareagent.context.md` is now shipped in the npm tarball.** The file was missing from the `files` array in `package.json`, so it never reached `node_modules/bare-agent/` on install — even though the README quick-start and the integration story both instruct agents to read it from there. The advertised "point your agent at the context doc" onboarding was broken on a clean install (only `README.md` shipped). Added to `files`; `npm pack` now includes the 66.9 kB guide. (Thanks to the adopter who flagged it.)
+
+### Added
+
+- **Provider `*Provider` aliases.** `require('bare-agent/providers')` now exports both the canonical short names (`OpenAI`, `Anthropic`, `Ollama`, `CLIPipe`, `Fallback`) **and** matching class-name aliases (`OpenAIProvider`, `AnthropicProvider`, `OllamaProvider`, `CLIPipeProvider`, `FallbackProvider`). Previously only the short names were exported, so the natural `const { OpenAIProvider } = require('bare-agent/providers')` — reaching for the name shown in source and stack traces — silently returned `undefined` and failed at `new OpenAIProvider()` with "is not a constructor." Both destructures now resolve to the same class. Non-breaking.
+
 ### Changed
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 

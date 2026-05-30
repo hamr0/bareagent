@@ -388,7 +388,7 @@ Interface:
 Covers: OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio, any OpenAI-compatible endpoint.
 
 ```
-new OpenAIProvider({
+new OpenAI({  // exported as `OpenAI`; `OpenAIProvider` alias also works (v0.12.1+)
   apiKey: '...',
   model: 'gpt-4o-mini',
   baseUrl: 'https://api.openai.com/v1',  // or any compatible endpoint
