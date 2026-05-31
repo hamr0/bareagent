@@ -4,6 +4,16 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-06-01
+
+### Fixed
+
+- **`examples/` is now shipped in the npm tarball.** The directory was missing from the `files` array, so the runnable reference scripts never reached `node_modules/bare-agent/`. This left the same broken-reference gap 0.12.1 closed for the integration guide: `bareagent.context.md` (now shipped) points to `examples/wake.sh` as "the runtime half of `createDeferTool`" — a functional component of the defer feature, not just a demo — yet the script itself wasn't installed. Added `examples/` to `files` (~30 kB; `.mcp-bridge.json` is gitignored and never shipped).
+
+### Added
+
+- **`examples/README.md`** — a directory-level index mirroring the README example table, so the folder is self-describing when browsed in `node_modules/` or on GitHub.
+
 ## [0.12.1] — 2026-05-30
 
 ### Fixed
