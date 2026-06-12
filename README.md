@@ -72,7 +72,7 @@ Every piece works alone — take what you need, ignore the rest.
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
 | **CircuitBreaker** | Fail fast after N errors. Auto-recovers after cooldown. Per-key isolation |
 | **Fallback** | Try providers in order — if one is down, next one picks up. Transparent to Loop |
-| **Memory** | Persist and search context. SQLite with FTS (default) or zero-dep JSON file |
+| **Memory** | Persist and search context across turns/sessions through a swappable `Store`. SQLite with FTS, zero-dep JSON file, or mount [litectx](https://npmjs.com/package/litectx) for ranked, graph-aware recall in one line — the host code never changes ([example](examples/litectx-as-store.mjs)) |
 | **StateMachine** | Task lifecycle tracking with event hooks. `pending → running → done / failed / waiting / cancelled` |
 | **Checkpoint** | Human approval gate. You provide the transport — terminal, Telegram, Slack, whatever |
 | **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |

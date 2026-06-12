@@ -43,7 +43,7 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 |---|---|---|---|---|
 | **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **DECIDED (shape) · POC-GATED (fit quality)** | **1st — the keystone** |
 | **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
-| **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **DECIDED** | now (docs + example + test) |
+| **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **DECIDED** · example + test SHIPPED (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`); doc reframe (demote `SQLiteStore`) pending | now (docs + example + test) |
 | **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **DECIDED** (recipe + example + test; zero litectx code; independent of RT-5) | when sub-agent CE is exercised |
 | **RT-5** | **Shared-db scope column** — `scope` TEXT for multi-tenant single store | bareagent (thread key) / litectx (predicate) | **DEFERRED** (trip-wire: ephemeral children / cross-child queries / multi-tenant; migration pre-paid by RT-3) | when the trip-wire fires |
 

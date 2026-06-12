@@ -554,10 +554,17 @@ new SQLite({ path: './memory.db' })
 // JSON file — zero deps, substring search
 new JsonFile({ path: './memory.json' })
 
+// litectx — ranked, graph-aware recall (RT-3 mount; requires: npm install litectx)
+// One-line swap; the host code (memory.store/search/get/delete) never changes.
+//   import { LiteCtx } from 'litectx';
+//   import { liteCtxAsStore } from 'litectx/memory-store';
+//   const memory = new Memory({ store: liteCtxAsStore(new LiteCtx({ dbPath: './agent.db' })) });
+// See examples/litectx-as-store.mjs. litectx ships the adapter; bareagent owns the Store socket.
+
 // Custom — implement { store, search, get, delete }
 ```
 
-**JsonFile scaling:** `search()` is an O(n) substring scan (no index) and every `store()`/`delete()` rewrites the whole file. Fine for hundreds–low-thousands of entries; for larger or write-heavy memory use `SQLite` (FTS5 index, incremental writes). JsonFile warns once past ~10k entries.
+**JsonFile scaling:** `search()` is an O(n) substring scan (no index) and every `store()`/`delete()` rewrites the whole file. Fine for hundreds–low-thousands of entries; for larger or write-heavy memory use `SQLite` (FTS5 index, incremental writes), or mount `litectx` for ranked graph-aware recall. JsonFile warns once past ~10k entries.
 
 ## Tool format
 
