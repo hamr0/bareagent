@@ -66,7 +66,7 @@ Every piece works alone — take what you need, ignore the rest.
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Returns estimated USD cost per run. Governance via `Loop({ policy })` — wire bareguard's `Gate` through `wireGate(gate)` and every tool call (native, MCP, browsing, mobile) traverses one chokepoint with per-caller `ctx` routing. Bareguard owns the audit log, budget caps, and halt decisions; Loop respects the verdict. `onError` + `loop:error` surface every silent-ish failure (callback throw, Checkpoint timeout) |
+| **Loop** | Think → act → observe → repeat. Calls any LLM, executes your tools, loops until done. Returns estimated USD cost per run. Governance via `Loop({ policy })` — wire bareguard's `Gate` through `wireGate(gate)` and every tool call (native, MCP, browsing, mobile) traverses one chokepoint with per-caller `ctx` routing. Bareguard owns the audit log, budget caps, and halt decisions; Loop respects the verdict. Context engineering via `Loop({ assemble })` — a per-round chokepoint to recall/compress/trim the window sent to the model (the seam litectx plugs into); returns a view, the canonical transcript stays intact, fail-open. `onError` + `loop:error` surface every silent-ish failure (callback throw, Checkpoint timeout) |
 | **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
 | **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |

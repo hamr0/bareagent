@@ -7,7 +7,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 
 | Component | File | Purpose |
 |-----------|------|---------|
-| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, `policy(tool, args, ctx)` chokepoint for bareguard adapter, fail-safe verdict, unified `loop:error`+`onError` for every silent-ish failure). Internal `HARD_ROUND_LIMIT = 100` safety net only — real bounds come from bareguard `limits.maxTurns` |
+| Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, `policy(tool, args, ctx)` chokepoint for bareguard adapter, `assemble(msgs, info)` context-assembly chokepoint for a CE library [RT-1: returns a view, transcript untouched, fail-open, HaltError propagates], fail-safe verdict, unified `loop:error`+`onError` for every silent-ish failure). Internal `HARD_ROUND_LIMIT = 100` safety net only — real bounds come from bareguard `limits.maxTurns` |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |

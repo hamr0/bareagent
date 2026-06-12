@@ -30,7 +30,7 @@ ORCHESTRATION          EXECUTION              ACTUATION
 
 ## What's implemented
 
-### Loop (`src/loop.js` — 157 lines)
+### Loop (`src/loop.js` — 543 lines)
 
 The core think → act → observe cycle. Everything else is optional scaffolding around this.
 
@@ -53,8 +53,9 @@ The core think → act → observe cycle. Everything else is optional scaffoldin
 **Optional integrations (wired via constructor):**
 - `checkpoint` — pauses before tool execution, asks human, aborts on "no"
 - `retry` — wraps provider.generate() and tool.execute() calls
-- `stream` — emits events: `loop:start`, `loop:tool_call`, `loop:tool_result`, `loop:text`, `loop:done`, `loop:error`, `checkpoint:ask`, `checkpoint:reply`
+- `stream` — emits events: `loop:start`, `loop:tool_call`, `loop:tool_result`, `loop:text`, `loop:done`, `loop:error`, `loop:assemble`, `checkpoint:ask`, `checkpoint:reply`
 - `onToolCall`, `onText`, `onError` — simple callbacks
+- `assemble(msgs, info)` — context-assembly chokepoint (RT-1): shapes the window sent to the provider each round (recall/compress/trim for a CE library like litectx). Returns a *view* — the canonical transcript is never mutated. Fail-open (errors degrade to full context); a `HaltError` propagates. See `docs/01-product/litectx-runtime-prd.md`.
 
 **Internal message format (OpenAI-compatible):**
 - Assistant tool calls: `{ role: 'assistant', content, tool_calls: [{ id, type: 'function', function: { name, arguments } }] }`

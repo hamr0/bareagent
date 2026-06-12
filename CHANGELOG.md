@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **`Loop({ assemble })` — a context-assembly chokepoint.** A new optional hook, `assemble(msgs, info) => msgs`, runs before each provider call and returns the message *view* to send that round — the seam a context-engineering library (e.g. litectx) plugs into to recall, compress, trim, or reorder the context window mid-loop. The canonical transcript (`result.msgs`) is never mutated, so it stays complete and correct. **Fail-open:** a thrown error degrades to sending the full context (a context-optimizer bug must not halt the agent); a thrown `HaltError` is a governance exit and propagates (same contract as `onLlmResult`). `info` = `{ ctx, round, tools, lastUsage }` (budget and other policy ride in `ctx`). Emits a `loop:assemble` stream event. Additive and **inert when unset** — existing behavior is byte-identical. This is RT-1 of the litectx-runtime seam set (`docs/01-product/litectx-runtime-prd.md`).
+
 ## [0.12.2] — 2026-06-01
 
 ### Fixed

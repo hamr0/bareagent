@@ -26,6 +26,10 @@ const { ToolError, HaltError } = require('./errors');
  * @property {Function} [onError]
  * @property {boolean} [throwOnError]
  * @property {Function} [policy]
+ * @property {Function} [assemble] - async (msgs, info) => msgs. Context-assembly chokepoint: shape the
+ *   window sent to the provider each round (e.g. a context-engineering library). Returns a VIEW — the
+ *   canonical transcript is never mutated. Fail-open (a thrown error degrades to full context); a
+ *   thrown HaltError propagates. `info` = { ctx, round, tools, lastUsage } (budget rides in ctx).
  * @property {Function} [onLlmResult]
  * @property {Function} [onToolResult]
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
@@ -132,6 +136,10 @@ class Loop {
       throw new Error('[Loop] options.policy must be a function (toolName, args, ctx) => true | string');
     }
     this.policy = options.policy || null;
+    if (options.assemble != null && typeof options.assemble !== 'function') {
+      throw new Error('[Loop] options.assemble must be a function (msgs, info) => msgs');
+    }
+    this.assemble = options.assemble || null;
     if (options.onLlmResult != null && typeof options.onLlmResult !== 'function') {
       throw new Error('[Loop] options.onLlmResult must be a function');
     }
@@ -243,10 +251,29 @@ class Loop {
     for (let round = 0; round < HARD_ROUND_LIMIT; round++) {
       if (this._stopped) break;
 
+      // RT-1: context-assembly chokepoint. Let a caller (e.g. a context-engineering library) shape
+      // the window sent to the provider this round. Returns a VIEW — the canonical `msgs` transcript
+      // is never mutated, so result.msgs stays complete and correct. Fail-OPEN: an assembly error
+      // degrades to sending full context (a context-optimizer bug must not halt the agent); a thrown
+      // HaltError is a governance exit and propagates (same contract as onLlmResult).
+      let toSend = msgs;
+      if (this.assemble) {
+        try {
+          const view = await this.assemble(msgs, { ctx, round, tools, lastUsage });
+          if (Array.isArray(view)) {
+            toSend = view;
+            this._safeEmit({ type: 'loop:assemble', data: { round, before: msgs.length, after: toSend.length } });
+          }
+        } catch (err) {
+          if (err instanceof HaltError) throw err;
+          this._reportError('assemble', err, { round });
+        }
+      }
+
       let result;
       const llmStartedAt = Date.now();
       try {
-        const generate = () => this.provider.generate(msgs, tools, options);
+        const generate = () => this.provider.generate(toSend, tools, options);
         result = this.retry ? await this.retry.call(generate) : await generate();
       } catch (err) {
         this._reportError('provider', err, { round });
