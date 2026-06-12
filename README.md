@@ -72,7 +72,7 @@ Every piece works alone — take what you need, ignore the rest.
 | **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
 | **CircuitBreaker** | Fail fast after N errors. Auto-recovers after cooldown. Per-key isolation |
 | **Fallback** | Try providers in order — if one is down, next one picks up. Transparent to Loop |
-| **Memory** | Persist and search context across turns/sessions through a swappable `Store`. SQLite with FTS, zero-dep JSON file, or mount [litectx](https://npmjs.com/package/litectx) for ranked, graph-aware recall in one line — the host code never changes ([example](examples/litectx-as-store.mjs)) |
+| **Memory** | Persist and search context across turns/sessions through a swappable `Store`. Zero-dep JSON file by default, or mount [litectx](https://npmjs.com/package/litectx) for ranked, graph-aware recall in one line — the host code never changes ([example](examples/litectx-as-store.mjs)). A minimal `SQLite` FTS5 store also ships, though litectx supersedes it for SQLite-backed memory |
 | **StateMachine** | Task lifecycle tracking with event hooks. `pending → running → done / failed / waiting / cancelled` |
 | **Checkpoint** | Human approval gate. You provide the transport — terminal, Telegram, Slack, whatever |
 | **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |
@@ -182,6 +182,8 @@ Runnable scripts in [`examples/`](examples/) — each is self-contained and the 
 | [`orchestrator/`](examples/orchestrator/) | Multi-agent dispatch via `spawn`. Three configs, one system prompt — no orchestrator class, no role types. Roles are JSON files. |
 | [`wake.sh`](examples/wake.sh) + [`wake.md`](examples/wake.md) | Reference cron + jq script for firing deferred actions. The runtime half of `createDeferTool` — bareagent emits, `wake.sh` fires. |
 | [`replay-job.js`](examples/replay-job.js) | Supervised replay POC: record a browser task once with the LLM driving, then replay against fresh snapshots with the LLM as locator-only. Falls back to full reasoning when the locator misses, and patches the trace. |
+| [`litectx-as-store.mjs`](examples/litectx-as-store.mjs) | Mount [litectx](https://npmjs.com/package/litectx) as the `Memory` `Store` — one-line swap from `JsonFileStore` to ranked, graph-aware recall; the host code never changes (RT-3). |
+| [`litectx-mcp-child.mjs`](examples/litectx-mcp-child.mjs) | Give a spawned child agent litectx's reasoning verbs as MCP tools, read-only on its own db, via `liteCtxMcpBridgeConfig` + `cfg.mcp` (RT-4). |
 
 ---
 

@@ -43,8 +43,8 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 |---|---|---|---|---|
 | **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **DECIDED (shape) · POC-GATED (fit quality)** | **1st — the keystone** |
 | **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
-| **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **DECIDED** · example + test SHIPPED (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`); doc reframe (demote `SQLiteStore`) pending | now (docs + example + test) |
-| **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **DECIDED** (recipe + example + test; zero litectx code; independent of RT-5) | when sub-agent CE is exercised |
+| **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **SHIPPED** · example + test (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`) + doc reframe (`SQLiteStore` demoted to a back-compat note) | done |
+| **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **SHIPPED** (`liteCtxMcpBridgeConfig` + `cfg.mcp`; helper + example + tests; validated against the real binary; zero litectx code; independent of RT-5) | done |
 | **RT-5** | **Shared-db scope column** — `scope` TEXT for multi-tenant single store | bareagent (thread key) / litectx (predicate) | **DEFERRED** (trip-wire: ephemeral children / cross-child queries / multi-tenant; migration pre-paid by RT-3) | when the trip-wire fires |
 
 **Non-negotiable across all five:** the canonical conversation transcript is never corrupted by a CE
@@ -273,16 +273,21 @@ a scored pointer). The seam reconciles them:
   > schema ready, no migration" is spent here. It's a trivial additive nullable column (no backfill) but
   > goes through the incremental-migration path, not free.
 
-### 3.3 Settled (not relitigating)
+### 3.3 Settled (not relitigating) · SHIPPED 2026-06-13
 Keep the socket, retire the ambition: do **not** remove `Memory`/`Store` (it's the mount point); keep
 `JsonFileStore` as the zero-dependency default (the one capability litectx can't match — it hard-requires
 `better-sqlite3`); demote `SQLiteStore` to a doc note (litectx strictly dominates it); do **not** merge
 bareagent store code *into* litectx (dependency direction forbids it; the bundled stores are thinner,
 not richer — nothing to lift, PDF chunking absent on both sides).
 
+**Done:** `README.md` (Memory row) + `bareagent.context.md` (store snippet + JsonFile-scaling guidance)
+now lead with the zero-dep `JsonFileStore` default and litectx for rich recall; `SQLiteStore` is framed
+as a minimal back-compat store that litectx supersedes (same `better-sqlite3` requirement, richer recall).
+`Memory`/`Store`/`JsonFileStore`/`SQLiteStore` all remain — code unchanged; this was a positioning reframe.
+
 ---
 
-## 4. RT-4 — MCP mount path · DECIDED (recipe; zero litectx code; ships independent of RT-5)
+## 4. RT-4 — MCP mount path · SHIPPED (recipe; zero litectx code; ships independent of RT-5)
 
 ### 4.1 Why / what
 bareagent auto-discovers MCP servers and exposes them as tools (`mcp-bridge.js`; per-server
@@ -319,6 +324,25 @@ the "child writes to its own db" line is exactly what keeps RT-5 deferred (own-d
 Recipe + example + integration test (spawn a child with `litectx-mcp` mounted read-only on its own db;
 child `recall`s; returns). Confirm `MCPBridge` has no gap launching a stdio `litectx-mcp` child; if it
 does, *that* gap (and only that) becomes code.
+
+### 4.4 Shipped (2026-06-13)
+- **`liteCtxMcpBridgeConfig({ root, command?, args?, writable?, name? })`** (`tools/litectx-mcp.js`,
+  exported from `bare-agent/tools`) — the recipe helper. Builds the curated `.mcp-bridge.json`:
+  read-only default per §4.2, own-db via `--root`, `writable:true` the explicit opt-in. Imports
+  nothing from litectx (config curation only — the one-way dependency holds).
+- **The gap that became code:** config-driven children couldn't mount MCP. `bin/cli.js` gained
+  **`cfg.mcp`** (inline bridge config **or** a directory-confined `{ bridgePath }`) → `createMCPBridge`
+  → tools join the set **before** gating (same `policy` as native) → bridge closed on exit. Also wired
+  the **`clipipe`** provider in the CLI, enabling keyless children (pipe to any local LLM CLI).
+- **Validated against the REAL `litectx-mcp` binary**, all through the bridge: read-only curation +
+  own-db `recall`; and the three litectx-behavior residuals closed on a **populated** db — `recall`
+  returns real hits from an indexed root, `writable:true` `remember` persists + recalls back, and
+  two-root **physical isolation** (one child never sees another's writes; negative control confirmed
+  the assertion bites). Tests: `test/litectx-mcp-mount.test.js` (helper + in-process fake-bridge + a
+  gated REAL-server suite incl. the populated-db e2e) and `test/litectx-mcp-spawn.test.js` (real
+  `spawnChild → cli.js` mounts `cfg.mcp`, governed loop, exit 0). Example: `examples/litectx-mcp-child.mjs`.
+- **RT-5 stays deferred:** isolation is *physical* (own `--root`), exactly the line that keeps the
+  scope column unneeded until the §5.2 trip-wire fires.
 
 ---
 

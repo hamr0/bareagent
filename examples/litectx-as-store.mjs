@@ -59,12 +59,10 @@ async function main() {
   // 2) The ONE-LINE swap to litectx — identical hostWorkflow, ranked graph-aware recall.
   let liteCtxAsStore, LiteCtx;
   try {
-    ({ liteCtxAsStore } = require('litectx/memory-store'));
-    ({ LiteCtx } = require('litectx'));
+    ({ LiteCtx, liteCtxAsStore } = require('litectx')); // both from the main entry (litectx 0.10+)
   } catch {
     console.log('\n[litectx] not installed — the swap is one line:');
-    console.log("    import { LiteCtx } from 'litectx';");
-    console.log("    import { liteCtxAsStore } from 'litectx/memory-store';");
+    console.log("    import { LiteCtx, liteCtxAsStore } from 'litectx';");
     console.log('    const lc = new LiteCtx({ dbPath: \'./agent.db\' }); await lc.ready();');
     console.log('    const memory = new Memory({ store: liteCtxAsStore(lc) });  // ← only this line changes');
     console.log('\n  Install it (`npm install litectx`) to run the litectx half of this example.');

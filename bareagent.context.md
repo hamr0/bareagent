@@ -19,7 +19,7 @@ Eight entry points:
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback (the canonical short names; `*Provider` aliases — `OpenAIProvider`, `AnthropicProvider`, etc. — are also exported and match the class names, so either destructure works, v0.12.1+)
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
 - `require('bare-agent/transports')` — JsonlTransport
-- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue
+- `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, createDeferTool, spawnChild, readDeferQueue, liteCtxMcpBridgeConfig
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
 
@@ -69,6 +69,7 @@ Eight entry points:
 | **Spawn a child specialist agent** | createSpawnTool + bin/cli.js --config (v0.9+) |
 | **Defer an action for later (cron-fired)** | createDeferTool + examples/wake.sh (v0.9+) |
 | **Expose a large MCP catalog dynamically** | createMCPBridge → bridge.metaTools (v0.9+) |
+| **Give a child agent litectx memory (read-only, own db)** | liteCtxMcpBridgeConfig → `cfg.mcp` in a spawn child config (RT-4) |
 
 **Most projects start with Loop + Provider.** Add components as needed.
 
@@ -549,6 +550,8 @@ All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe 
 
 ```javascript
 // SQLite FTS5 — full-text search with BM25 ranking (requires: npm install better-sqlite3)
+// Minimal store, kept for back-compat. litectx strictly dominates it (same better-sqlite3
+// requirement, but adds ranked graph-aware recall) — prefer litectx for SQLite-backed memory.
 new SQLite({ path: './memory.db' })
 
 // JSON file — zero deps, substring search
@@ -556,15 +559,30 @@ new JsonFile({ path: './memory.json' })
 
 // litectx — ranked, graph-aware recall (RT-3 mount; requires: npm install litectx)
 // One-line swap; the host code (memory.store/search/get/delete) never changes.
-//   import { LiteCtx } from 'litectx';
-//   import { liteCtxAsStore } from 'litectx/memory-store';
+//   import { LiteCtx, liteCtxAsStore } from 'litectx';
 //   const memory = new Memory({ store: liteCtxAsStore(new LiteCtx({ dbPath: './agent.db' })) });
 // See examples/litectx-as-store.mjs. litectx ships the adapter; bareagent owns the Store socket.
 
 // Custom — implement { store, search, get, delete }
 ```
 
-**JsonFile scaling:** `search()` is an O(n) substring scan (no index) and every `store()`/`delete()` rewrites the whole file. Fine for hundreds–low-thousands of entries; for larger or write-heavy memory use `SQLite` (FTS5 index, incremental writes), or mount `litectx` for ranked graph-aware recall. JsonFile warns once past ~10k entries.
+**JsonFile scaling:** `search()` is an O(n) substring scan (no index) and every `store()`/`delete()` rewrites the whole file. Fine for hundreds–low-thousands of entries; for larger or write-heavy memory mount `litectx` for ranked graph-aware recall (the minimal bundled `SQLite` FTS5 store remains for back-compat, but litectx strictly dominates it — same `better-sqlite3` requirement, richer recall). JsonFile warns once past ~10k entries.
+
+**Two ways to use litectx, pick by who consumes it (the two are independent):**
+- **As your `Store`** (RT-3, above) — *your* host code recalls via `memory.search/get`. One-line `liteCtxAsStore` swap.
+- **As a child agent's MCP toolbox** (RT-4) — give a *spawned sub-agent* litectx's own reasoning verbs (`litectx_recall`, `litectx_get`, …) so the model calls them in its loop. Use `liteCtxMcpBridgeConfig` to build the curated mount and hand it to the child via `cfg.mcp`:
+
+```js
+const { liteCtxMcpBridgeConfig } = require('bare-agent/tools');
+// Read-only by default: recall/get/impact/recent allowed; remember/forget denied
+// (writable:true to opt in — writes stay in the child's OWN --root db); index/promotions always denied.
+const mcp = liteCtxMcpBridgeConfig({ root: './child-mem' });   // own-db isolation via --root
+// In the spawn child config (bin/cli.js --config): { provider, model, tools, mcp, gate }
+//   mcp: <the config above>   → child's MCPBridge mounts litectx-mcp; tools join BEFORE gating
+// cfg.mcp also accepts a directory-confined { bridgePath } pointing at a .mcp-bridge.json on disk.
+```
+
+Requires litectx's `litectx-mcp` binary on PATH. Isolation is **physical** (each child a distinct `--root` db) — promotion to the parent is an explicit parent-side `recall`→`remember`, never automatic. See `examples/litectx-mcp-child.mjs`. bareagent imports nothing from litectx; the helper is pure config curation.
 
 ## Tool format
 

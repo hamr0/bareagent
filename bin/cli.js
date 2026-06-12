@@ -66,10 +66,53 @@ async function runConfigMode(cfgPath) {
   const stream = new Stream({ transport: new JsonlTransport() });
 
   // Provider
-  const provider = createProvider(cfg.provider || 'openai', cfg.model);
+  const provider = createProvider(cfg.provider || 'openai', cfg.model, { command: cfg.command, args: cfg.args });
 
   // Tools — registry resolved by name from a curated set of built-ins.
   const tools = await resolveTools(cfg.tools || [], { stream });
+
+  // Optional MCP mount (RT-4) — a child config can mount MCP servers (e.g. litectx-mcp, read-only on
+  // its own db) via `cfg.mcp`. Accepts an inline bridge config (`{ servers, ttl }`, as built by
+  // `liteCtxMcpBridgeConfig`) or `{ bridgePath }` pointing at one (confined to the config directory,
+  // same rule as gate.humanChannel). Mounted tools join the set BEFORE gating, so they traverse the
+  // same policy as native tools. The server `command` runs unsandboxed — same trust as `cfg.tools`.
+  /** @type {{ tools: ToolDef[], close: Function } | null} */
+  let mcpBridge = null;
+  if (cfg.mcp) {
+    const { createMCPBridge } = require('../src/mcp-bridge');
+    const os = require('node:os');
+    const cfgDir = path.resolve(path.dirname(cfgPath));
+    let bridgePath;
+    let tmpBridge = null;
+    if (cfg.mcp && typeof cfg.mcp === 'object' && cfg.mcp.servers) {
+      tmpBridge = path.join(os.tmpdir(), `bareagent-mcp-${process.pid}.json`);
+      fs.writeFileSync(tmpBridge, JSON.stringify(cfg.mcp));
+      bridgePath = tmpBridge;
+    } else if (cfg.mcp && typeof cfg.mcp.bridgePath === 'string') {
+      const p = path.resolve(cfgDir, cfg.mcp.bridgePath);
+      if (p !== cfgDir && !p.startsWith(cfgDir + path.sep)) {
+        process.stderr.write(`[cli] cfg.mcp.bridgePath must resolve inside the config directory (${cfgDir}); refusing ${p}\n`);
+        process.exit(1);
+      }
+      bridgePath = p;
+    } else {
+      process.stderr.write('[cli] cfg.mcp must be an inline bridge config ({ servers }) or { bridgePath }\n');
+      process.exit(1);
+    }
+    try {
+      mcpBridge = await createMCPBridge({
+        bridgePath,
+        servers: cfg.mcp.servers ? Object.keys(cfg.mcp.servers) : undefined,
+        timeout: cfg.mcp.timeout || 15000,
+      });
+      tools.push(...mcpBridge.tools);
+    } catch (err) {
+      process.stderr.write(`[cli] failed to mount MCP (cfg.mcp): ${err.message}\n`);
+      process.exit(1);
+    } finally {
+      if (tmpBridge) { try { fs.unlinkSync(tmpBridge); } catch { /* best-effort */ } }
+    }
+  }
 
   // Bareguard Gate (optional but strongly recommended for spawn children).
   // Fail-closed: if the config asks for a gate but wiring fails, exit non-zero
@@ -163,6 +206,7 @@ async function runConfigMode(cfgPath) {
   });
 
   await loop.run([initialMessage], gatedTools);
+  if (mcpBridge) await mcpBridge.close();
   // Stream's loop:done event has already been emitted; exit clean.
   process.exit(0);
 }
@@ -299,7 +343,15 @@ function runStdioMode() {
  * @param {string} [model]
  * @returns {Provider}
  */
-function createProvider(name, model) {
+function createProvider(name, model, opts = {}) {
+  if (name === 'clipipe') {
+    const { CLIPipeProvider } = require('../src/provider-clipipe');
+    if (!opts.command) {
+      process.stderr.write('[cli] provider "clipipe" requires a `command` in the config (or --command).\n');
+      process.exit(1);
+    }
+    return new CLIPipeProvider({ command: opts.command, args: opts.args || [], ...(model && { model }) });
+  }
   if (name === 'openai') {
     const { OpenAIProvider } = require('../src/provider-openai');
     return new OpenAIProvider({
