@@ -17,7 +17,7 @@ new Loop({
   retry: null,        // Retry instance (wraps generate + tool.execute)
   stream: null,       // Stream instance
   store: null,        // Store instance for validate() health check
-  assemble: null,     // async (msgs, info) => msgs — context-assembly chokepoint (see below)
+  assemble: null,     // async (msgs, ctx) => msgs — context-assembly chokepoint (see below)
   throwOnError: true, // Provider errors throw vs. return in result.error
   onToolCall: null,   // (name, args) => void
   onText: null,       // (text) => void
@@ -29,17 +29,21 @@ Internal `HARD_ROUND_LIMIT = 100` safety net only; real iteration bounds come fr
 
 #### `assemble` — context-assembly chokepoint
 
-`assemble(msgs, info) => msgs` runs **before each provider call** and returns the message *view* to send that round. It's the seam a context-engineering library (e.g. litectx) plugs into to recall, compress, trim, or reorder the context window mid-loop.
+`assemble(msgs, ctx) => msgs` runs **before each provider call** and returns the message *view* to send that round. It's the seam a context-engineering library (e.g. litectx) plugs into to recall, compress, trim, or reorder the context window mid-loop.
 
 - **Returns a view, not a mutation.** The canonical transcript (`result.msgs`) is never touched — only what's sent to the provider this round. Return a non-array (or nothing) for a no-op.
 - **Fail-open.** A thrown error degrades to sending the full context (a context-optimizer bug must not halt the agent). A thrown `HaltError` is a governance exit and propagates, exactly like `onLlmResult`.
-- **`info`** = `{ ctx, round, tools, lastUsage }`. Budget and any other policy ride in `ctx` (the per-run blob).
+- **`ctx`** is the per-run opaque blob (`run(msgs, tools, { ctx })`), the same object forwarded to `policy`. A CE consumer reads `ctx.task` (intent) and `ctx.budget` from it.
 - Emits a `loop:assemble` stream event (`{ round, before, after }`) when a view is applied.
-- **Contract:** the assembler owns producing a provider-valid sequence (tool-call/tool-result pairing). The recommended consumer keeps that invariant structurally — bundle each assistant tool-call with its results into one atomic unit so a view can drop a whole unit but never split a pair. See `docs/01-product/litectx-runtime-prd.md` (RT-1).
+- **Contract:** the assembler owns producing a provider-valid sequence (tool-call/tool-result pairing). bareagent ships the **msgs⇄units adapter** (`src/context-units.js`, exported as `toUnits`/`fromUnits`/`unitAssembler`) so a consumer works over a neutral unit `{ id, role, content, kind, pinned, atomic, tokensApprox }` instead of raw messages: each assistant tool-call + its result(s) is one `atomic` unit (drop a whole unit, never split a pair), and `pinned` units (system prompt, first user/task turn) never drop or reorder. bareagent owns the grammar + a final pairing seatbelt + fail-open; the consumer owns content + relevance. See `docs/01-product/litectx-runtime-prd.md` (RT-1).
 
 ```javascript
-// recall + compress the window each round; the consumer keeps the system prompt + task pinned
-const loop = new Loop({ provider, assemble: (msgs, { ctx, round }) => myCtxLib.assemble(msgs, ctx) });
+// neutral-unit consumer: SELECT + COMPRESS + fit, over units — grammar is bareagent's problem
+const { Loop, unitAssembler } = require('bare-agent');
+const loop = new Loop({ provider, assemble: unitAssembler((units, ctx) => myCtxLib.assemble(units, ctx)) });
+
+// or work over raw messages directly if you prefer
+const raw = new Loop({ provider, assemble: (msgs, ctx) => myCtxLib.shape(msgs, ctx) });
 ```
 
 ### Methods

@@ -26,10 +26,13 @@ const { ToolError, HaltError } = require('./errors');
  * @property {Function} [onError]
  * @property {boolean} [throwOnError]
  * @property {Function} [policy]
- * @property {Function} [assemble] - async (msgs, info) => msgs. Context-assembly chokepoint: shape the
+ * @property {Function} [assemble] - async (msgs, ctx) => msgs. Context-assembly chokepoint: shape the
  *   window sent to the provider each round (e.g. a context-engineering library). Returns a VIEW — the
  *   canonical transcript is never mutated. Fail-open (a thrown error degrades to full context); a
- *   thrown HaltError propagates. `info` = { ctx, round, tools, lastUsage } (budget rides in ctx).
+ *   thrown HaltError propagates. `ctx` is the per-run opaque blob (`run(msgs, tools, { ctx })`), the
+ *   same object forwarded to `policy`; litectx reads `ctx.task` (intent) and `ctx.budget`. The
+ *   neutral-unit signature `assemble(units, ctx)` is provided by bareagent's msgs⇄units adapter
+ *   (src/context-units.js), which composes over this msgs-level seam.
  * @property {Function} [onLlmResult]
  * @property {Function} [onToolResult]
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
@@ -259,7 +262,7 @@ class Loop {
       let toSend = msgs;
       if (this.assemble) {
         try {
-          const view = await this.assemble(msgs, { ctx, round, tools, lastUsage });
+          const view = await this.assemble(msgs, ctx);
           if (Array.isArray(view)) {
             toSend = view;
             this._safeEmit({ type: 'loop:assemble', data: { round, before: msgs.length, after: toSend.length } });

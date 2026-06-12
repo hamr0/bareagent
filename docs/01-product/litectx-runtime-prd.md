@@ -67,14 +67,17 @@ round*, and that seam does not exist. RT-1 is the CE peer of the `policy()` tool
 Two layers, one socket between them:
 
 1. **The Loop hook (bareagent — the raw seam).** A constructor option `assemble: null`, signature
-   `async (msgs, info) => msgs`, called before every `generate`, **fails open**, `HaltError`
-   propagates. The Loop only knows provider messages, so its contract stays `msgs → msgs`. `info =
-   { ctx, round, tools, lastUsage, budget }`.
+   `async (msgs, ctx) => msgs`, called before every `generate`, **fails open**, `HaltError`
+   propagates. The Loop only knows provider messages, so its contract stays `msgs → msgs`. `ctx` is
+   the per-run opaque blob (`run(msgs, tools, { ctx })`), the same object forwarded to `policy`;
+   litectx reads `ctx.task` (intent) and `ctx.budget`. (Shipped: `src/loop.js`.)
 2. **The msgs⇄units adapter (bareagent — the litectx-facing half).** What you actually pass as
-   `assemble`. It is the **only** thing that knows provider grammar. It (a) converts provider `msgs`
-   → a neutral **unit** array, (b) calls a litectx-shaped `assemble(units, ctx) → units`, (c)
-   converts units back to valid `msgs`, (d) runs a cheap grammar check and **fails open to the full
-   `msgs`** on garbage/throw. The canonical transcript (`result.msgs`) is never the trimmed one.
+   `assemble` (via `unitAssembler`). It is the **only** thing that knows provider grammar. It (a)
+   converts provider `msgs` → a neutral **unit** array `{id, role, content, kind, pinned, atomic,
+   tokensApprox}`, (b) calls a litectx-shaped `assemble(units, ctx) → units`, (c) converts units back
+   to valid `msgs`, (d) runs a **pairing seatbelt** that drops any orphaned tool-pair and **fails open
+   to the full `msgs`** on garbage/throw. The canonical transcript (`result.msgs`) is never the
+   trimmed one. (Shipped: `src/context-units.js` — `toUnits`/`fromUnits`/`unitAssembler`.)
 
 **The unit shape — the shared socket, pinned like the `Store` interface:**
 

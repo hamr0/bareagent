@@ -55,7 +55,7 @@ The core think → act → observe cycle. Everything else is optional scaffoldin
 - `retry` — wraps provider.generate() and tool.execute() calls
 - `stream` — emits events: `loop:start`, `loop:tool_call`, `loop:tool_result`, `loop:text`, `loop:done`, `loop:error`, `loop:assemble`, `checkpoint:ask`, `checkpoint:reply`
 - `onToolCall`, `onText`, `onError` — simple callbacks
-- `assemble(msgs, info)` — context-assembly chokepoint (RT-1): shapes the window sent to the provider each round (recall/compress/trim for a CE library like litectx). Returns a *view* — the canonical transcript is never mutated. Fail-open (errors degrade to full context); a `HaltError` propagates. See `docs/01-product/litectx-runtime-prd.md`.
+- `assemble(msgs, ctx)` — context-assembly chokepoint (RT-1): shapes the window sent to the provider each round (recall/compress/trim for a CE library like litectx). `ctx` is the per-run blob (consumer reads `ctx.task`/`ctx.budget`). Returns a *view* — the canonical transcript is never mutated. Fail-open (errors degrade to full context); a `HaltError` propagates. bareagent ships a msgs⇄units adapter (`src/context-units.js`: `toUnits`/`fromUnits`/`unitAssembler`) so a consumer works over a neutral unit `{id, role, content, kind, pinned, atomic, tokensApprox}` with atomic tool-pair bundling + pinning + a pairing seatbelt. See `docs/01-product/litectx-runtime-prd.md`.
 
 **Internal message format (OpenAI-compatible):**
 - Assistant tool calls: `{ role: 'assistant', content, tool_calls: [{ id, type: 'function', function: { name, arguments } }] }`

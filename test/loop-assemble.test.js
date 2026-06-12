@@ -65,20 +65,21 @@ describe('Loop assemble hook (RT-1)', () => {
     assert.equal(result.text, 'done');
   });
 
-  it('passes info = { ctx, round, tools, lastUsage } and runs every round', async () => {
+  it('passes the per-run ctx as the second arg (assemble(msgs, ctx)) and runs every round', async () => {
+    // Agreed contract (litectx CE-PRD §8.2): assemble(units, ctx) → units; the second arg is the
+    // per-run opaque blob, the SAME object forwarded to policy. litectx reads ctx.task + ctx.budget.
     const { provider } = recordingProvider(TWO_ROUND);
-    const infos = [];
+    const ctxs = [];
+    const ctx = { task: 'add rate-limiting', budget: 1000 };
     const loop = new Loop({
       provider,
-      assemble: (m, info) => { infos.push(info); return m; },
+      assemble: (m, c) => { ctxs.push(c); return m; },
     });
-    await loop.run([{ role: 'user', content: 'task' }], [readTool], { ctx: { budget: 1000 } });
-    assert.equal(infos.length, 2, 'called once per round');
-    assert.equal(infos[0].round, 0);
-    assert.equal(infos[1].round, 1);
-    assert.deepEqual(infos[0].ctx, { budget: 1000 });
-    assert.equal(infos[0].tools.length, 1);
-    assert.ok(infos[0].lastUsage && typeof infos[0].lastUsage.inputTokens === 'number');
+    await loop.run([{ role: 'user', content: 'task' }], [readTool], { ctx });
+    assert.equal(ctxs.length, 2, 'called once per round');
+    assert.equal(ctxs[0], ctx, 'second arg is the same per-run ctx object (identity), not a wrapper');
+    assert.equal(ctxs[1], ctx, 'same ctx every round');
+    assert.deepEqual(ctxs[0], { task: 'add rate-limiting', budget: 1000 });
   });
 
   it('ignores a non-array return (fail-open to full context)', async () => {
