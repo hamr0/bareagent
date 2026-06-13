@@ -1,12 +1,12 @@
 # Knowledge Base
 
 ## Architecture
-3-layer design (orchestration/execution/actuation), 8 components + 3 providers + 2 stores + 1 tool set, ~1017 lines total. Components are independent and composable. Optional browsing capability via `barebrowse` (dynamic import, graceful fallback).
--> docs/architecture.md
+3-layer design (orchestration/execution/actuation). Independent, composable components. Covered in the PRD — §8 (the loop) and §10 (built-in tools); see also `CLAUDE.md`'s component table.
+-> docs/01-product/prd.md
 
 ## API Reference
-Constructor options, method signatures, return types for all components, providers, and stores. Tool format, CLI subprocess protocol.
--> docs/api-reference.md
+Constructor options, method signatures, return types for all components, providers, and stores. Tool format, CLI subprocess protocol. (Folded into the PRD — §24.)
+-> docs/01-product/prd.md
 
 ## Development
 Stack (Node.js >= 18, node:test, pure JS), test commands, project structure, POC workflow, environment setup (Ollama via podman).
@@ -17,12 +17,8 @@ Known bugs (API key formatting, Anthropic message normalization, CLI exit, sched
 -> docs/troubleshooting.md
 
 ## Product Requirements
-Full project plan: component specs, data formats, usage profiles (minimal/medium/full), consumption modes (npm/subprocess/JSON-RPC), implementation phases.
+THE single bareagent PRD (self-contained): what bareagent IS/IS-NOT, architecture, the bareguard extraction, built-in tools, public API, CLI, NO-GO list, decisions log, the litectx-runtime seams RT-1…RT-5 (§23), and the per-component API reference (§24).
 -> docs/01-product/prd.md
-
-## Blueprint
-Exact implementation details per component: line counts, interfaces, behaviors, test results (104 unit, 42 integration, 4 E2E). Updated after each POC. Includes browsing strategy docs (library tools via `createBrowsingTools` and CLI session mode via `barebrowse` CLI for token-efficient disk-based snapshots) and mobile tools strategy docs (library tools via `createMobileTools` and CLI session mode via `baremobile` CLI for Android + iOS device control).
--> docs/00-context/blueprint.md
 
 ## MCP Bridge
 Auto-discover MCP servers from IDE configs, expose as bareagent tools. Config discovery, deny/policy filtering, concurrent routing, lifecycle management. Zero deps.
@@ -37,8 +33,8 @@ Customer-facing guide: npm import, subprocess JSONL, JSON-RPC. Code examples for
 -> docs/02-features/usage-guide.md
 
 ## Decision Log
-Key design decisions: package name, v0.1 scope cuts (Router, Tool.define, JSON-RPC), flat directory structure, pure JS over TypeScript.
--> docs/03-logs/decisions-log.md
+Significant design decisions and rationale — the live, maintained log (the early standalone decisions-log.md was folded in and retired 2026-06-13).
+-> docs/01-product/prd.md (§22)
 
 ## Testing Guide
 Test pyramid (unit/integration/E2E), all test files with counts, integration bugs caught, test philosophy.
