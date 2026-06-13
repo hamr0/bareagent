@@ -45,7 +45,7 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 | **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
 | **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **SHIPPED** · example + test (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`) + doc reframe (`SQLiteStore` demoted to a back-compat note) | done |
 | **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **SHIPPED** (`liteCtxMcpBridgeConfig` + `cfg.mcp`; helper + example + tests; validated against the real binary; zero litectx code; independent of RT-5) | done |
-| **RT-5** | **Shared-db scope column** — `scope` TEXT for multi-tenant single store | bareagent (thread key) / litectx (predicate) | **DEFERRED** (trip-wire: ephemeral children / cross-child queries / multi-tenant; migration pre-paid by RT-3) | when the trip-wire fires |
+| **RT-5** | **Shared-db scope keys** — `owner`+`session` for multi-tenant single store | bareagent (thread keys) / litectx (predicate) | **DEFERRED** (trip-wire: ephemeral children / cross-child queries / multi-tenant; migration pre-paid by RT-3) | when the trip-wire fires |
 
 **Non-negotiable across all five:** the canonical conversation transcript is never corrupted by a CE
 operation. Assembly produces a *view* for the provider call; the transcript bareagent returns in
@@ -277,18 +277,20 @@ a scored pointer). The seam reconciles them:
   it's the chunk slice `recall` already localized (start/end line), widening to whole-file **only** when
   nothing localizes (bounded by default — never triggers for facts). **Reused by `assemble()`** — its
   units need body text too, so the flag earns its place twice. Pure read-path addition, **no migration.**
-- **#3 sealed passthrough `meta` column.** Refusing unknown keys would break the one promise RT-3
+- **#3 sealed passthrough `meta` — a non-FTS sibling table.** Refusing unknown keys would break the one promise RT-3
   makes — *drop-in* Store replacement (an app on `JsonFileStore` storing `{sessionId, tag}` must not
-  silently lose them on the swap). So litectx round-trips arbitrary metadata via a **nullable `meta`
-  TEXT (JSON) on written-memory rows only** (null for indexed `code`/`doc`): written **verbatim**,
+  silently lose them on the swap). So litectx round-trips arbitrary metadata in a **separate non-FTS
+  sibling table `mem_meta`** (one row per written id; indexed `code`/`doc` rows simply have none): written **verbatim**,
   returned **verbatim** on `get`/`recall`, **never tokenized, FTS-indexed, or scored** — a coat-check,
   not a typed field. The adapter maps `kind`/`by` into the typed columns and stuffs the remainder into
   `meta`; litectx's typed model stays pure. **Guidance shipped with it:** `meta` is for small
   structured tags, not payloads — big things go in `stash` (recall returns `meta` inline, so a fat blob
   bloats every hit).
   > **Migration note:** #3 is the **first schema change to the memory tier** — CLAUDE.md's "fact/episode
-  > schema ready, no migration" is spent here. It's a trivial additive nullable column (no backfill) but
-  > goes through the incremental-migration path, not free.
+  > schema ready, no migration" is spent here. As shipped (litectx v0.10.0) it is **not** a column on the
+  > written-memory rows but a new **`CREATE TABLE IF NOT EXISTS mem_meta`** sibling table (old DBs gain an
+  > empty table, no backfill) — and the sibling-table form is *why* `meta` is sealed by construction: it
+  > lives in no FTS table, so it can never be tokenized, searched, or scored.
 
 ### 3.3 Settled (not relitigating) · SHIPPED 2026-06-13
 Keep the socket, retire the ambition: do **not** remove `Memory`/`Store` (it's the mount point); keep
@@ -328,14 +330,14 @@ easing baresuite's own consumption, which is `import`, RT-3.)
 
 **Isolation — own db, not scope (this is what decouples RT-4 from RT-5):** a child gets its **own
 `dbPath`** → physical isolation, zero new schema (litectx memory-PRD §3.2 "separate stores, works
-today"). No scope column needed.
+today"). No scope keys needed.
 
 **Opted-in child writes land in the child's own db; promotion to the parent is explicit, never
 automatic** — and that promotion is *also* zero new litectx code: a parent promoting a child-learned
 fact is just `recall` against the child db → `remember` into the parent db, both existing verbs,
 parent-orchestrated. So there is **no hidden future obligation** behind "explicit merge," and holding
 the "child writes to its own db" line is exactly what keeps RT-5 deferred (own-db isolation is
-*physical*; the scope column is only for the *shared*-db case).
+*physical*; the scope keys are only for the *shared*-db case).
 
 ### 4.3 Build
 Recipe + example + integration test (spawn a child with `litectx-mcp` mounted read-only on its own db;
@@ -359,40 +361,49 @@ does, *that* gap (and only that) becomes code.
   gated REAL-server suite incl. the populated-db e2e) and `test/litectx-mcp-spawn.test.js` (real
   `spawnChild → cli.js` mounts `cfg.mcp`, governed loop, exit 0). Example: `examples/litectx-mcp-child.mjs`.
 - **RT-5 stays deferred:** isolation is *physical* (own `--root`), exactly the line that keeps the
-  scope column unneeded until the §5.2 trip-wire fires.
+  scope keys unneeded until the §5.2 trip-wire fires.
 
 ---
 
-## 5. RT-5 — Shared-db scope column · DEFERRED (trip-wire, same discipline as RT-2)
+## 5. RT-5 — Shared-db scope keys · DEFERRED (trip-wire, same discipline as RT-2)
 
 ### 5.1 What it is
 The **shared-db multi-tenant** path: one litectx store holding logically-partitioned contexts.
-litectx-side = a **nullable `scope` TEXT threaded through every read/write predicate** (`recall`,
-`remember`, `forget`, knn, access-log), default a single global scope. bareagent-side = thread a scope
-key to the child (env var like `BAREGUARD_*`, or a child-config field). It's a **hot-path change**
-(every query gains a `scope` clause) **+ a schema migration** — non-trivial, and with no live consumer,
-textbook build-ahead-of-need.
+litectx-side = litectx's settled scope model is **two keys, `owner` + `session`** (not a single `scope`
+TEXT — see litectx `bare-suite-buildable-now.md` §4.4), threaded through every read/write predicate
+(`recall`, `remember`, `forget`, knn) as
+`WHERE (owner IS NULL OR owner = :me) AND (session IS NULL OR session = :sid)`, default NULL = global /
+durable. (Settled = the two keys + the filter + kind defaults; the *storage form* isn't litectx-committed
+yet, but the FTS5 `mem` table can't `ALTER ADD COLUMN`, so it will likely be a `mem_meta`-style sibling
+table + a nullable `ALTER` on the plain `stash` table.) bareagent-side = thread the
+`owner`/`session` keys to the child (env var like `BAREGUARD_*`, or a child-config field). It's a
+**hot-path change** (every query gains the scope clause) **+ a schema migration** — non-trivial, and
+with no live consumer, textbook build-ahead-of-need.
 
 ### 5.2 Why DEFERRED — separate-db (RT-4) is the answer until it actually breaks down
 The trip-wire — three concrete cases where per-child `dbPath` stops being enough:
 - **Many / ephemeral children** — one SQLite file per short-lived child is fd-and-disk waste; one db
   with a scope key isn't.
 - **Cross-child queries** — "what did *any* child learn" / recall across partitions. Separate files
-  can't be unioned cheaply; a scope column gives **both** isolation (`WHERE scope=`) **and** union
+  can't be unioned cheaply; the scope keys give **both** isolation (`WHERE owner=`/`session=`) **and** union
   (omit the predicate).
 - **A real multi-tenant consumer** holding one store for logically-partitioned tenants.
 
 Until one is real, RT-4's separate `dbPath` is the answer and RT-5 builds nothing.
 
 ### 5.3 The road is pre-graded by RT-3 (why deferring costs nothing later)
-RT-5's `scope` TEXT and RT-3's `meta` TEXT are **both additive nullable columns on the same
-written-memory rows.** RT-3 being the *first* memory-tier migration **pre-pays the migration path RT-5
-reuses** when it lands — backward-compatible (default `scope` = global), same machinery. Deferring RT-5
-incurs no migration debt; the road is already graded.
+RT-5's scope keys and RT-3's `meta` are **both additive sibling-table migrations** — RT-3 shipped
+`mem_meta`; RT-5's `owner`/`session` will likely land the same way (a sibling table + a nullable `stash`
+`ALTER`, since the FTS5 `mem` table takes no new columns). RT-3 being the *first* memory-tier migration
+**pre-pays the `CREATE TABLE IF NOT EXISTS` migration path RT-5 reuses** when it lands — backward-compatible
+(default NULL = global), same machinery. Deferring RT-5 incurs no migration debt; the road is already graded.
 
-**Shape (agreed, for when the trip-wire fires):** default = isolation (own scope per child); explicit
-`scope` opts a child into a shared namespace; open granularity (agent/session/user) and a possible
-narrow-but-never-widen floor-analog — settle with litectx then.
+**Shape (granularity now settled with litectx; bareagent's threading still open):** litectx settled the
+keys as **`owner`** (durable, per-actor or global `NULL`) + **`session`** (volatile, per-run), with
+kind-aware defaults (`fact` → `owner`/global; `episode`/`stash` → `session`) — `bare-suite-buildable-now.md`
+§4.4. A child in a shared db carries its `owner`/`session`; omit the predicate for a cross-child union.
+Still open on bareagent's side: *how* the key is threaded to the child (env var vs child-config field) and
+a possible narrow-but-never-widen floor-analog.
 
 ---
 
