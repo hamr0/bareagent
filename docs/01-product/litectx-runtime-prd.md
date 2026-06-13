@@ -41,7 +41,7 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 
 | ID | Seam | Owner | Status | Build order |
 |---|---|---|---|---|
-| **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **DECIDED (shape) · POC-GATED (fit quality)** | **1st — the keystone** |
+| **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **SHIPPED (FIT)** — litectx v0.11.0 shipped the verb; bareagent adapter reconciled to the real `{units,dropped,tokens}` envelope + `atomic` string-id. SELECT/COMPRESS = litectx's next slice | **1st — the keystone** |
 | **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
 | **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **SHIPPED** · example + test (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`) + doc reframe (`SQLiteStore` demoted to a back-compat note) | done |
 | **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **SHIPPED** (`liteCtxMcpBridgeConfig` + `cfg.mcp`; helper + example + tests; validated against the real binary; zero litectx code; independent of RT-5) | done |
@@ -53,7 +53,7 @@ operation. Assembly produces a *view* for the provider call; the transcript bare
 
 ---
 
-## 1. RT-1 — Context-assembly chokepoint (the keystone) · POC-GATED
+## 1. RT-1 — Context-assembly chokepoint (the keystone) · SHIPPED (FIT slice)
 
 ### 1.1 Why
 Today `run()` builds the message array once (`loop.js:216`) and only `push`es to it across rounds;
@@ -93,11 +93,14 @@ in reverse**: for `Store`, litectx adapted to *our* socket; here, *we* adapt to 
 (the unit shape). All grammar knowledge lives in bareagent's adapter.
 
 Two flags carry the entire contract:
-- **`atomic`** — the adapter bundles an assistant tool-call **and all its tool-results** into one
-  atomic unit. litectx can keep, drop, or compress a *whole* unit but can never split the pair, so
-  **the broken-grammar state is unrepresentable.** This is the real fix for the old grammar question —
-  the failure isn't *caught*, it can't be *expressed*. The Loop's cheap post-check stays as a
-  seatbelt (defense-in-depth), not the primary defense.
+- **`atomic`** — a **group-id (`string｜null`), not a boolean** — the adapter bundles an assistant
+  tool-call **and all its tool-results** into one unit and tags it with a unique group-id (units sharing
+  a group-id are kept/dropped whole; bareagent pre-bundles, so each bundle is its own group). litectx can
+  keep, drop, or compress a *whole* unit but can never split the pair, so **the broken-grammar state is
+  unrepresentable.** This is the real fix for the old grammar question — the failure isn't *caught*, it
+  can't be *expressed*. The Loop's cheap post-check stays as a seatbelt (defense-in-depth), not the
+  primary defense. (A boolean would collapse *every* bundle under one key and litectx would fit them
+  all-or-nothing — caught by driving the real verb, `poc/rt1-real-assemble.mjs`.)
 - **`pinned`** — litectx never drops, reorders, or compresses a pinned unit; the budget is computed
   over the **un-pinned remainder.** The system prompt is pinned (also the original task, the last user
   turn). **Pin, don't hide** — litectx must *see* the pinned unit's `tokensApprox` to subtract it from
@@ -111,7 +114,21 @@ Two flags carry the entire contract:
 > **Next:** step 2 (pin the unit JSDoc with litectx) → step 3 (`src/context-units.js` adapter) → step 5
 > (e2e). The hook is `msgs→msgs` and litectx-agnostic, so it stands alone until the adapter lands.
 
-### 1.3 What litectx ships into the socket: `assemble(units, ctx) → units`
+> **Build status update (2026-06-13): FIT slice integrated end-to-end.** litectx **v0.11.0** shipped the
+> real `assemble` verb (budget-fit POC cleared on litectx's side). Driving bareagent's adapter against the
+> *real* verb (`poc/rt1-real-assemble.mjs`, 9/9) surfaced two divergences the `→ units` shorthand hid,
+> both reconciled **bareagent-side** (we adapt to litectx's socket, never the reverse):
+> 1. **Return shape** — litectx returns the `AssembleResult` **envelope** `{units, dropped, tokens}`
+>    (`dropped[]` is load-bearing per §8.2, ships in-slice). `unitAssembler` now unwraps `.units` (and
+>    still accepts a bare array); any other shape → fail-open.
+> 2. **`atomic` type** — litectx's socket is `string｜null` group-id, not boolean. `toUnits` now emits a
+>    unique group-id per bundle. (Boolean collapsed every bundle under one key → all-or-nothing fit.)
+> Tests: `test/context-units.test.js` (+ a gated **real-litectx** block that runs wherever litectx is
+> installed). Full suite **418 pass / 0 fail / 2 skip**; typecheck clean. **Remaining:** SELECT +
+> COMPRESS are litectx's next slice (need recall-inject + a parseable `format`); the live-provider
+> 400-on-orphan observation (why the seatbelt earns its place) is an empirical note, not a code gap.
+
+### 1.3 What litectx ships into the socket: `assemble(units, ctx) → { units, dropped, tokens }`
 
 Three CE primitives over the unit array — the composition `compress.js` already anticipates ("a
 caller / `assemble()` picks the level by rank"):

@@ -46,6 +46,20 @@ describe('context-units: toUnits (the socket shape)', () => {
     assert.equal(users[1].pinned, false, 'later user turn is not pinned');
   });
 
+  it('emits `atomic` as a group-id (string|null), per litectx CE-PRD §8.2 — never a boolean', () => {
+    const units = toUnits(transcript());
+    for (const u of units) {
+      assert.ok(typeof u.atomic === 'string' || u.atomic === null,
+        `atomic must be string|null group-id, got ${typeof u.atomic} (${u.atomic})`);
+      assert.notEqual(typeof u.atomic, 'boolean', 'a boolean collapses every bundle under one key in litectx');
+    }
+    // each tool-call bundle is its OWN group → distinct group-ids (litectx fits them independently)
+    const gids = units.filter((u) => u.atomic).map((u) => u.atomic);
+    assert.equal(new Set(gids).size, gids.length, 'bundles carry distinct group-ids, not a shared key');
+    // non-bundled turns carry null
+    assert.equal(units.find((u) => u.role === 'system').atomic, null);
+  });
+
   it('bundles a multi-call round + ALL its results into ONE atomic unit', () => {
     const units = toUnits(transcript());
     const multi = units.find((u) => u.atomic && u._msgs.length === 3);
@@ -130,7 +144,7 @@ describe('context-units: fromUnits round-trip + grammar', () => {
 
   it('recall-inject: a litectx-minted unit (no backing) becomes one synthesised message', () => {
     const units = toUnits(transcript());
-    units.unshift({ id: 'mem1', role: 'user', content: 'RECALLED FACT', kind: 'fact', pinned: false, atomic: false, tokensApprox: 4 });
+    units.unshift({ id: 'mem1', role: 'user', content: 'RECALLED FACT', kind: 'fact', pinned: false, atomic: null, tokensApprox: 4 });
     const back = fromUnits(units);
     assert.equal(back[0].role, 'user');
     assert.equal(back[0].content, 'RECALLED FACT');
@@ -209,5 +223,71 @@ describe('context-units: unitAssembler (wires into the Loop seam)', () => {
     const msgs = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }];
     await loop.run(msgs, [readTool]);
     assert.equal(seen[0].length, 2, 'bad return → full msgs');
+  });
+
+  it('unwraps litectx\'s AssembleResult envelope { units, dropped, tokens } — uses .units', async () => {
+    const { provider, seen } = recordingProvider([
+      { text: 'done', toolCalls: [], usage: { inputTokens: 5, outputTokens: 2 } },
+    ]);
+    // litectx's REAL return shape: an envelope, not a bare array (CE-PRD §8.2, dropped[] in-slice).
+    const litectxShaped = (units) => {
+      const kept = units.filter((u) => u.pinned);
+      return { units: kept, dropped: units.filter((u) => !u.pinned).map((u) => ({ id: u.id, reason: 'budget' })), tokens: 0 };
+    };
+    const loop = new Loop({ provider, assemble: unitAssembler(litectxShaped) });
+    const msgs = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'task' },
+      { role: 'assistant', content: 'droppable chatter' },
+    ];
+    await loop.run(msgs, [readTool]);
+    assert.equal(seen[0].length, 2, 'envelope .units unwrapped — provider saw only the 2 pinned units');
+    assert.deepEqual(seen[0].map((m) => m.role), ['system', 'user']);
+  });
+
+  it('fail-open: an envelope WITHOUT a units array sends full context', async () => {
+    const { provider, seen } = recordingProvider([
+      { text: 'done', toolCalls: [], usage: { inputTokens: 5, outputTokens: 2 } },
+    ]);
+    const loop = new Loop({ provider, assemble: unitAssembler(() => ({ dropped: [], tokens: 0 })) }); // no .units
+    const msgs = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }];
+    await loop.run(msgs, [readTool]);
+    assert.equal(seen[0].length, 2, 'malformed envelope → full msgs');
+  });
+});
+
+// The non-circular proof: drive the adapter against litectx's REAL `assemble` verb. litectx is NOT a
+// bareagent dependency (the one-way boundary), so this runs only where litectx is installed (devDep or
+// global) and skips otherwise — same gate discipline as the real-litectx-mcp suite. The committed fakes
+// above encode the same contract; poc/rt1-real-assemble.mjs drove this end-to-end against litectx v0.11.0.
+let realAssemble = null;
+try { realAssemble = require('litectx').assemble; } catch { /* litectx not installed — suite skips */ }
+describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? false : 'litectx not installed' }, () => {
+  it('unwraps the envelope and keeps the NEWEST tool-pair under a tight budget (recency-anchored)', () => {
+    const msgs = [
+      { role: 'system', content: 'You are a coding agent.' },
+      { role: 'user', content: 'Refactor the rate limiter.' },
+    ];
+    for (let r = 1; r <= 4; r++) {
+      const id = `call_${r}`;
+      msgs.push({ role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'read_file', arguments: `{"p":"f${r}"}` } }] });
+      msgs.push({ role: 'tool', tool_call_id: id, content: `FILE${r} BODY `.repeat(40) });
+    }
+    const units = toUnits(msgs);
+    const total = units.reduce((s, u) => s + u.tokensApprox, 0);
+    const res = realAssemble(units, { budget: Math.ceil(total * 0.5) });
+    // litectx returns the AssembleResult envelope; dropped[] accounts for what didn't fit (never silent)
+    assert.ok(Array.isArray(res.units) && Array.isArray(res.dropped), 'real assemble returns { units, dropped, tokens }');
+    assert.ok(res.tokens <= Math.ceil(total * 0.5), 'fits within budget (best-effort)');
+    const keptPairs = res.units.filter((u) => u.atomic).length;
+    assert.ok(keptPairs > 0 && keptPairs < 4, `recency-graded: some-but-not-all pairs kept (got ${keptPairs}/4)`);
+    // the wrapper turns the envelope into a grammar-valid msgs view (no orphan tool results)
+    const view = fromUnits(res.units);
+    const open = new Set();
+    for (const m of view) {
+      if (m.role === 'assistant' && m.tool_calls) for (const tc of m.tool_calls) open.add(tc.id);
+      if (m.role === 'tool') assert.ok(open.has(m.tool_call_id), 'no orphan tool result in the assembled view');
+    }
+    assert.ok(view.some((m) => m.role === 'system'), 'pinned system prompt survived');
   });
 });

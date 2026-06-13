@@ -6,9 +6,10 @@
 //   - bareagent owns GRAMMAR: msgs→units, units→msgs, atomic bundling of a tool-call + its result(s),
 //     `pinned` flags, the pairing seatbelt, and fail-open. Broken tool-pairing and a dropped system
 //     prompt are UNREPRESENTABLE here, by construction — not by trusting the consumer.
-//   - litectx owns CONTENT + RELEVANCE: a single verb `assemble(units, ctx) → units` that does
-//     SELECT (keep / drop / reorder / recall-inject) + COMPRESS (rewrite a unit's `content`) +
-//     fit-to-`ctx.budget`, best-effort. It never learns the message grammar.
+//   - litectx owns CONTENT + RELEVANCE: a single verb `assemble(units, ctx) → { units, dropped, tokens }`
+//     (the AssembleResult envelope — `dropped[]` is load-bearing, ships in the same slice, never silent)
+//     that does SELECT (keep / drop / reorder / recall-inject) + COMPRESS (rewrite a unit's `content`) +
+//     fit-to-`ctx.budget`, best-effort. It never learns the message grammar. `unitAssembler` unwraps `.units`.
 //
 // The neutral unit (the SOCKET litectx codes against — exactly these 7 enumerable fields):
 //   { id, role, content, kind, pinned, atomic, tokensApprox }
@@ -27,8 +28,11 @@
 //     pinned       — true ⇒ bareagent guarantees the unit is never dropped and never reordered
 //                    (system prompt, first user/task turn). litectx still sees its tokensApprox so the
 //                    pin counts against the budget: pin-don't-hide.
-//     atomic       — true ⇒ an assistant tool-call message bundled with ALL its tool result(s) as one
-//                    indivisible unit. Dropping it drops the whole pair; it can never be split.
+//     atomic       — group-id (string) | null. litectx keeps/drops units sharing one group-id WHOLE,
+//                    never split. bareagent pre-bundles an assistant tool-call + ALL its result(s) into
+//                    one unit, so each bundle is its OWN group (group-id = the unit's id); everything
+//                    else is null. NOTE: string|null, not boolean — a boolean collapses every bundle
+//                    under one key and litectx would fit them all-or-nothing (poc/rt1-real-assemble.mjs).
 //     tokensApprox — chars/4 estimate over the unit's backing messages, for litectx's budget math.
 //
 // `_msgs` (the verbatim backing messages) is attached NON-ENUMERABLE: it does not appear in the 7-field
@@ -77,13 +81,13 @@ function toUnits(msgs) {
     const m = msgs[i];
 
     if (m.role === 'system') {
-      units.push(withBacking({ id: `u${_seq++}`, role: 'system', content: renderContent([m]), kind: null, pinned: true, atomic: false, tokensApprox: approxTokens([m]) }, [m]));
+      units.push(withBacking({ id: `u${_seq++}`, role: 'system', content: renderContent([m]), kind: null, pinned: true, atomic: null, tokensApprox: approxTokens([m]) }, [m]));
       continue;
     }
     if (m.role === 'user') {
       const pinned = !seenUser; // first user turn = the task; pin it
       seenUser = true;
-      units.push(withBacking({ id: `u${_seq++}`, role: 'user', content: renderContent([m]), kind: null, pinned, atomic: false, tokensApprox: approxTokens([m]) }, [m]));
+      units.push(withBacking({ id: `u${_seq++}`, role: 'user', content: renderContent([m]), kind: null, pinned, atomic: null, tokensApprox: approxTokens([m]) }, [m]));
       continue;
     }
     if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
@@ -95,12 +99,17 @@ function toUnits(msgs) {
         group.push(msgs[j]);
         j++;
       }
-      units.push(withBacking({ id: `u${_seq++}`, role: 'assistant', content: renderContent(group.slice(1)), kind: null, pinned: false, atomic: true, tokensApprox: approxTokens(group) }, group));
+      // `atomic` is litectx's group-id (string|null), NOT a boolean: units sharing one are kept/dropped
+      // whole. bareagent already pre-bundles a tool-call + its result(s) into ONE unit, so each bundle is
+      // its OWN group — group-id = the unit's id. (A boolean would collapse every bundle under one key,
+      // making litectx fit them all-or-nothing — see poc/rt1-real-assemble.mjs.)
+      const gid = `u${_seq++}`;
+      units.push(withBacking({ id: gid, role: 'assistant', content: renderContent(group.slice(1)), kind: null, pinned: false, atomic: gid, tokensApprox: approxTokens(group) }, group));
       i = j - 1;
       continue;
     }
     // plain assistant text, or a stray tool message (handled by the seatbelt on the way out)
-    units.push(withBacking({ id: `u${_seq++}`, role: m.role, content: renderContent([m]), kind: null, pinned: false, atomic: false, tokensApprox: approxTokens([m]) }, [m]));
+    units.push(withBacking({ id: `u${_seq++}`, role: m.role, content: renderContent([m]), kind: null, pinned: false, atomic: null, tokensApprox: approxTokens([m]) }, [m]));
   }
   return units;
 }
@@ -188,11 +197,15 @@ function fromUnits(units) {
 }
 
 /**
- * Wrap a litectx-style `assemble(units, ctx) → units` into the Loop's msgs-level `assemble(msgs, ctx)`
- * seam. Fail-OPEN at this layer too: if the consumer returns a non-array (or the same array reference),
- * the original msgs are sent unchanged. A thrown error (incl. HaltError) is left to the Loop's own
- * fail-open / HaltError handling — this wrapper does not swallow it.
- * @param {(units: Array<Record<string, any>>, ctx: any) => (Array<Record<string, any>> | Promise<Array<Record<string, any>>>)} assembleUnits
+ * Wrap litectx's `assemble(units, ctx)` verb into the Loop's msgs-level `assemble(msgs, ctx)` seam.
+ * litectx ships the **`AssembleResult` envelope** `{ units, dropped, tokens }` (CE-PRD §8.2: `dropped[]`
+ * is load-bearing — it ships in the same slice, never silently truncated). This wrapper accepts that
+ * envelope (uses `.units`) OR a bare `units` array (a simpler consumer). `dropped`/`tokens` are litectx's
+ * accounting; the Loop's seam is msgs-in/msgs-out, so they're not threaded onward here (the canonical
+ * transcript already holds every dropped unit by id — restorable on demand).
+ * Fail-OPEN at this layer too: any other return shape → the original msgs are sent unchanged. A thrown
+ * error (incl. HaltError) is left to the Loop's own fail-open / HaltError handling — not swallowed here.
+ * @param {(units: Array<Record<string, any>>, ctx: any) => (any | Promise<any>)} assembleUnits
  * @returns {(msgs: Array<Record<string, any>>, ctx: any) => Promise<Array<Record<string, any>>>}
  */
 function unitAssembler(assembleUnits) {
@@ -202,8 +215,10 @@ function unitAssembler(assembleUnits) {
   return async (msgs, ctx) => {
     const units = toUnits(msgs);
     const out = await assembleUnits(units, ctx);
-    if (!Array.isArray(out)) return msgs; // fail-open: bad return → full context
-    return fromUnits(out);
+    // litectx returns { units, dropped, tokens }; a bare array is also accepted. Anything else → fail-open.
+    const view = Array.isArray(out) ? out : (out && Array.isArray(out.units) ? out.units : null);
+    if (!view) return msgs; // fail-open: unrecognised return → full context
+    return fromUnits(view);
   };
 }
 
