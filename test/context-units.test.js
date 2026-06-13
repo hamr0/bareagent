@@ -262,6 +262,46 @@ describe('context-units: unitAssembler (wires into the Loop seam)', () => {
 // above encode the same contract; poc/rt1-real-assemble.mjs drove this end-to-end against litectx v0.11.0.
 let realAssemble = null;
 try { realAssemble = require('litectx').assemble; } catch { /* litectx not installed — suite skips */ }
+
+// Independent reference fit — reimplements CE-PRD §8.2 FROM THE SPEC (not litectx's source): pinned
+// always kept + counted; un-pinned grouped by `atomic` id (kept/dropped whole, forced if it holds a
+// pinned member); items newest-first; skip-and-continue greedy under budget. litectx must equal this at
+// every budget — two independent implementations agreeing is the grounding (graduated from poc/rt1-real-assemble.mjs).
+function referenceFit(units, budget) {
+  const tok = (u) => (Number.isFinite(u?.tokensApprox) && u.tokensApprox >= 0 ? u.tokensApprox : Math.ceil((u?.content?.length ?? 0) / 4));
+  const keep = new Set();
+  let used = 0;
+  for (const u of units) if (u.pinned) { keep.add(u.id); used += tok(u); }
+  const groups = new Map();
+  const items = [];
+  units.forEach((u, i) => {
+    if (u.pinned) return;
+    if (u.atomic != null && u.atomic !== false) {
+      let g = groups.get(u.atomic);
+      if (!g) { g = { ids: [], tokens: 0, recency: i, forced: false }; groups.set(u.atomic, g); items.push({ g: u.atomic }); }
+      g.ids.push(u.id); g.tokens += tok(u); g.recency = i;
+    } else items.push({ ids: [u.id], tokens: tok(u), recency: i, forced: false });
+  });
+  for (const u of units) if (u.pinned && u.atomic != null && u.atomic !== false) { const g = groups.get(u.atomic); if (g) g.forced = true; }
+  const resolved = items.map((it) => (it.g ? { ...groups.get(it.g) } : it));
+  resolved.sort((a, b) => b.recency - a.recency);
+  for (const it of resolved) if (it.forced || used + it.tokens <= budget) { for (const id of it.ids) keep.add(id); used += it.tokens; }
+  return keep;
+}
+// transcript shapes exercising single-call, multi-result, and uneven-size fits
+function rtPair(id, body, n = 1) {
+  const calls = Array.from({ length: n }, (_, k) => ({ id: `${id}_${k}`, type: 'function', function: { name: 'read', arguments: '{}' } }));
+  return [{ role: 'assistant', content: null, tool_calls: calls }, ...calls.map((c) => ({ role: 'tool', tool_call_id: c.id, content: body }))];
+}
+function rtShapes() {
+  const big = (n) => 'X'.repeat(n);
+  return [
+    ['single-call rounds', [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }, ...rtPair('a', big(400)), ...rtPair('b', big(400)), ...rtPair('c', big(400)), ...rtPair('d', big(400)), { role: 'user', content: 'newest' }]],
+    ['multi-result rounds', [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }, ...rtPair('m', big(300), 2), ...rtPair('n', big(300), 3), ...rtPair('o', big(300), 1)]],
+    ['uneven sizes', [{ role: 'system', content: 'sys' }, { role: 'user', content: 'task' }, ...rtPair('h1', big(1600)), ...rtPair('h2', big(50)), ...rtPair('h3', big(1600)), ...rtPair('h4', big(50))]],
+  ];
+}
+
 describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? false : 'litectx not installed' }, () => {
   it('unwraps the envelope and keeps the NEWEST tool-pair under a tight budget (recency-anchored)', () => {
     const msgs = [
@@ -289,5 +329,46 @@ describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? 
       if (m.role === 'tool') assert.ok(open.has(m.tool_call_id), 'no orphan tool result in the assembled view');
     }
     assert.ok(view.some((m) => m.role === 'system'), 'pinned system prompt survived');
+  });
+
+  it('matches an INDEPENDENT reference fit across a budget sweep, holding all safety invariants', () => {
+    const setEq = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+    let points = 0;
+    const gradedPairCounts = new Set(); // for the single-call shape — distinct kept-pair counts across the sweep
+    for (const [name, msgs] of rtShapes()) {
+      const units = toUnits(msgs);
+      const total = units.reduce((s, u) => s + u.tokensApprox, 0);
+      const pinnedTok = units.filter((u) => u.pinned).reduce((s, u) => s + u.tokensApprox, 0);
+      const budgets = [0, 1, ...Array.from({ length: 11 }, (_, k) => Math.round((total * k) / 10)), total + 50];
+      for (const budget of budgets) {
+        points++;
+        const res = realAssemble(units, { budget });
+        const keptIds = new Set(res.units.map((u) => u.id));
+        // (B) the recency-fit correctness proof: litectx == independent reference at every budget
+        assert.ok(setEq(keptIds, referenceFit(units, budget)), `[${name} @${budget}] litectx != independent reference fit`);
+        // safety invariants that must hold for ANY budget:
+        // 1 grammar — the assembled view never orphans a tool result
+        const view = fromUnits(res.units);
+        const open = new Set();
+        for (const m of view) {
+          if (m.role === 'assistant' && m.tool_calls) for (const tc of m.tool_calls) open.add(tc.id);
+          if (m.role === 'tool') assert.ok(open.has(m.tool_call_id), `[${name} @${budget}] orphan tool result`);
+        }
+        // 2 pinned always survive (even at budget 0)
+        for (const u of units) if (u.pinned) assert.ok(keptIds.has(u.id), `[${name} @${budget}] pinned dropped`);
+        // 3 accounting — every non-pinned unit is EXACTLY-once kept or dropped (nothing silently vanishes)
+        const droppedIds = new Set(res.dropped.map((d) => d.id));
+        for (const u of units) if (!u.pinned) assert.ok(keptIds.has(u.id) !== droppedIds.has(u.id), `[${name} @${budget}] ${u.id} not exactly-once kept/dropped`);
+        // 4 budget best-effort — never a hard cap on pinned
+        assert.ok(res.tokens <= Math.max(budget, pinnedTok), `[${name} @${budget}] over budget: ${res.tokens} > max(${budget},${pinnedTok})`);
+        if (name === 'single-call rounds') gradedPairCounts.add(res.units.filter((u) => u.atomic).length);
+      }
+    }
+    assert.ok(points >= 35, `swept enough budget points (${points})`);
+    // GRADED, not all-or-nothing: the real verb keeps intermediate counts of tool-pairs as budget grows.
+    // This is what the `atomic` group-id buys — a boolean collapses every pair under one key and the real
+    // verb fits them {0 or all}, so this set would be {0,4} and the assertion fails. The slice bites the
+    // atomic-encoding regression directly (not only via the conformance test).
+    assert.ok(gradedPairCounts.size > 2, `recency-fit is graded across the sweep — kept-pair counts seen: ${[...gradedPairCounts].sort((a, b) => a - b)} (a boolean atomic collapses this to {0,4})`);
   });
 });
