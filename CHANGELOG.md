@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-06-13
+
+This release lands the **litectx-runtime seam set** (RT-1/RT-3/RT-4) — the points where a context-engineering library plugs into the agent loop — plus the `assemble` context-window chokepoint and its msgs⇄units adapter.
+
 ### Added
 
 - **`Loop({ assemble })` — a context-assembly chokepoint.** A new optional hook, `assemble(msgs, ctx) => msgs`, runs before each provider call and returns the message *view* to send that round — the seam a context-engineering library (e.g. litectx) plugs into to recall, compress, trim, or reorder the context window mid-loop. The canonical transcript (`result.msgs`) is never mutated, so it stays complete and correct. **Fail-open:** a thrown error degrades to sending the full context (a context-optimizer bug must not halt the agent); a thrown `HaltError` is a governance exit and propagates (same contract as `onLlmResult`). `ctx` is the per-run opaque blob (`run(msgs, tools, { ctx })`), the same object forwarded to `policy`; a CE consumer reads `ctx.task` and `ctx.budget`. Emits a `loop:assemble` stream event. Additive and **inert when unset** — existing behavior is byte-identical. This is RT-1 of the litectx-runtime seam set (`docs/01-product/litectx-runtime-prd.md`).
@@ -14,6 +18,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 ### Tooling
 
 - **`litectx` added as a `devDependency` (`^0.11.0`).** Test-only — it makes the gated RT-1 real-litectx suite (the `assemble` reference-oracle budget-sweep) and the RT-4 real-`litectx-mcp` suites actually run in CI instead of skipping. **Not** a runtime dependency: bareagent's source still imports nothing from litectx (the one-way boundary holds), and `devDependencies` never reach consumers on install. Pulls `better-sqlite3` transitively, which also lets the bundled `SQLite` store's tests run in CI.
+- **`npm test` no longer passes `--test-force-exit`.** With test files running in parallel, that flag exited the process the moment the runner considered the run done — silently **truncating a sibling test file still flushing its output** (the dropped tests vanish rather than fail, so a run stayed green while a whole suite went unreported). It was added in 0.12.0 to guard a since-fixed MCP-bridge child-process leak, so it was pure downside. Removed; the suite exits cleanly without it and every file reports. (Surfaced when the new litectx devDependency shifted CI timing enough to drop the `integration-bareguard` governance suite.)
 
 ## [0.12.2] — 2026-06-01
 
