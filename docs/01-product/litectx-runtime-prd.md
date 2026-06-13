@@ -100,7 +100,7 @@ Two flags carry the entire contract:
   unrepresentable.** This is the real fix for the old grammar question — the failure isn't *caught*, it
   can't be *expressed*. The Loop's cheap post-check stays as a seatbelt (defense-in-depth), not the
   primary defense. (A boolean would collapse *every* bundle under one key and litectx would fit them
-  all-or-nothing — caught by driving the real verb, `poc/rt1-real-assemble.mjs`.)
+  all-or-nothing — caught by driving the real verb; now a committed reference-oracle sweep in `test/context-units.test.js`.)
 - **`pinned`** — litectx never drops, reorders, or compresses a pinned unit; the budget is computed
   over the **un-pinned remainder.** The system prompt is pinned (also the original task, the last user
   turn). **Pin, don't hide** — litectx must *see* the pinned unit's `tokensApprox` to subtract it from
@@ -116,7 +116,7 @@ Two flags carry the entire contract:
 
 > **Build status update (2026-06-13): FIT slice integrated end-to-end.** litectx **v0.11.0** shipped the
 > real `assemble` verb (budget-fit POC cleared on litectx's side). Driving bareagent's adapter against the
-> *real* verb (`poc/rt1-real-assemble.mjs`, 9/9) surfaced two divergences the `→ units` shorthand hid,
+> *real* verb (now the committed real-litectx sweep in `test/context-units.test.js`) surfaced two divergences the `→ units` shorthand hid,
 > both reconciled **bareagent-side** (we adapt to litectx's socket, never the reverse):
 > 1. **Return shape** — litectx returns the `AssembleResult` **envelope** `{units, dropped, tokens}`
 >    (`dropped[]` is load-bearing per §8.2, ships in-slice). `unitAssembler` now unwraps `.units` (and

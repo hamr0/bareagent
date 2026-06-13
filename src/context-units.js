@@ -32,7 +32,7 @@
 //                    never split. bareagent pre-bundles an assistant tool-call + ALL its result(s) into
 //                    one unit, so each bundle is its OWN group (group-id = the unit's id); everything
 //                    else is null. NOTE: string|null, not boolean — a boolean collapses every bundle
-//                    under one key and litectx would fit them all-or-nothing (poc/rt1-real-assemble.mjs).
+//                    under one key and litectx would fit them all-or-nothing (test/context-units.test.js (real-litectx sweep)).
 //     tokensApprox — chars/4 estimate over the unit's backing messages, for litectx's budget math.
 //
 // `_msgs` (the verbatim backing messages) is attached NON-ENUMERABLE: it does not appear in the 7-field
@@ -102,7 +102,7 @@ function toUnits(msgs) {
       // `atomic` is litectx's group-id (string|null), NOT a boolean: units sharing one are kept/dropped
       // whole. bareagent already pre-bundles a tool-call + its result(s) into ONE unit, so each bundle is
       // its OWN group — group-id = the unit's id. (A boolean would collapse every bundle under one key,
-      // making litectx fit them all-or-nothing — see poc/rt1-real-assemble.mjs.)
+      // making litectx fit them all-or-nothing — see test/context-units.test.js (real-litectx sweep).)
       const gid = `u${_seq++}`;
       units.push(withBacking({ id: gid, role: 'assistant', content: renderContent(group.slice(1)), kind: null, pinned: false, atomic: gid, tokensApprox: approxTokens(group) }, group));
       i = j - 1;
