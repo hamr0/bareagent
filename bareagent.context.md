@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.13.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.13.1 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -254,7 +254,19 @@ or `content.denyPatterns` over the serialized action.
 repo) as well as your home/IDE configs. Pass `confirmServer(name, def)
 => boolean` to `createMCPBridge` to approve each server **before its
 command is spawned** (return `false` to skip it; a throw fails closed).
-Default trusts all discovered servers — unchanged behavior.
+Default trusts all discovered servers — unchanged behavior. **When no
+`confirmServer` is set, the bridge prints a one-time warning naming every
+command it is about to spawn** (before the first spawn, discovery included),
+so a cwd `.mcp.json` can't run a command unannounced — `confirmServer` is
+still how you actually *gate* it.
+
+**RPC timeouts (Unreleased).** Every JSON-RPC round-trip is now bounded, so a
+server that never answers can't hang the bridge or the loop. `opts.timeout`
+(default 15 s) bounds the handshake (`initialize` + `tools/list`);
+`opts.callTimeout` (default 120 s, `0` disables) bounds each `tools/call`. A
+timed-out tool call rejects with a `timed out after Nms` `ToolError` rather
+than blocking forever; a server that breaks its stdin pipe surfaces as a
+failed connection, never an uncaught `EPIPE` crash.
 
 ## Wiring with bareguard
 
@@ -543,6 +555,8 @@ new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens).
 
 **Error body (v0.11.0):** on an HTTP error the OpenAI/Anthropic/Ollama providers throw a `ProviderError` whose `message` carries the upstream error string. The full parsed response is **not** attached to `err.body` by default (so an unexpected field can't leak through logs that dump the error object). Pass `{ exposeErrorBody: true }` to attach it for debugging.
+
+**Plaintext-key warning (Unreleased):** the OpenAI provider's `baseUrl` accepts `http://` (for local/OpenAI-compatible endpoints), but a `Bearer` key sent over plaintext http to a **non-loopback** host is exposed on the wire. The provider now warns once when that happens. Loopback hosts (`localhost`/`127.0.0.0/8`/`::1` — local proxies, Ollama-style endpoints) stay silent, since that's the legitimate keyless-local case. The header is **not** stripped (some local proxies want a key), so use `https` for any remote endpoint, or drop `apiKey` when the local endpoint needs none.
 
 **Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. Pricing covers OpenAI and Anthropic models; unknown models use a default average. To adjust rates, edit `COST_PER_1K` at the top of `src/loop.js`.
 

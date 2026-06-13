@@ -54,7 +54,7 @@ const { ToolError } = require('./errors');
 /**
  * JSON-RPC stdio client over a spawned MCP server.
  * @typedef {object} RpcClient
- * @property {(method: string, params?: object) => Promise<any>} rpc
+ * @property {(method: string, params?: object, timeoutMs?: number) => Promise<any>} rpc
  * @property {(method: string, params?: object) => void} notify
  * @property {import('node:child_process').ChildProcessWithoutNullStreams} child
  * @property {string} stderr
@@ -215,10 +215,24 @@ function createRpcClient(name, def) {
     ...(cwd && { cwd }),
   });
 
-  /** @type {Map<number, {resolve: (v: any) => void, reject: (e: any) => void}>} */
+  /** @type {Map<number, {resolve: (v: any) => void, reject: (e: any) => void, timer: NodeJS.Timeout | null}>} */
   const pending = new Map();
   let nextId = 1;
   let buffer = '';
+
+  // Settle a pending request exactly once, clearing its timeout timer. Returns
+  // false if the id was already settled (response/close/timeout raced) so callers
+  // can avoid double-settling. Every settle path (response, close, write error,
+  // timeout) funnels through here.
+  /** @param {number} id @param {boolean} ok @param {any} payload @returns {boolean} */
+  function settle(id, ok, payload) {
+    const p = pending.get(id);
+    if (!p) return false;
+    pending.delete(id);
+    if (p.timer) clearTimeout(p.timer);
+    if (ok) p.resolve(payload); else p.reject(payload);
+    return true;
+  }
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -231,15 +245,12 @@ function createRpcClient(name, def) {
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
       if (!msg.id) continue;
-      const p = pending.get(msg.id);
-      if (!p) continue;
-      pending.delete(msg.id);
       if (msg.error) {
-        p.reject(new ToolError(`MCP server "${name}": ${msg.error.message}`, {
+        settle(msg.id, false, new ToolError(`MCP server "${name}": ${msg.error.message}`, {
           context: { code: msg.error.code },
         }));
       } else {
-        p.resolve(msg.result);
+        settle(msg.id, true, msg.result);
       }
     }
   });
@@ -248,24 +259,49 @@ function createRpcClient(name, def) {
   child.stderr?.setEncoding('utf8');
   child.stderr?.on('data', (chunk) => { stderrBuf += chunk; });
 
+  // A child can exit (crash, fast-exit before init, killed) at any moment.
+  // Writing to its stdin then emits an 'error' on the pipe; with NO listener,
+  // Node re-throws it as an uncaught exception and takes down the HOST process.
+  // Swallow it here — pending rpc()s are rejected by the 'close' handler below,
+  // and rpc()/notify() guard writability before writing.
+  child.stdin.on('error', () => { /* child gone; surfaced via close + write guards */ });
+
   child.on('close', (code) => {
-    for (const [id, { reject }] of pending) {
-      reject(new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
+    for (const id of [...pending.keys()]) {
+      settle(id, false, new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
     }
-    pending.clear();
   });
 
   /**
+   * Send a JSON-RPC request and await its response. Bounded by `timeoutMs`: a
+   * server that accepts the write but never answers (or answers a different id)
+   * would otherwise hang the caller forever — only `initialize` used to be
+   * bounded, leaving `tools/list` and `tools/call` open-ended. Pass 0 to disable.
    * @param {string} method
    * @param {object} [params]
+   * @param {number} [timeoutMs=0] - Reject if no response arrives within this many ms (0 = no limit).
    * @returns {Promise<any>}
    */
-  function rpc(method, params = {}) {
+  function rpc(method, params = {}, timeoutMs = 0) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      if (!child.stdin.writable) {
+        return reject(new ToolError(`MCP server "${name}" stdin is not writable (process exited or pipe closed). stderr: ${stderrBuf.slice(-500)}`));
+      }
+      /** @type {NodeJS.Timeout | null} */
+      let timer = null;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          settle(id, false, new ToolError(`MCP server "${name}" "${method}" timed out after ${timeoutMs}ms. stderr: ${stderrBuf.slice(-500)}`));
+        }, timeoutMs);
+        timer.unref?.();
+      }
+      pending.set(id, { resolve, reject, timer });
       const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
-      child.stdin.write(msg);
+      child.stdin.write(msg, (err) => {
+        // settle() no-ops if 'close'/timeout already settled this id.
+        if (err) settle(id, false, new ToolError(`MCP server "${name}" write failed: ${err.message}. stderr: ${stderrBuf.slice(-500)}`));
+      });
     });
   }
 
@@ -274,8 +310,9 @@ function createRpcClient(name, def) {
    * @param {object} [params]
    */
   function notify(method, params = {}) {
+    if (!child.stdin.writable) return;
     const msg = JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n';
-    child.stdin.write(msg);
+    child.stdin.write(msg, () => { /* write errors swallowed via stdin 'error' handler */ });
   }
 
   return { rpc, notify, child, get stderr() { return stderrBuf; } };
@@ -301,16 +338,17 @@ function unwrapContent(content) {
 /**
  * @param {string} serverName
  * @param {McpTool[]} mcpTools
- * @param {(method: string, params?: object) => Promise<any>} rpc
+ * @param {(method: string, params?: object, timeoutMs?: number) => Promise<any>} rpc
+ * @param {number} [callTimeout=0] - Per-invocation timeout (ms) for tools/call; 0 = no limit.
  * @returns {ToolDef[]}
  */
-function wrapTools(serverName, mcpTools, rpc) {
+function wrapTools(serverName, mcpTools, rpc, callTimeout = 0) {
   return mcpTools.map(t => ({
     name: `${serverName}_${t.name}`,
     description: t.description || '',
     parameters: t.inputSchema || { type: 'object', properties: {} },
     execute: async (args) => {
-      const result = await rpc('tools/call', { name: t.name, arguments: args });
+      const result = await rpc('tools/call', { name: t.name, arguments: args }, callTimeout);
       if (result.isError) {
         throw new ToolError(unwrapContent(result.content) || 'MCP tool error', {
           context: { server: serverName, tool: t.name },
@@ -374,21 +412,17 @@ async function connectAndListTools(name, def, timeout = 15000) {
   const client = createRpcClient(name, def);
 
   try {
-    const init = client.rpc('initialize', {
+    // Both handshake round-trips are bounded by `timeout`. tools/list used to be
+    // unbounded — a server that answered initialize but never replied to
+    // tools/list would hang discovery (and the whole bridge) indefinitely.
+    await client.rpc('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'bare-agent', version: '0.5.0' },
-    });
-
-    let timerId;
-    const timer = new Promise((_, reject) => {
-      timerId = setTimeout(() => reject(new ToolError(`MCP server "${name}" init timed out after ${timeout}ms`)), timeout);
-    });
-
-    try { await Promise.race([init, timer]); } finally { clearTimeout(timerId); }
+    }, timeout);
     client.notify('notifications/initialized');
 
-    const { tools: mcpTools } = await client.rpc('tools/list');
+    const { tools: mcpTools } = await client.rpc('tools/list', {}, timeout);
 
     return { mcpTools, client };
   } catch (err) {
@@ -562,7 +596,9 @@ function buildMetaTools(tools, discoveredAt) {
  * @param {string} [opts.bridgePath] - Path to .mcp-bridge.json. Default: .mcp-bridge.json in cwd.
  * @param {string[]} [opts.configPaths] - IDE config paths for discovery.
  * @param {string[]} [opts.servers] - Limit to these server names.
- * @param {number} [opts.timeout=15000] - Per-server init timeout in ms.
+ * @param {number} [opts.timeout=15000] - Per-server handshake timeout in ms (initialize + tools/list).
+ * @param {number} [opts.callTimeout=120000] - Per-invocation timeout in ms for tools/call. Bounds a
+ *   server that accepts a tool call but never responds. Set 0 to disable (unbounded).
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
  * @param {(name: string, def: ServerDef) => boolean | Promise<boolean>} [opts.confirmServer]
  *   Vet each discovered server BEFORE its `command` is spawned. Connecting to an
@@ -583,6 +619,8 @@ async function createMCPBridge(opts = {}) {
   }
   const bridgePath = opts.bridgePath || DEFAULT_BRIDGE_PATH();
   const timeout = opts.timeout || 15000;
+  // 0 is a valid explicit "unbounded"; only undefined falls back to the default.
+  const callTimeout = opts.callTimeout ?? 120000;
 
   // Vet a server before spawning its command. Fail-closed: an undefined hook
   // trusts all (unchanged behavior); a throw denies.
@@ -592,6 +630,24 @@ async function createMCPBridge(opts = {}) {
     if (!confirmServer) return true;
     try { return (await confirmServer(name, def)) === true; }
     catch { return false; }
+  };
+
+  // Connecting to a server EXECUTES its `command`, which can originate from a
+  // cwd-relative .mcp.json in an untrusted repo (discoverServers reads project
+  // configs). With no confirmServer hook, every discovered command runs unvetted.
+  // Warn ONCE per call, BEFORE the first spawn — and the first spawn is the
+  // discovery phase on a cold/refresh run, not the main-connect phase below.
+  let warnedUnvetted = false;
+  /** @param {Array<{name: string, command: string, args?: string[]}>} specs */
+  const warnUnvettedSpawn = (specs) => {
+    if (confirmServer || warnedUnvetted || specs.length === 0) return;
+    warnedUnvetted = true;
+    const cmds = specs.map(s => `${s.name} → ${s.command} ${(s.args || []).join(' ')}`.trim());
+    console.warn(
+      `[MCP Bridge] spawning ${specs.length} server command(s) without a confirmServer hook:\n  ` +
+      cmds.join('\n  ') +
+      `\n  Pass { confirmServer } to vet each command before it runs.`,
+    );
   };
 
   let config = readBridgeConfig(bridgePath);
@@ -620,6 +676,8 @@ async function createMCPBridge(opts = {}) {
       const toDiscover = reqServers
         ? [...discovered.entries()].filter(([n]) => reqServers.includes(n))
         : [...discovered.entries()];
+
+      warnUnvettedSpawn(toDiscover.map(([name, def]) => ({ name, command: def.command, args: def.args })));
 
       await Promise.all(toDiscover.map(async ([name, def]) => {
         try {
@@ -674,6 +732,11 @@ async function createMCPBridge(opts = {}) {
     return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
   }
 
+  // Warn before the main-connect spawn too. On a warm run (config exists, no
+  // refresh) this is the first and only spawn; on a cold run the discovery phase
+  // already warned, so the once-flag makes this a no-op.
+  warnUnvettedSpawn(serverNames.map(n => ({ name: n, command: cfg.servers[n].command, args: cfg.servers[n].args })));
+
   // Connect to servers and wrap only allowed tools
   /** @type {ToolDef[]} */
   const tools = [];
@@ -702,7 +765,7 @@ async function createMCPBridge(opts = {}) {
 
       // Only wrap tools that are allowed in config
       const allowed = mcpTools.filter(t => allowedToolNames.includes(t.name));
-      const wrapped = wrapTools(name, allowed, client.rpc);
+      const wrapped = wrapTools(name, allowed, client.rpc, callTimeout);
 
       tools.push(...wrapped);
       children.push(client.child);

@@ -780,6 +780,58 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
+### v0.13.1 / MCP-bridge + provider hardening pass (2026-06-13)
+
+- **A broken MCP stdin pipe must never crash the host.** A spawned server that
+  exited or closed its stdin read-end mid-handshake left the parent writing into
+  a dead pipe; `child.stdin` had no `'error'` listener, so the `EPIPE` became an
+  **uncaught exception that killed the whole host agent** — a denial-of-service a
+  buggy or hostile server could trigger. Fix: `createRpcClient` attaches a stdin
+  `'error'` handler (the load-bearing piece — write guards alone don't catch an
+  in-flight write erroring) and every write is guarded on `child.stdin.writable`.
+  A broken pipe now surfaces as a failed connection / rejected call. The
+  regression test is deterministic: the mock closes fd 0 at the OS level (Node's
+  `stream.destroy()` leaves fd 0 open, so the pipe wouldn't actually break) while
+  staying alive, forcing the parent's next write to `EPIPE` — verified to fail
+  pre-fix with `uncaughtException: write EPIPE`, not a flaky timing race.
+- **Every MCP RPC is time-bounded, not just `initialize`.** `tools/list` and
+  `tools/call` were unbounded: a server that finished the handshake but never
+  answered `tools/list` hung discovery forever, and one that swallowed a tool
+  call hung the agent loop forever. The timeout moved out of a bespoke
+  `Promise.race` around `initialize` and into the RPC layer — `rpc(method,
+  params, timeoutMs)` with a single `settle()` that clears the timer on every
+  path (response, close, write error, timeout). Handshake calls use `opts.timeout`
+  (15 s default); tool calls use the new `opts.callTimeout` (120 s default, `0`
+  disables — large enough for legitimately slow tools, no longer infinite). The
+  rewrite also closed a latent unhandled-rejection: the old `Promise.race` left
+  the losing `init` promise pending, which then rejected with no handler when
+  `killServer` closed the child.
+- **Unvetted MCP server spawns are surfaced, not silenced.** Connecting to a
+  discovered server executes its `command`, which can come from a cwd-relative
+  `.mcp.json` in an untrusted repo. The fail-open default (trust all when no
+  `confirmServer` hook) is unchanged — it matches IDE behaviour and changing it
+  would break adopters — but `createMCPBridge` now emits a one-time warning
+  naming every command before it spawns. Placement matters: the warning fires
+  before the **discovery** spawn, not just the main-connect spawn, because on a
+  cold run discovery is the first thing to execute the command. The security
+  contract is "you can't run a repo's `.mcp.json` command without being told";
+  `confirmServer` remains the way to actually gate it.
+- **The OpenAI provider warns on plaintext-HTTP key transport.** `baseUrl` accepts
+  `http://` (for local/Ollama-style endpoints), and the `Authorization` header was
+  attached regardless of scheme — sending the key in cleartext to a non-loopback
+  host exposes it on the wire. The provider now warns once per instance when the
+  key would go over plaintext http to a non-loopback host. Loopback stays silent:
+  that's the legitimate keyless-local case and warning there would be noise. We
+  warn rather than strip the header — some local proxies legitimately want a key —
+  so the adopter keeps control.
+- **`examples/wake.sh` validates record ids before pathing on them.** The reference
+  scheduler interpolates a queue record's `id` into a log filename. The `defer`
+  tool mints ids as `def_<base36>_<hex>`, so the script now rejects anything that
+  doesn't match that shape before it reaches a path — defence-in-depth against a
+  hand-edited / untrusted queue line traversing the filesystem. Not reachable
+  through the tool itself (ids are generated, and fired actions are re-gated), but
+  a copy-paste reference shouldn't trust the file blindly.
+
 ### v0.10.3 / hardening pass (2026-05-18)
 
 - **Halt is a sealed exit, not a thrown exception.** `HaltError` still bubbles

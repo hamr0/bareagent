@@ -287,6 +287,25 @@ describe('createMCPBridge', () => {
     }
   });
 
+  // Regression: a server whose stdin read-end is gone left the parent writing
+  // its `initialize` request into a broken pipe. child.stdin had no 'error'
+  // listener, so the EPIPE surfaced as an uncaught exception and crashed the
+  // HOST process. It must now be reported as a failed connection instead.
+  it('does not crash the host on a broken stdin pipe (EPIPE)', async () => {
+    const brokenConfig = mockConfig(TMP, {
+      broken: { command: 'node', args: [MOCK_SERVER], env: { MOCK_CLOSE_STDIN_AFTER_INIT: '1' } },
+    });
+    const brokenBridge = join(TMP, '.broken-bridge.json');
+    try {
+      // If the EPIPE were unhandled this line would tear down the test process.
+      const bridge = await createMCPBridge({ configPaths: [brokenConfig], bridgePath: brokenBridge, timeout: 1500 });
+      assert.equal(bridge.servers.length, 0, 'broken-pipe server should fail to connect, not crash');
+      await bridge.close();
+    } finally {
+      cleanup(brokenConfig, brokenBridge);
+    }
+  });
+
   it('handles init timeout', async () => {
     const slowConfig = mockConfig(TMP, {
       slow: { command: 'node', args: [MOCK_SERVER], env: { MOCK_SLOW_INIT: '5000' } },
@@ -298,6 +317,49 @@ describe('createMCPBridge', () => {
       await bridge.close();
     } finally {
       cleanup(slowConfig, slowBridge);
+    }
+  });
+
+  // Regression: tools/list used to be unbounded. A server that answered
+  // initialize but never replied to tools/list hung discovery (and the whole
+  // bridge) forever. It must now time out and surface as a failed connection.
+  it('times out a server that never answers tools/list', async () => {
+    const hangConfig = mockConfig(TMP, {
+      hanglist: { command: 'node', args: [MOCK_SERVER], env: { MOCK_NO_TOOLS_LIST: '1' } },
+    });
+    const hangBridge = join(TMP, '.hanglist-bridge.json');
+    try {
+      const started = Date.now();
+      const bridge = await createMCPBridge({ configPaths: [hangConfig], bridgePath: hangBridge, timeout: 600 });
+      assert.equal(bridge.servers.length, 0, 'server that never lists tools must fail, not hang');
+      assert.ok(Date.now() - started < 5000, 'must return promptly via timeout, not hang');
+      await bridge.close();
+    } finally {
+      cleanup(hangConfig, hangBridge);
+    }
+  });
+
+  // Regression: tools/call was unbounded too — a server that accepted a tool
+  // invocation but never responded hung the caller (and the agent loop) forever.
+  // callTimeout now bounds it; the tool execute rejects instead of hanging.
+  it('times out a tool call that never gets a response (callTimeout)', async () => {
+    const hangConfig = mockConfig(TMP, {
+      hangcall: { command: 'node', args: [MOCK_SERVER], env: { MOCK_HANG_ON_CALL: '1' } },
+    });
+    const hangBridge = join(TMP, '.hangcall-bridge.json');
+    try {
+      const bridge = await createMCPBridge({ configPaths: [hangConfig], bridgePath: hangBridge, timeout: 5000, callTimeout: 600 });
+      const tool = bridge.tools.find(t => t.name === 'hangcall_read_file');
+      assert.ok(tool, 'tool should be discovered (handshake completes)');
+      const started = Date.now();
+      await assert.rejects(
+        () => tool.execute({ path: '/x' }),
+        (err) => { assert.match(err.message, /timed out after 600ms/); return true; },
+      );
+      assert.ok(Date.now() - started < 5000, 'tool call must reject via timeout, not hang');
+      await bridge.close();
+    } finally {
+      cleanup(hangConfig, hangBridge);
     }
   });
 

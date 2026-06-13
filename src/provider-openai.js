@@ -9,6 +9,12 @@ const { ProviderError } = require('./errors');
 /** @typedef {import('../types').ToolCall} ToolCall */
 /** @typedef {import('../types').GenerateResult} GenerateResult */
 
+/** @param {string} hostname @returns {boolean} */
+function isLoopbackHost(hostname) {
+  const h = hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h.startsWith('127.');
+}
+
 /**
  * @typedef {object} OpenAIOptions
  * @property {string} [apiKey]
@@ -83,6 +89,17 @@ class OpenAIProvider {
       const url = new URL(this.baseUrl + path);
       const transport = url.protocol === 'https:' ? https : http;
       const payload = JSON.stringify(body);
+
+      // Sending a Bearer key over plaintext http to a non-loopback host exposes
+      // it to anyone on-path. Loopback (local proxies / Ollama-style endpoints)
+      // is the legitimate keyless case, so only warn for remote http. Warn once.
+      if (this.apiKey && url.protocol === 'http:' && !isLoopbackHost(url.hostname) && !this._warnedInsecure) {
+        this._warnedInsecure = true;
+        console.warn(
+          `[OpenAIProvider] sending Authorization key over PLAINTEXT http to ${url.hostname} — ` +
+          `the key is exposed on the wire. Use https, or drop the apiKey for keyless local endpoints.`,
+        );
+      }
 
       const req = transport.request(url, {
         method: 'POST',

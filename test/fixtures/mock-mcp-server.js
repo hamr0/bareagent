@@ -11,6 +11,17 @@
  *   MOCK_MALFORMED=1       — send non-JSON garbage on first tools/call
  *   MOCK_PID_FILE=<path>   — write this process's pid to the file at startup
  *                            (lets a test assert the child was reaped, not leaked)
+ *   MOCK_NO_TOOLS_LIST=1   — answer `initialize` but never reply to tools/list
+ *                            (stay alive) — exercises the tools/list timeout
+ *   MOCK_HANG_ON_CALL=1    — connect fully, but never reply to tools/call
+ *                            (stay alive) — exercises the per-call timeout
+ *   MOCK_CLOSE_STDIN_AFTER_INIT=1 — answer `initialize`, then close our stdin
+ *                            read-end and stay alive. The parent's follow-up
+ *                            write (`notifications/initialized`) then hits a
+ *                            broken pipe deterministically — a full stdout
+ *                            round-trip has elapsed, so the read end is reliably
+ *                            closed before the parent writes again (EPIPE on the
+ *                            parent's child.stdin).
  */
 
 let buffer = '';
@@ -48,11 +59,22 @@ async function handleMessage(msg) {
       capabilities: { tools: {} },
       serverInfo: { name: 'mock-mcp', version: '1.0.0' },
     });
+    if (process.env.MOCK_CLOSE_STDIN_AFTER_INIT) {
+      // Close our stdin read-end at the OS level (not just the JS stream —
+      // stream.destroy() leaves fd 0 open, so the parent's pipe wouldn't break).
+      // The parent's follow-up write then hits a pipe with no reader → EPIPE.
+      // Stay alive so the child's 'close' can't race in to mask the write error.
+      process.stdin.pause();
+      try { require('fs').closeSync(0); } catch { /* already closed */ }
+      setInterval(() => {}, 1 << 30); // keep us alive; the bridge reaps us on timeout
+    }
   } else if (msg.method === 'notifications/initialized') {
     // no response for notifications
   } else if (msg.method === 'tools/list') {
+    if (process.env.MOCK_NO_TOOLS_LIST) return; // never respond → exercises tools/list timeout
     respond(msg.id, { tools: TOOLS });
   } else if (msg.method === 'tools/call') {
+    if (process.env.MOCK_HANG_ON_CALL) return; // never respond → exercises per-call timeout
     if (process.env.MOCK_CRASH_ON_TOOL) {
       process.exit(1);
     }
@@ -102,6 +124,10 @@ process.stdin.on('data', async (chunk) => {
 });
 
 // Exit cleanly when parent closes stdin — otherwise the test runner hangs
-// waiting for this child to release the event loop.
-process.stdin.on('end', () => process.exit(0));
-process.stdin.on('close', () => process.exit(0));
+// waiting for this child to release the event loop. Skipped in the
+// close-after-init mode, which deliberately closes its OWN stdin to break the
+// pipe while staying alive (the bridge reaps it via timeout/SIGKILL).
+if (!process.env.MOCK_CLOSE_STDIN_AFTER_INIT) {
+  process.stdin.on('end', () => process.exit(0));
+  process.stdin.on('close', () => process.exit(0));
+}

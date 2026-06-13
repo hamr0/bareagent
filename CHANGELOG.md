@@ -4,6 +4,25 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-06-13
+
+A security + reliability hardening pass on the MCP bridge and the OpenAI provider. No breaking API changes; the only new surface is the optional `createMCPBridge({ callTimeout })`.
+
+### Fixed
+
+- **MCP bridge no longer crashes the host process when a server's stdin pipe breaks.** A spawned MCP server that exited — or closed its stdin read-end — mid-handshake left the parent writing its JSON-RPC request into a dead pipe. `child.stdin` had no `'error'` listener, so the `EPIPE` surfaced as an **uncaught exception that took down the entire host agent**: a misbehaving (or hostile) server could kill the process. `createRpcClient` now attaches a stdin `'error'` handler and guards every write on `child.stdin.writable`; a broken pipe is reported as a failed connection (or a rejected tool call), never a crash. The regression test reproduces the exact failure mode — verified to fail pre-fix with `uncaughtException: write EPIPE`.
+- **MCP `tools/list` and `tools/call` are now time-bounded — they could hang the bridge (and the agent loop) forever.** Only `initialize` was bounded; a server that finished the handshake but never answered `tools/list` hung discovery indefinitely, and one that accepted a tool invocation but never responded hung the loop indefinitely. The timeout moved into the RPC layer: both handshake round-trips use `opts.timeout` (default 15 s) and tool invocations use the new `opts.callTimeout` (default 120 s). Timers are cleared on every settle path (response, close, write error, timeout) — no leaks, no double-settle. The rewrite also removes a latent unhandled-rejection in the old `Promise.race` init path (on timeout the losing `init` promise rejected later with no handler).
+
+### Added
+
+- **`createMCPBridge({ callTimeout })`** — per-invocation timeout (ms) for `tools/call`. Default `120000`; set `0` to disable. Bounds a server that accepts a call but never responds, so a single unresponsive tool can't wedge the loop.
+
+### Security
+
+- **MCP bridge warns before spawning unvetted server commands.** Connecting to a discovered server *executes its `command`*, which can originate from a cwd-relative `.mcp.json` in an untrusted repo (discovery reads project configs). When no `confirmServer` hook is supplied, `createMCPBridge` now emits a one-time warning naming every command about to run — fired *before* the first spawn on **both** the discovery and main-connect paths, so a cold run can't execute a command before the warning. The fail-open default is unchanged (it matches IDE behaviour), but "a repo's `.mcp.json` just ran a command" is no longer silent. Pass `confirmServer` to gate execution outright.
+- **OpenAI provider warns when sending the API key over plaintext HTTP.** If `baseUrl` is `http://` and the host is **non-loopback**, the `Authorization: Bearer <key>` header would expose the key on the wire; the provider now warns once per instance. Loopback endpoints (local proxies / Ollama-style, the legitimate keyless case) stay silent.
+- **`examples/wake.sh` validates the queue `id` before it reaches a file path.** Defence-in-depth in the reference scheduler: each record's `id` is matched against `def_<base36>_<hex>` (the shape the `defer` tool mints) before being interpolated into a log filename, so a hand-edited or untrusted queue line can't traverse the filesystem. Not reachable through the tool (ids are generated), but the reference no longer trusts the file blindly.
+
 ## [0.13.0] — 2026-06-13
 
 This release lands the **litectx-runtime seam set** (RT-1/RT-3/RT-4) — the points where a context-engineering library plugs into the agent loop — plus the `assemble` context-window chokepoint and its msgs⇄units adapter.

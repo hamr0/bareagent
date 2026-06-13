@@ -63,6 +63,14 @@ echo "$PENDING" | while IFS= read -r record; do
   ID=$(echo "$record" | jq -r '.id')
   ACTION=$(echo "$record" | jq -c '.action')
 
+  # The defer tool generates ids as def_<base36>_<hex>. Anything else means a
+  # hand-edited / untrusted queue line — reject before $ID reaches a file path
+  # below (defence-in-depth against path traversal via a crafted id).
+  case "$ID" in
+    def_[a-z0-9]*_[a-f0-9]*) ;;
+    *) echo "[wake $NOW] skipping record with unexpected id: $ID" >&2; continue ;;
+  esac
+
   # Append "fired" status line first (defer queue is append-only).
   printf '{"id":"%s","status":"fired","ts":"%s"}\n' "$ID" "$NOW" >> "$QUEUE"
 
