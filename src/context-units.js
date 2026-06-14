@@ -282,7 +282,10 @@ function harvestKey(unit) {
  * `.flush(msgs, ctx)` — the F2 residual harvest: `trim` only hands back EVICTED turns, so the final
  * keepLastN window is never harvested mid-run and a clean run would diverge from an end-of-task batch.
  * Call `.flush` on completion to harvest the surviving non-pinned turns (no eviction); the idempotent key
- * means it never duplicates what eviction already harvested.
+ * means it never duplicates what eviction already harvested. The Loop invokes it only on **clean
+ * completion** — on a halt (e.g. bareguard `maxTurns`), `stop()`, or error exit the survivors stay intact
+ * in `result.msgs` but are NOT auto-flushed (auto-flushing a content-halt could re-trigger the deny that
+ * caused it); harvest `result.msgs` yourself on those exits if you need the final window persisted.
  *
  * `onHarvest` is the consumer's harvest POLICY point (litectx CE-PRD §6/R-W*: bareagent owns the trigger
  * + what's worth keeping, litectx owns the mechanism + worklist). It is REQUIRED — the adapter structurally
