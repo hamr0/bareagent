@@ -68,6 +68,24 @@ describe('RT-2: harvestKey — the stable harvest id', () => {
     assert.notEqual(k1, k2);
     assert.equal(k1, k1b);
   });
+
+  // Regression — security audit (poc/rt2-audit-grounding.mjs) hardenings:
+  const toolUnit = (ids) => toUnits([
+    { role: 'user', content: 't' },
+    { role: 'assistant', content: '', tool_calls: ids.map((id) => ({ id, type: 'function', function: { name: 'r', arguments: '{}' } })) },
+    ...ids.map((id) => ({ role: 'tool', tool_call_id: id, content: 'x' })),
+  ]).find((u) => u.atomic);
+  const plainKey = (c) => harvestKey(toUnits([{ role: 'user', content: 'task' }, { role: 'assistant', content: c }]).find((u) => u.role === 'assistant' && !u.pinned));
+
+  it('F2: tool_call_id join is unambiguous — [a]+[b] ≠ [a,b], normal ids unchanged', () => {
+    assert.notEqual(harvestKey(toolUnit(['a', 'b'])), harvestKey(toolUnit(['a,b'])));
+    assert.equal(harvestKey(toolUnit(['call_1'])), 'tc:call_1'); // provider ids round-trip through the escape
+  });
+
+  it('F1: plain-turn hash is wide enough that the old 32-bit collision pair now differs', () => {
+    // these two contents collided under the prior single 32-bit FNV-1a hash (h:1d14f8u)
+    assert.notEqual(plainKey('assistant reasoning step 329599'), plainKey('assistant reasoning step 532382'));
+  });
 });
 
 // ── unitTrimmer contract (against the fake trim verb) ────────────────────────

@@ -227,10 +227,17 @@ function unitAssembler(assembleUnits) {
  * property of the TURN, never from `unit.id`: `toUnits` mints ids from a module counter, so the same turn
  * is `u1` on one call and `u3` on the next (poc/rt2-trim-interlock.mjs F1) — keying on it double-writes.
  * Derived here from the unit's verbatim `_msgs` backing: the joined `tool_call_id`s for a tool turn (stable
- * by construction), else a deterministic FNV-1a hash of `[role, content]` for a plain turn. The consumer
- * namespaces it (e.g. `${taskId}:${key}`) and feeds it to `remember(id, …)`, which upserts → a replayed
- * hop overwrites instead of duplicating. NOT a content search (litectx FTS can't match ids; sealed meta is
- * unsearchable) — a deterministic key passed to the keyed write.
+ * by construction), else a hash of `[role, content]` for a plain turn. The consumer namespaces it (e.g.
+ * `${taskId}:${key}`) and feeds it to `remember(id, …)`, which upserts → a replayed hop overwrites instead
+ * of duplicating. NOT a content search (litectx FTS can't match ids; sealed meta is unsearchable) — a
+ * deterministic key passed to the keyed write. The consumer's `taskId` prefix is the isolation boundary;
+ * treat the returned key as opaque (don't re-parse it).
+ *
+ * Two collision hardenings (grounded in poc/rt2-audit-grounding.mjs): ids are `encodeURIComponent`-escaped
+ * before the `,` join, so `['a','b']` and `['a,b']` can no longer alias the same key; and the plain-turn
+ * hash is **two near-independent streams** (FNV-1a + DJB2) → ~64-bit, so a long-running agent's harvest
+ * can't silently overwrite a turn via a 32-bit birthday collision (a single 32-bit FNV exhausted in ~5e5
+ * distinct turns). Normal provider ids (`call_…`) round-trip unchanged through the escape.
  * @param {Record<string, any>} unit - a unit from {@link toUnits} (its `_msgs` backing is read).
  * @returns {string}
  */
@@ -241,12 +248,19 @@ function harvestKey(unit) {
   for (const m of back) {
     if (m.role === 'assistant' && Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) if (tc && tc.id) calls.push(tc.id);
   }
-  if (calls.length) return `tc:${calls.join(',')}`;
-  // plain turn (no tool_calls): deterministic FNV-1a over role+content — stable across toUnits calls.
-  let h = 0x811c9dc5;
+  // escape so a literal ',' inside an id can't alias across call shapes ([{id:'a,b'}] vs [{id:'a'},{id:'b'}]).
+  if (calls.length) return `tc:${calls.map((id) => encodeURIComponent(id)).join(',')}`;
+  // plain turn (no tool_calls): two near-independent rolling hashes over role+content (FNV-1a + DJB2),
+  // concatenated to ~64 bits → collision-resistant at agent scale. Stable across toUnits calls.
+  let h1 = 0x811c9dc5; // FNV-1a offset basis
+  let h2 = 5381;       // DJB2 seed
   const s = JSON.stringify(back.map((m) => [m.role, m.content]));
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
-  return `h:${(h >>> 0).toString(36)}`;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 ^= c; h1 = Math.imul(h1, 0x01000193);
+    h2 = (Math.imul(h2, 33) + c) | 0;
+  }
+  return `h:${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
 }
 
 /**
