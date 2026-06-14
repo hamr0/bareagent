@@ -303,7 +303,7 @@ function rtShapes() {
 }
 
 describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? false : 'litectx not installed' }, () => {
-  it('unwraps the envelope and keeps the NEWEST tool-pair under a tight budget (recency-anchored)', () => {
+  it('unwraps the envelope and keeps the NEWEST tool-pair under a tight budget (recency-anchored)', async () => {
     const msgs = [
       { role: 'system', content: 'You are a coding agent.' },
       { role: 'user', content: 'Refactor the rate limiter.' },
@@ -315,7 +315,7 @@ describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? 
     }
     const units = toUnits(msgs);
     const total = units.reduce((s, u) => s + u.tokensApprox, 0);
-    const res = realAssemble(units, { budget: Math.ceil(total * 0.5) });
+    const res = await realAssemble(units, { budget: Math.ceil(total * 0.5) });
     // litectx returns the AssembleResult envelope; dropped[] accounts for what didn't fit (never silent)
     assert.ok(Array.isArray(res.units) && Array.isArray(res.dropped), 'real assemble returns { units, dropped, tokens }');
     assert.ok(res.tokens <= Math.ceil(total * 0.5), 'fits within budget (best-effort)');
@@ -331,7 +331,7 @@ describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? 
     assert.ok(view.some((m) => m.role === 'system'), 'pinned system prompt survived');
   });
 
-  it('matches an INDEPENDENT reference fit across a budget sweep, holding all safety invariants', () => {
+  it('matches an INDEPENDENT reference fit across a budget sweep, holding all safety invariants', async () => {
     const setEq = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
     let points = 0;
     const gradedPairCounts = new Set(); // for the single-call shape — distinct kept-pair counts across the sweep
@@ -342,7 +342,7 @@ describe('RT-1: against the REAL litectx assemble verb', { skip: realAssemble ? 
       const budgets = [0, 1, ...Array.from({ length: 11 }, (_, k) => Math.round((total * k) / 10)), total + 50];
       for (const budget of budgets) {
         points++;
-        const res = realAssemble(units, { budget });
+        const res = await realAssemble(units, { budget });
         const keptIds = new Set(res.units.map((u) => u.id));
         // (B) the recency-fit correctness proof: litectx == independent reference at every budget
         assert.ok(setEq(keptIds, referenceFit(units, budget)), `[${name} @${budget}] litectx != independent reference fit`);

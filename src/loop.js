@@ -32,7 +32,11 @@ const { ToolError, HaltError } = require('./errors');
  *   thrown HaltError propagates. `ctx` is the per-run opaque blob (`run(msgs, tools, { ctx })`), the
  *   same object forwarded to `policy`; litectx reads `ctx.task` (intent) and `ctx.budget`. The
  *   neutral-unit signature `assemble(units, ctx)` is provided by bareagent's msgs⇄units adapter
- *   (src/context-units.js), which composes over this msgs-level seam.
+ *   (src/context-units.js), which composes over this msgs-level seam. When `ctx` is an object, the
+ *   Loop also lends a provider-bound `ctx.summarize(excerpt, opts?) => Promise<string>` (R-C6,
+ *   non-enumerable): assemble calls it to roll a summary window — bareagent makes the one model
+ *   call, the consumer owns the trigger/N/splice. Its usage is forwarded to `onLlmResult` so the
+ *   summary tokens count against the budget.
  * @property {Function} [onLlmResult]
  * @property {Function} [onToolResult]
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
@@ -103,6 +107,38 @@ function estimateCost(model, usage) {
     ((usage.inputTokens || 0) * rates.in +
       (usage.outputTokens || 0) * rates.out) / 1000
   );
+}
+
+// R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
+const DEFAULT_SUMMARY_INSTRUCTION =
+  'You are a precise conversation summarizer. Produce a concise, factual summary of the following ' +
+  'conversation excerpt. Preserve concrete facts, decisions, and identifiers (names, ids, file ' +
+  'paths, numbers), and note any open or unresolved threads. Do not invent information. Output ' +
+  'only the summary prose, with no preamble.';
+
+// Flatten an excerpt (array of OpenAI-format messages, or a raw string) into one prose block for the
+// summarizer's single user turn. Rendering to text — rather than forwarding raw messages — sidesteps
+// tool-call/result pairing entirely: a summary input never needs to be a valid wire transcript.
+/**
+ * @param {Array<any>|string|null|undefined} excerpt
+ * @returns {string}
+ */
+function renderForSummary(excerpt) {
+  if (excerpt == null) return '';
+  if (typeof excerpt === 'string') return excerpt;
+  if (!Array.isArray(excerpt)) return String(excerpt);
+  const parts = [];
+  for (const m of excerpt) {
+    if (m == null) continue;
+    if (typeof m === 'string') { parts.push(m); continue; }
+    const role = m.role || 'message';
+    let text = m.content != null ? String(m.content) : '';
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      text += (text ? '\n' : '') + `[tool_calls: ${JSON.stringify(m.tool_calls)}]`;
+    }
+    parts.push(`${role}: ${text}`);
+  }
+  return parts.join('\n\n');
 }
 
 class Loop {
@@ -249,6 +285,58 @@ class Loop {
 
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
+
+    // R-C6: lend a provider-bound summarizer to the assemble seam via `ctx.summarize`. litectx owns
+    // the trigger/N/splice (its restorable COMPRESS path keeps summarized turns recoverable by id);
+    // bareagent lends ONLY the single model call. Attached NON-ENUMERABLE so it never shows up in the
+    // caller's ctx via JSON/iteration/deepEqual — preserving the `assemble(units, ctx)` identity
+    // contract (test/loop-assemble.test.js). `summarize(excerpt, opts?) => Promise<string>`:
+    //   excerpt — array of OpenAI-format messages (or a raw string) litectx wants compressed
+    //   opts    — { instruction?, ...generateOpts } (instruction overrides the default; the rest pass
+    //             through to provider.generate; temperature defaults to 0 for determinism)
+    // The summary call's usage is forwarded to onLlmResult so its tokens count against the budget
+    // (BA1 lineage — token-only flows must not be invisible to the gate); a HaltError there is a
+    // governance exit and propagates, matching the main-loop onLlmResult contract.
+    if (ctx && typeof ctx === 'object') {
+      const loop = this;
+      /**
+       * @param {Array<any>|string} excerpt
+       * @param {Record<string, any>} [opts]
+       * @returns {Promise<string>}
+       */
+      const summarize = async (excerpt, opts = {}) => {
+        const { instruction, ...genOpts } = opts || {};
+        const prompt = [
+          { role: 'system', content: instruction || DEFAULT_SUMMARY_INSTRUCTION },
+          { role: 'user', content: renderForSummary(excerpt) },
+        ];
+        const startedAt = Date.now();
+        const result = await loop.provider.generate(prompt, [], { temperature: 0, ...genOpts });
+        const usage = (result && result.usage) || null;
+        const model = loop.provider.model || null;
+        const cost = estimateCost(model, usage);
+        if (cost !== null) totalCost += cost;
+        loop._safeEmit({ type: 'loop:summarize', data: { usage, costUsd: cost, durationMs: Date.now() - startedAt } });
+        if (loop.onLlmResult) {
+          try {
+            await loop.onLlmResult({
+              model,
+              provider: loop.provider.name || null,
+              usage,
+              costUsd: cost,
+              durationMs: Date.now() - startedAt,
+              ctx,
+              kind: 'summarize',
+            });
+          } catch (err) {
+            if (err instanceof HaltError) throw err;
+            loop._reportError('onLlmResult', err, { phase: 'summarize' });
+          }
+        }
+        return (result && result.text) || '';
+      };
+      Object.defineProperty(ctx, 'summarize', { value: summarize, enumerable: false, configurable: true, writable: true });
+    }
 
     try {
     for (let round = 0; round < HARD_ROUND_LIMIT; round++) {

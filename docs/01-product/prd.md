@@ -1026,7 +1026,7 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 
 | ID | Seam | Owner | Status | Build order |
 |---|---|---|---|---|
-| **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **SHIPPED (FIT)** — litectx v0.11.0 shipped the verb; bareagent adapter reconciled to the real `{units,dropped,tokens}` envelope + `atomic` string-id. SELECT/COMPRESS = litectx's next slice | **1st — the keystone** |
+| **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **SHIPPED (FIT + COMPRESS seam)** — litectx v0.11.0 shipped the verb; bareagent adapter reconciled to the real `{units,dropped,tokens}` envelope + `atomic` string-id; **`ctx.summarize` (R-C6, §1.5) lends the model call for COMPRESS-via-summary**. SELECT = litectx's next slice | **1st — the keystone** |
 | **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
 | **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **SHIPPED** · example + test (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`) + doc reframe (`SQLiteStore` demoted to a back-compat note) | done |
 | **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **SHIPPED** (`liteCtxMcpBridgeConfig` + `cfg.mcp`; helper + example + tests; validated against the real binary; zero litectx code; independent of RT-5) | done |
@@ -1167,6 +1167,53 @@ socket now (the unit shape is the deliverable); the budget-fit *quality* is **ga
    the real push sites `loop.js:286/291/307`).
 3. **`stream` interaction** + final name (`assemble` vs `prepareContext`; `on*` is wrong — not a void
    observer).
+
+#### 1.5 `ctx.summarize` — the provider-bound model call lent to COMPRESS (R-C6) · SHIPPED
+
+COMPRESS (§1.3) covers rank-based elision (verbatim → signature → drop) with no model call. A
+**summary window** — roll the oldest N non-pinned turns into a short prose summary — is the one
+COMPRESS variant that needs a *generation*, and litectx by doctrine **never calls a model** on the
+assemble path. So bareagent lends the call and nothing else.
+
+When `ctx` is an object, `run()` attaches a **non-enumerable** `summarize` to it:
+
+```
+ctx.summarize(excerpt, opts?) => Promise<string>
+  excerpt — array of OpenAI-format messages (or a raw string) the consumer wants compressed
+  opts    — { instruction?, ...generateOpts }  (instruction overrides the default summary prompt;
+            the rest pass through to provider.generate; temperature defaults to 0 for determinism)
+```
+
+The split, same grammar/content line as the rest of RT-1: **litectx owns the trigger / N / splice;
+bareagent lends only the one model call.** litectx decides *when* to summarize (recommended: when the
+projected window exceeds `ctx.budget`, the signal assemble already fits to), *how many* recent turns
+stay verbatim, and *where the prose lands* — the splice is litectx's already-shipped **restorable
+COMPRESS path** (rewrite a unit's `content` to the summary; `fromUnits` reconstructs it). bareagent
+never does `{keep, toSummarize}` splicing — the summarized turns stay recoverable by id in the
+canonical transcript (the Arize "lossy-compaction" caveat: a summary must never be the only copy).
+
+Mechanics that earn their place (all in `src/loop.js`, tests in `test/loop-assemble.test.js`):
+- **Non-enumerable** so it never pollutes the caller's `ctx` — `JSON.stringify`, iteration, and the
+  `assemble(units, ctx)` **identity contract** (§1.2 — same object every round, `deepEqual` unchanged)
+  all hold. Same carry pattern as the unit `_msgs` backing.
+- **Out-of-band** — one `provider.generate(prompt, [], {temperature:0})`, no tools; the excerpt is
+  rendered to a flat string for a single user turn, so tool-call/result pairing is irrelevant (a
+  summary input is never a wire transcript). The summary prompt **never enters the canonical
+  transcript**.
+- **Budget-counted** — the summary call's usage is forwarded to `onLlmResult` tagged `kind:
+  'summarize'`, so summary tokens count against the gate (the BA1 lineage — token-only flows must not
+  be invisible to bareguard). A `HaltError` from that callback is a governance exit and **propagates as
+  a clean halt** through the assemble seam (verified end-to-end, with a negative control proving a
+  non-Halt error instead reports-and-continues — only `HaltError` halts).
+- **Fail-safe** — if the summary `generate` throws and the consumer doesn't catch, it surfaces through
+  the assemble seam's existing **fail-open** (full context that round, `loop:error` source `assemble`);
+  the agent never crashes on a summarizer fault.
+
+> **Why now (not "whenever"):** R-C6 was held until a summary-window POC justified it; the seam is the
+> minimal thing bareagent must add for COMPRESS-via-summary to exist at all, and it's inert unless a
+> consumer calls `ctx.summarize`. Deferred siblings stay trip-wired: **R-S6** `selectTools` (needs a
+> real tool corpus + intent→tools traces before a RAG-over-tools bench can beat the send-all baseline),
+> **RT-2** (truncation seam), **RT-5** (multi-tenant).
 
 ---
 

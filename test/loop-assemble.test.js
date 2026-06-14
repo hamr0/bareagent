@@ -120,3 +120,157 @@ describe('Loop assemble hook (RT-1)', () => {
     assert.equal(seen.length, 0, 'halt occurred at round 0, before any provider call');
   });
 });
+
+// R-C6 — the provider-bound `ctx.summarize` lent to the assemble seam. litectx owns trigger/N/splice;
+// bareagent lends only the single model call. Tests drive the REAL Loop and target the load-bearing
+// claims: out-of-band (never pollutes the transcript), budget tokens counted, and — riskiest — a
+// HaltError raised DURING summarize surfaces as a clean governance halt, not swallowed by fail-open.
+
+// Provider that tags each call as a main-loop turn or an out-of-band summary call (by the system
+// prompt the summarizer builds), so a test can prove the summary call never enters the transcript.
+function taggedProvider(mainReplies) {
+  let i = 0;
+  const calls = [];
+  const provider = {
+    name: 'tagged', model: 'gpt-4o-mini',
+    async generate(messages, tools /*, options */) {
+      const sys = messages[0] && messages[0].role === 'system' ? String(messages[0].content) : '';
+      const isSummary = sys.includes('summarizer');
+      calls.push({ isSummary, messages, options: arguments[2], toolCount: (tools || []).length });
+      if (isSummary) return { text: 'SUMMARY: rate-limiting requested.', usage: { inputTokens: 9, outputTokens: 6 } };
+      const r = mainReplies[i++];
+      if (!r) throw new Error('taggedProvider: out of main replies');
+      return r;
+    },
+  };
+  return { provider, calls };
+}
+const DONE = { text: 'done', toolCalls: [], usage: { inputTokens: 4, outputTokens: 2 } };
+
+describe('Loop ctx.summarize (R-C6)', () => {
+  it('lends a callable summarize on the ctx object, but only when ctx is an object', async () => {
+    const { provider } = taggedProvider([DONE, DONE]);
+    let lent;
+    const loop = new Loop({ provider, assemble: (m, c) => { lent = c && c.summarize; return m; } });
+    // no ctx → nothing to attach to, summarize is absent
+    await loop.run([{ role: 'user', content: 'hi' }]);
+    assert.ok(!lent, 'no summarize when ctx is null');
+    // with a ctx object → summarize is lent
+    await loop.run([{ role: 'user', content: 'hi' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.equal(typeof lent, 'function', 'summarize lent when ctx is an object');
+  });
+
+  it('attaches summarize NON-ENUMERABLE: identity, deepEqual and JSON of the caller ctx are untouched', async () => {
+    const { provider } = taggedProvider([DONE]);
+    const seen = [];
+    const ctx = { task: 'add rate-limiting', budget: 1000 };
+    const loop = new Loop({ provider, assemble: (m, c) => { seen.push(c); return m; } });
+    await loop.run([{ role: 'user', content: 'go' }], [], { ctx });
+    assert.equal(seen[0], ctx, 'same ctx object (identity preserved, not a wrapper)');
+    assert.deepEqual(ctx, { task: 'add rate-limiting', budget: 1000 }, 'deepEqual ignores non-enumerable summarize');
+    assert.equal(JSON.stringify(ctx), '{"task":"add rate-limiting","budget":1000}', 'summarize absent from JSON');
+  });
+
+  it('returns provider prose from ONE out-of-band call that never enters the transcript', async () => {
+    const { provider, calls } = taggedProvider([DONE]);
+    let out;
+    const loop = new Loop({
+      provider,
+      assemble: async (m, c) => { out = await c.summarize(m.slice(0, 1)); return m; },
+    });
+    const result = await loop.run([{ role: 'user', content: 'please add rate limiting' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.match(out, /SUMMARY/, 'returns the provider prose');
+    const summaryCalls = calls.filter((c) => c.isSummary);
+    assert.equal(summaryCalls.length, 1, 'exactly one out-of-band summary call');
+    assert.equal(summaryCalls[0].toolCount, 0, 'summary call carried no tools');
+    assert.equal(summaryCalls[0].options.temperature, 0, 'deterministic by default (temperature 0)');
+    assert.ok(!result.msgs.some((m) => String(m.content || '').includes('summarizer')), 'summary prompt never entered the canonical transcript');
+    assert.equal(result.text, 'done', 'main run completed normally alongside the summary call');
+  });
+
+  it('forwards the summary call usage to onLlmResult (kind:summarize) so it counts against budget', async () => {
+    const { provider } = taggedProvider([DONE]);
+    const llm = [];
+    const loop = new Loop({
+      provider,
+      onLlmResult: (r) => llm.push(r),
+      assemble: async (m, c) => { await c.summarize(m); return m; },
+    });
+    await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    const sum = llm.find((r) => r.kind === 'summarize');
+    assert.ok(sum, 'summary usage forwarded to onLlmResult');
+    assert.deepEqual(sum.usage, { inputTokens: 9, outputTokens: 6 }, 'real summary usage counted');
+    assert.equal(sum.model, 'gpt-4o-mini');
+  });
+
+  it('honors an instruction override and passes generate options through', async () => {
+    const { provider, calls } = taggedProvider([DONE]);
+    const loop = new Loop({
+      provider,
+      // a custom instruction must still be detectable as a summary call by the tag word
+      assemble: async (m, c) => { await c.summarize(m, { instruction: 'You are a terse summarizer bot.', temperature: 0.4, maxTokens: 64 }); return m; },
+    });
+    await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    const summary = calls.find((c) => c.isSummary);
+    assert.equal(summary.messages[0].content, 'You are a terse summarizer bot.', 'instruction overridden');
+    assert.equal(summary.options.temperature, 0.4, 'generate opts pass through (override default)');
+    assert.equal(summary.options.maxTokens, 64, 'extra generate opts pass through');
+  });
+
+  it('RISKIEST: a HaltError raised during summarize surfaces as a clean governance halt (not swallowed by fail-open)', async () => {
+    const { provider } = taggedProvider([DONE]);
+    const loop = new Loop({
+      provider,
+      // budget cap hit while summarizing: onLlmResult throws HaltError on the summary call
+      onLlmResult: ({ kind }) => { if (kind === 'summarize') throw new HaltError('cap', { rule: 'budget' }); },
+      assemble: async (m, c) => { await c.summarize(m); return m; }, // litectx does NOT catch
+    });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.equal(result.text, '', 'no normal completion');
+    assert.match(result.error, /^halt:budget$/, 'summarize HaltError became a clean governance halt');
+  });
+
+  it('a NON-Halt error from onLlmResult during summarize is reported but does NOT halt (negative control)', async () => {
+    const { provider } = taggedProvider([DONE]);
+    const errs = [];
+    const loop = new Loop({
+      provider, throwOnError: false,
+      onError: (e, meta) => errs.push(meta),
+      onLlmResult: ({ kind }) => { if (kind === 'summarize') throw new Error('telemetry sink down'); },
+      assemble: async (m, c) => { await c.summarize(m); return m; },
+    });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.equal(result.text, 'done', 'plain onLlmResult error did not halt the run');
+    assert.ok(errs.some((m) => m.source === 'onLlmResult' && m.phase === 'summarize'), 'error routed source=onLlmResult phase=summarize');
+  });
+
+  it('fails OPEN when the summary provider call throws and the consumer does not catch', async () => {
+    const provider = {
+      name: 'boom', model: 'gpt-4o-mini',
+      async generate(messages) {
+        const sys = messages[0] && messages[0].role === 'system' ? String(messages[0].content) : '';
+        if (sys.includes('summarizer')) throw new Error('summary provider down');
+        return DONE;
+      },
+    };
+    const errs = [];
+    const loop = new Loop({
+      provider, throwOnError: false,
+      onError: (e, meta) => errs.push(meta.source),
+      assemble: async (m, c) => { await c.summarize(m); return m; }, // unguarded
+    });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.equal(result.text, 'done', 'summarize crash failed OPEN — run still completed on full context');
+    assert.ok(errs.includes('assemble'), 'error routed with source=assemble (the seam that called summarize)');
+  });
+
+  it('renders a raw string excerpt as well as a message array', async () => {
+    const { provider, calls } = taggedProvider([DONE]);
+    let out;
+    const loop = new Loop({ provider, assemble: async (m, c) => { out = await c.summarize('a raw excerpt string'); return m; } });
+    await loop.run([{ role: 'user', content: 'go' }], [], { ctx: { task: 't', budget: 1 } });
+    assert.match(out, /SUMMARY/);
+    const summary = calls.find((c) => c.isSummary);
+    assert.equal(summary.messages[1].content, 'a raw excerpt string', 'string excerpt rendered verbatim into the user turn');
+  });
+});
