@@ -1207,7 +1207,27 @@ Mechanics that earn their place (all in `src/loop.js`, tests in `test/loop-assem
   non-Halt error instead reports-and-continues — only `HaltError` halts).
 - **Fail-safe** — if the summary `generate` throws and the consumer doesn't catch, it surfaces through
   the assemble seam's existing **fail-open** (full context that round, `loop:error` source `assemble`);
-  the agent never crashes on a summarizer fault.
+  the agent never crashes on a summarizer fault. The **attach itself** also fails open: a frozen /
+  sealed / non-configurable `ctx` leaves `summarize` simply unavailable (reported via `onError`, source
+  `summarize-attach`) instead of throwing past the loop — so a host that defensively freezes its `ctx`
+  degrades gracefully rather than crashing (security audit 2026-06-14, hardened in commit `99efcd7`).
+
+> **Consumer security boundary (read before wiring a model in).** The seam is deliberately small, so a
+> few properties are the consumer's to own, not bareagent's:
+> - **Governed only via bareguard.** There is **no internal per-run cap and no timeout** on
+>   `ctx.summarize` — `assemble` runs every round, so a consumer that calls it each round can amplify
+>   model cost. The control that bounds it is the usage forwarded to `onLlmResult` (`kind:'summarize'`):
+>   wire a bareguard `maxCostUsd`/`maxTokens` budget and the summary calls count against it and halt
+>   cleanly. Unwired, summary calls are as ungoverned as the main loop itself (same `HARD_ROUND_LIMIT`
+>   net, no more). Matches the main `generate` path — not a regression, but don't run it ungoverned.
+> - **A summary of untrusted content is untrusted output.** The excerpt (conversation turns, tool
+>   results, serialized `tool_calls`) is rendered verbatim into the summarizer prompt, so attacker-
+>   influenced text can attempt prompt injection. **Blast radius is bounded by construction:** the
+>   summary call passes **no tools**, so it cannot act — injection can at most degrade the *text* of the
+>   summary, which re-enters context as an id-restorable COMPRESS unit (never the only copy). Do not
+>   treat a summary of untrusted material as trusted, and do not feed it to a privileged sink unchecked.
+> - **`ctx.summarize` is a reserved key.** The Loop (re)defines it on every `run()` when `ctx` is an
+>   object; a consumer's own `summarize` field would be overwritten. Don't repurpose the name.
 
 > **Why now (not "whenever"):** R-C6 was held until a summary-window POC justified it; the seam is the
 > minimal thing bareagent must add for COMPRESS-via-summary to exist at all, and it's inert unless a
