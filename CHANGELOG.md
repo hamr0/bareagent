@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Documentation
+
+- **README — "The bare ecosystem" section recast from a 4-column table to a Core / Optional-reach list.** Now covers all six modules — core `bareagent` · `bareguard` · `litectx`, optional reach `barebrowse` · `baremobile` · `beeperbox` — in a scannable row form that also renders cleanly on npm. README only; no package change.
+
 ## [0.14.0] — 2026-06-14
 
 The **litectx-runtime COMPRESS slice** — `ctx.summarize`, the provider-bound model call the Loop lends to the `assemble` seam so a context-engineering library can roll a summary window without ever calling a model itself. Additive and **inert unless a consumer calls it**; no breaking API changes. Also folds in the post-0.13.1 docs consolidation (single PRD).
