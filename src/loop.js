@@ -37,6 +37,13 @@ const { ToolError, HaltError } = require('./errors');
  *   non-enumerable): assemble calls it to roll a summary window — bareagent makes the one model
  *   call, the consumer owns the trigger/N/splice. Its usage is forwarded to `onLlmResult` so the
  *   summary tokens count against the budget.
+ * @property {Function} [trim] - async (msgs, ctx) => msgs. DESTRUCTIVE transcript-trim chokepoint (RT-2),
+ *   the opposite of `assemble`: it BOUNDS the canonical transcript — the Loop replaces `msgs` with what
+ *   this returns, evicting old turns AFTER they are harvested. Runs once per round before `assemble`.
+ *   So eviction never drops un-persisted history, wire it via `unitTrimmer({ trim, onHarvest, policy })`
+ *   (src/context-units.js), which performs the harvest-before-evict interlock over litectx's `trim` verb.
+ *   An optional `.flush(msgs, ctx)` method is called on clean completion for the residual-window harvest.
+ *   Fail-open (a trim fault degrades to no eviction that round); a thrown HaltError propagates.
  * @property {Function} [onLlmResult] - async (event) => void after each LLM call; forwards usage to
  *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
  *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget.
@@ -181,6 +188,15 @@ class Loop {
       throw new Error('[Loop] options.assemble must be a function (msgs, info) => msgs');
     }
     this.assemble = options.assemble || null;
+    // RT-2: optional DESTRUCTIVE transcript-trim seam. Unlike `assemble` (a non-destructive view), `trim`
+    // bounds the canonical transcript — the Loop replaces `msgs` with what it returns, evicting old turns
+    // AFTER they've been harvested (the harvest-before-evict interlock lives in the trimmer; see
+    // src/context-units.js unitTrimmer). Opt-in: a Loop with no `trim` is unchanged. A `.flush` method on
+    // the function (if present) is called on clean completion for the F2 residual harvest.
+    if (options.trim != null && typeof options.trim !== 'function') {
+      throw new Error('[Loop] options.trim must be a function (msgs, ctx) => msgs (e.g. unitTrimmer({ trim, onHarvest, policy }))');
+    }
+    this.trim = options.trim || null;
     if (options.onLlmResult != null && typeof options.onLlmResult !== 'function') {
       throw new Error('[Loop] options.onLlmResult must be a function');
     }
@@ -351,6 +367,29 @@ class Loop {
     for (let round = 0; round < HARD_ROUND_LIMIT; round++) {
       if (this._stopped) break;
 
+      // RT-2: destructive transcript-trim chokepoint — bound the canonical transcript before assembling
+      // the window. Runs BEFORE assemble (trim shrinks canonical; assemble shapes the per-call view of
+      // what remains). The trimmer harvests every evicted turn BEFORE returning the smaller set, so this
+      // never drops un-persisted history. Mutate `msgs` IN PLACE (it's `const`, and result.msgs returns
+      // this same reference) → result.msgs becomes the bounded transcript; evicted turns live in the
+      // harvest store, restorable by id. Fail-OPEN: a trim fault degrades to no eviction this round (a
+      // context-bounding bug must not halt the agent); a HaltError (e.g. a write-gate deny during harvest)
+      // propagates as a clean governance exit — same contract as assemble/onLlmResult.
+      if (this.trim) {
+        try {
+          const before = msgs.length;
+          const kept = await this.trim(msgs, ctx);
+          if (Array.isArray(kept) && kept !== msgs) {
+            msgs.length = 0;
+            msgs.push(...kept);
+            if (msgs.length !== before) this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } });
+          }
+        } catch (err) {
+          if (err instanceof HaltError) throw err;
+          this._reportError('trim', err, { round });
+        }
+      }
+
       // RT-1: context-assembly chokepoint. Let a caller (e.g. a context-engineering library) shape
       // the window sent to the provider this round. Returns a VIEW — the canonical `msgs` transcript
       // is never mutated, so result.msgs stays complete and correct. Fail-OPEN: an assembly error
@@ -412,6 +451,15 @@ class Loop {
         this._safeCall('onText', this.onText, result.text);
         this._safeEmit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
         msgs.push({ role: 'assistant', content: result.text });
+        // RT-2 F2: residual harvest of the surviving window (incl. this final answer) on clean completion.
+        // `trim` only harvests EVICTED turns; without this, the never-evicted tail would diverge from an
+        // end-of-task batch. The trimmer's idempotent key means it never re-writes what eviction harvested.
+        // Fail-open / HaltError per the trim seam contract. No-op unless a `.flush`-capable trim is wired.
+        const flush = this.trim && /** @type {any} */ (this.trim).flush;
+        if (typeof flush === 'function') {
+          try { await flush(msgs, ctx); }
+          catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
+        }
         return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs };
       }
 

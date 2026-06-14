@@ -13,6 +13,7 @@ contrib/python/__pycache__/
 # RT-4 POC scratch (never shipped, per the POC-first dev rule). The graduated
 # RT-1 POCs under poc/rt1-*.mjs are tracked deliberately; these are not.
 poc/rt4-*.mjs
+poc/rt2-*.mjs
 
 # Generated TypeScript declarations (emitted from JSDoc by `npm run build:types`,
 # shipped via prepublishOnly). Hand-written declarations under types/ are tracked.

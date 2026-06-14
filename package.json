@@ -99,7 +99,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
-    "litectx": "^0.13.0",
+    "litectx": "^0.16.0",
     "typescript": "^5.7.0"
   }
 }

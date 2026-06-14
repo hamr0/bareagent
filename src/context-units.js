@@ -222,4 +222,87 @@ function unitAssembler(assembleUnits) {
   };
 }
 
-module.exports = { toUnits, fromUnits, unitAssembler, approxTokens, pairingSeatbelt };
+/**
+ * Stable harvest key for a unit — the dedup id for harvest-before-evict (RT-2). MUST come from a durable
+ * property of the TURN, never from `unit.id`: `toUnits` mints ids from a module counter, so the same turn
+ * is `u1` on one call and `u3` on the next (poc/rt2-trim-interlock.mjs F1) — keying on it double-writes.
+ * Derived here from the unit's verbatim `_msgs` backing: the joined `tool_call_id`s for a tool turn (stable
+ * by construction), else a deterministic FNV-1a hash of `[role, content]` for a plain turn. The consumer
+ * namespaces it (e.g. `${taskId}:${key}`) and feeds it to `remember(id, …)`, which upserts → a replayed
+ * hop overwrites instead of duplicating. NOT a content search (litectx FTS can't match ids; sealed meta is
+ * unsearchable) — a deterministic key passed to the keyed write.
+ * @param {Record<string, any>} unit - a unit from {@link toUnits} (its `_msgs` backing is read).
+ * @returns {string}
+ */
+function harvestKey(unit) {
+  const back = (unit && unit._msgs) || [];
+  /** @type {string[]} */
+  const calls = [];
+  for (const m of back) {
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) if (tc && tc.id) calls.push(tc.id);
+  }
+  if (calls.length) return `tc:${calls.join(',')}`;
+  // plain turn (no tool_calls): deterministic FNV-1a over role+content — stable across toUnits calls.
+  let h = 0x811c9dc5;
+  const s = JSON.stringify(back.map((m) => [m.role, m.content]));
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return `h:${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * Wrap litectx's `trim(units, policy)` verb (R-C5) into the Loop's destructive `trim(msgs, ctx)` seam —
+ * the RT-2 harvest-before-evict interlock. Unlike {@link unitAssembler} (a non-destructive per-round VIEW),
+ * this is EVICTION: the Loop replaces its canonical transcript with the returned (smaller) msgs, so old
+ * turns are permanently dropped — which is only safe because every dropped turn is harvested FIRST.
+ *
+ * The returned function `(msgs, ctx) => keptMsgs`:
+ *   1. `toUnits(msgs)` → `trim(units, policy)` → `{ units (kept), dropped, harvest }`.
+ *   2. **Interlock — harvest BEFORE evict:** `await onHarvest({ key, content, unit })` for every harvest
+ *      unit. If `onHarvest` throws (e.g. a write-gate `deny` → HaltError, or a store fault), this throws
+ *      BEFORE returning the evicted view → the Loop fail-opens (no eviction that round) → nothing is lost;
+ *      the next round retries and the idempotent key upserts the already-persisted ones. You cannot drop
+ *      history you have not persisted.
+ *   3. `fromUnits(kept)` is the bounded transcript. Fail-OPEN: an unrecognised `trim` return shape → the
+ *      original msgs unchanged (no eviction). A throw propagates (HaltError → governance halt).
+ *
+ * `.flush(msgs, ctx)` — the F2 residual harvest: `trim` only hands back EVICTED turns, so the final
+ * keepLastN window is never harvested mid-run and a clean run would diverge from an end-of-task batch.
+ * Call `.flush` on completion to harvest the surviving non-pinned turns (no eviction); the idempotent key
+ * means it never duplicates what eviction already harvested.
+ *
+ * `onHarvest` is the consumer's harvest POLICY point (litectx CE-PRD §6/R-W*: bareagent owns the trigger
+ * + what's worth keeping, litectx owns the mechanism + worklist). It is REQUIRED — the adapter structurally
+ * enforces harvest-before-evict; pass `async () => {}` to opt INTO lossy bounding.
+ *
+ * @param {{ trim?: Function, onHarvest?: Function, policy?: any }} [opts]
+ *   `trim` — litectx's `(units, policy) => { units, harvest }` verb (REQUIRED). `onHarvest` —
+ *   `({ key, content, unit }) => void|Promise` (REQUIRED; the harvest policy point). `policy` — litectx
+ *   TrimPolicy: `{ keepLastN }` or `{ maxTokens }` (maxTokens wins). Both verbs are runtime-checked.
+ * @returns {((msgs: Array<Record<string, any>>, ctx?: any) => Promise<Array<Record<string, any>>>) & { flush: (msgs: Array<Record<string, any>>, ctx?: any) => Promise<void> }}
+ */
+function unitTrimmer(opts) {
+  const { trim, onHarvest, policy = {} } = opts || {};
+  if (typeof trim !== 'function') throw new Error('[context-units] unitTrimmer({ trim }): trim must be litectx\'s (units, policy) => { units, harvest } verb');
+  if (typeof onHarvest !== 'function') throw new Error('[context-units] unitTrimmer({ onHarvest }): onHarvest is required (harvest-before-evict). Pass `async () => {}` to opt into lossy bounding.');
+
+  /** @type {any} */
+  const run = async (/** @type {Array<Record<string, any>>} */ msgs /*, ctx */) => {
+    const units = toUnits(msgs);
+    const r = await trim(units, policy);
+    const kept = r && Array.isArray(r.units) ? r.units : null;
+    if (!kept) return msgs; // fail-open: unrecognised return shape → no eviction
+    const harvest = r && Array.isArray(r.harvest) ? r.harvest : [];
+    for (const u of harvest) await onHarvest({ key: harvestKey(u), content: u.content, unit: u }); // BEFORE evict
+    return fromUnits(kept);
+  };
+
+  // F2 residual: harvest the surviving non-pinned turns (no eviction). pinned (system + first user) are
+  // reconstructable/anchor turns, never evicted by trim, so they're excluded here for symmetry.
+  run.flush = async (/** @type {Array<Record<string, any>>} */ msgs /*, ctx */) => {
+    for (const u of toUnits(msgs)) if (!u.pinned) await onHarvest({ key: harvestKey(u), content: u.content, unit: u });
+  };
+
+  return run;
+}
+
+module.exports = { toUnits, fromUnits, unitAssembler, unitTrimmer, harvestKey, approxTokens, pairingSeatbelt };

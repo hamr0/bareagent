@@ -11,7 +11,7 @@ const { Retry } = require('./src/retry');
 const { runPlan } = require('./src/run-plan');
 const { CircuitBreaker } = require('./src/circuit-breaker');
 const { wireGate, defaultActionTranslator } = require('./src/bareguard-adapter');
-const { toUnits, fromUnits, unitAssembler } = require('./src/context-units');
+const { toUnits, fromUnits, unitAssembler, unitTrimmer, harvestKey } = require('./src/context-units');
 const {
   BareAgentError,
   ProviderError,
@@ -38,6 +38,8 @@ module.exports = {
   toUnits,
   fromUnits,
   unitAssembler,
+  unitTrimmer,
+  harvestKey,
   BareAgentError,
   ProviderError,
   ToolError,

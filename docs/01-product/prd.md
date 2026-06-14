@@ -1027,7 +1027,7 @@ text** (`onText`) — but **none for the context window itself**. That is the ga
 | ID | Seam | Owner | Status | Build order |
 |---|---|---|---|---|
 | **RT-1** | **Context-assembly chokepoint** — Loop hook + msgs⇄**unit** adapter; litectx ships `assemble(units, ctx)` | bareagent (seam + adapter, grammar) / litectx (the verb, content) | **SHIPPED (FIT + COMPRESS seam)** — litectx v0.11.0 shipped the verb; bareagent adapter reconciled to the real `{units,dropped,tokens}` envelope + `atomic` string-id; **`ctx.summarize` (R-C6, §1.5) lends the model call for COMPRESS-via-summary**. SELECT = litectx's next slice | **1st — the keystone** |
-| **RT-2** | **Post-round observe hook** — `onTurn(event)` after each `generate` | bareagent (seam) / litectx (writer) | **DEFERRED-ON-EVIDENCE** — precondition: transcript-truncation seam (harvest-before-evict interlock) | when truncation ships |
+| **RT-2** | **Destructive transcript-trim seam** — `Loop({ trim })` + harvest-before-evict interlock; litectx ships `trim(units, policy)` | bareagent (seam + `unitTrimmer`/`harvestKey` adapter) / litectx (the verb) | **SHIPPED** — un-deferred when litectx **0.16.0** shipped `trim` (R-C5). Per-round destructive bound on the canonical transcript, harvest-before-evict via `unitTrimmer`, F2 residual `.flush` on completion; opt-in. Requires a consumer on litectx ≥ 0.16.0 | done |
 | **RT-3** | **Store mount + doc reframe** — bless litectx as the rich `Store` backend | bareagent | **SHIPPED** · example + test (`examples/litectx-as-store.mjs`, `test/litectx-store.test.js`) + doc reframe (`SQLiteStore` demoted to a back-compat note) | done |
 | **RT-4** | **MCP mount path** — mount `litectx-mcp` read-only into a sub-agent, own-db isolation | bareagent (recipe) / litectx (none) | **SHIPPED** (`liteCtxMcpBridgeConfig` + `cfg.mcp`; helper + example + tests; validated against the real binary; zero litectx code; independent of RT-5) | done |
 | **RT-5** | **Shared-db scope keys** — `owner`+`session` for multi-tenant single store | bareagent (thread keys) / litectx (predicate) | **DEFERRED** (trip-wire: ephemeral children / cross-child queries / multi-tenant; migration pre-paid by RT-3) | when the trip-wire fires |
@@ -1232,16 +1232,22 @@ Mechanics that earn their place (all in `src/loop.js`, tests in `test/loop-assem
 > **Why now (not "whenever"):** R-C6 was held until a summary-window POC justified it; the seam is the
 > minimal thing bareagent must add for COMPRESS-via-summary to exist at all, and it's inert unless a
 > consumer calls `ctx.summarize`. Deferred siblings stay trip-wired: **R-S6** `selectTools` (needs a
-> real tool corpus + intent→tools traces before a RAG-over-tools bench can beat the send-all baseline),
-> **RT-2** (truncation seam), **RT-5** (multi-tenant).
+> real tool corpus + intent→tools traces before a RAG-over-tools bench can beat the send-all baseline)
+> and **RT-5** (multi-tenant). **RT-2 un-deferred + shipped** (2026-06-14) when litectx 0.16.0 shipped `trim`.
 
 ---
 
-### 2. RT-2 — Post-round observe hook · DEFERRED-ON-EVIDENCE
+### 2. RT-2 — Transcript-trim seam + harvest-before-evict interlock · SHIPPED (2026-06-14)
 
-> **Decision (2026-06-12, both sides):** **deferred.** Precondition to un-defer = the
-> transcript-truncation seam (§2.3). Relationship to it = a **harvest-before-evict interlock**.
-> Proposed shape parked below so it's ready the day the trip-wire fires; **not built now.**
+> **SHIPPED (2026-06-14).** The trip-wire below fired: litectx **0.16.0** shipped `trim(units, policy)`
+> (R-C5). RT-2 is now built as `Loop({ trim })` — a **destructive** per-round bound on the canonical
+> transcript with the harvest-before-evict interlock, wired through the exported `unitTrimmer({ trim,
+> onHarvest, policy })` + `harvestKey(unit)` adapter (`src/context-units.js`). It is **opt-in** (a Loop
+> with no `trim` is unchanged) and requires a consumer on litectx ≥ 0.16.0. The deferral analysis below
+> is retained as the rationale that gated it; §2.4 records what the build actually was.
+>
+> **Decision (2026-06-12, both sides):** *(historical)* deferred until the transcript-truncation seam
+> shipped — that seam is the precondition, and the relationship to it is a harvest-before-evict interlock.
 
 #### 2.1 Why deferred — the canonical transcript makes end-of-task harvest *lossless by construction*
 The temptation: `assemble` (RT-1) runs *before* `generate`, so it never sees the round's outcome
@@ -1286,9 +1292,52 @@ saved *before* its round is dropped.
 → **Record:** RT-2 un-defers the day the transcript-truncation seam ships, and is bound to it as a
 **harvest-before-evict precondition.** Until then, end-of-task harvest is sufficient.
 
+> **Gate update (2026-06-14) — kill-at-hop-N POC run, decision unchanged (defer).** Drove the *real*
+> Loop with a scripted provider + disk-backed `JsonFileStore`; induced a mid-task crash (provider throws
+> at hop 3). Findings: (a) the durability delta is **real in the crash / interrupt mode** — end-of-task
+> harvest never fires on a killed run, so it loses hops 1..N-1 that incremental harvest preserves. This
+> is a loss path §2.1's "lossless *by construction*" does not cover: that invariant only holds when the
+> run *reaches* end-of-task. (b) **But** crash-durable incremental harvest is already deliverable on the
+> **shipped `onToolResult` / `onLlmResult` seams with zero new production code** (the POC used exactly
+> these), and is idempotent + non-divergent vs batch on a clean run. So the dedicated `onTurn` hook stays
+> deferred: its *unique* justification remains the **harvest-before-evict truncation interlock** (§2.3) —
+> eviction ordering needs a dedicated barrier that can't be retrofitted onto the per-tool seam. A consumer
+> wanting crash-durability *today* wires it onto the existing seams; no bareagent change required.
+
 *(Secondary, weaker note: RT-2 is also the incremental `{delta}`-shaped harvest vs end-of-task's batch
 re-scan — an **efficiency** lever for long sessions, not a capability. It collapses into the same
 long-running trip-wire; do **not** build it for efficiency alone.)*
+
+#### 2.4 What shipped (2026-06-14) — the trip-wire fired
+litectx **0.16.0** shipped `trim(units, policy)` (R-C5), so the §2.3 precondition is met and RT-2 is built.
+The shape is **not** the parked `onTurn` observer (§2.2) — it's a **destructive** seam, because the
+unbounded-agent case the trip-wire named requires *bounding* the canonical transcript, not merely
+observing it.
+
+- **`Loop({ trim })`** — `async (msgs, ctx) => msgs`. Runs once per round **before** `assemble` (trim
+  bounds canonical; assemble shapes the per-call view of what remains). The Loop replaces `msgs` in place
+  with the returned set, so `result.msgs` becomes the bounded transcript — a deliberate departure from the
+  RT-1 invariant ("`result.msgs` complete"), correct here because evicted turns are **harvested first** and
+  remain restorable by id from the store. Opt-in; a Loop without `trim` is byte-identical to before.
+- **`unitTrimmer({ trim, onHarvest, policy })`** (`src/context-units.js`) — wraps litectx's `trim` verb
+  (works on the neutral units), enforces **harvest-before-evict**: `onHarvest` is awaited for every evicted
+  turn *before* the smaller set is returned; if it throws (write-gate `deny` → `HaltError`, or a store
+  fault) the trimmer throws before evicting → the Loop fail-opens (no eviction that round) → nothing is lost,
+  and the next round's idempotent re-harvest upserts. `.flush(msgs)` is the **F2 residual harvest** — called
+  by the Loop on clean completion to persist the surviving non-pinned window (which `trim`, by only handing
+  back *evicted* turns, never reaches), keyed identically so it never duplicates.
+- **`harvestKey(unit)`** — the **F1** fix. `toUnits` mints unit ids from a module counter (the same turn is
+  `u1` then `u3`), so they cannot be the harvest dedup key; `harvestKey` derives a stable id from the turn
+  (`tool_call_id`s for a tool turn, a content hash for a plain one) for `remember(id, …)` upsert.
+- **Validated** by `poc/rt2-trim-interlock.mjs` (real `trim` + real `LiteCtx` store; F1/F2 both caught
+  there with falsifiable controls) and `test/loop-trim.test.js` (13 contract/wiring tests always-run + 1
+  gated real-`trim` sweep, skipping until litectx ≥ 0.16.0 is installed). Grammar safety reused wholesale
+  from RT-1: atomic tool-call+result bundles kept/dropped whole, `pinned` system/first-user never evicted.
+
+> **Coordination (resolved 2026-06-14):** litectx **0.16.0 is published to npm**; bareagent's litectx
+> devDep is bumped to `^0.16.0` and the gated real-`trim` sweep in `test/loop-trim.test.js` now **runs**
+> (14/14) against the published artifact — full suite green, typecheck clean. bareagent's code stays
+> litectx-agnostic (never imports it); litectx is dev-only here.
 
 ---
 
