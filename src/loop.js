@@ -335,7 +335,14 @@ class Loop {
         }
         return (result && result.text) || '';
       };
-      Object.defineProperty(ctx, 'summarize', { value: summarize, enumerable: false, configurable: true, writable: true });
+      // Fail-OPEN to match the assemble seam's own contract: a frozen / sealed / non-configurable ctx
+      // must NOT crash the agent. On failure the seam is simply unavailable (consumers already handle
+      // ctx.summarize being absent — it only exists when ctx is an object), reported, never silent.
+      try {
+        Object.defineProperty(ctx, 'summarize', { value: summarize, enumerable: false, configurable: true, writable: true });
+      } catch (err) {
+        this._reportError('summarize-attach', err);
+      }
     }
 
     try {

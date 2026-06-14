@@ -264,6 +264,25 @@ describe('Loop ctx.summarize (R-C6)', () => {
     assert.ok(errs.includes('assemble'), 'error routed with source=assemble (the seam that called summarize)');
   });
 
+  it('fails OPEN when ctx is frozen/non-extensible: run completes, seam unavailable, attach error reported', async () => {
+    // A host that defensively freezes the ctx it passes must not crash the agent — the attach degrades
+    // to "summarize absent" (consumers already handle that), reported via onError, never an uncaught throw.
+    const { provider } = taggedProvider([DONE]);
+    const errs = [];
+    let sawSummarize = 'unset';
+    const loop = new Loop({
+      provider, throwOnError: false,
+      onError: (e, meta) => errs.push(meta.source),
+      assemble: (m, c) => { sawSummarize = typeof c.summarize; return m; },
+    });
+    const frozen = Object.freeze({ task: 't', budget: 1 });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [], { ctx: frozen });
+    assert.equal(result.text, 'done', 'run completed despite a frozen ctx (no uncaught crash)');
+    assert.equal(result.error, null, 'frozen ctx is not a run failure');
+    assert.equal(sawSummarize, 'undefined', 'seam is simply unavailable on a frozen ctx');
+    assert.ok(errs.includes('summarize-attach'), 'attach failure surfaced via onError, not swallowed');
+  });
+
   it('renders a raw string excerpt as well as a message array', async () => {
     const { provider, calls } = taggedProvider([DONE]);
     let out;
