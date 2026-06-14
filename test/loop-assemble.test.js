@@ -201,6 +201,9 @@ describe('Loop ctx.summarize (R-C6)', () => {
     assert.ok(sum, 'summary usage forwarded to onLlmResult');
     assert.deepEqual(sum.usage, { inputTokens: 9, outputTokens: 6 }, 'real summary usage counted');
     assert.equal(sum.model, 'gpt-4o-mini');
+    // discriminator contract: main-loop rounds tag kind:'turn', so a consumer can positively tell them apart
+    assert.ok(llm.some((r) => r.kind === 'turn'), 'main-loop LLM result tagged kind:turn');
+    assert.ok(llm.every((r) => r.kind === 'turn' || r.kind === 'summarize'), 'every onLlmResult event carries a kind');
   });
 
   it('honors an instruction override and passes generate options through', async () => {

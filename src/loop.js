@@ -37,7 +37,9 @@ const { ToolError, HaltError } = require('./errors');
  *   non-enumerable): assemble calls it to roll a summary window — bareagent makes the one model
  *   call, the consumer owns the trigger/N/splice. Its usage is forwarded to `onLlmResult` so the
  *   summary tokens count against the budget.
- * @property {Function} [onLlmResult]
+ * @property {Function} [onLlmResult] - async (event) => void after each LLM call; forwards usage to
+ *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
+ *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget.
  * @property {Function} [onToolResult]
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
  */
@@ -396,6 +398,7 @@ class Loop {
             costUsd: roundCost,
             durationMs: Date.now() - llmStartedAt,
             ctx,
+            kind: 'turn',
           });
         } catch (err) {
           if (err instanceof HaltError) throw err;
