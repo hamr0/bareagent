@@ -70,6 +70,50 @@ describe('discoverServers', () => {
       cleanup(p);
     }
   });
+
+  it('hints (does not silently skip) when a project .mcp.json is present but not opted in', () => {
+    const prevCwd = process.cwd();
+    const origWarn = console.warn;
+    /** @type {string[]} */
+    const warnings = [];
+    console.warn = (/** @type {any[]} */ ...a) => warnings.push(a.join(' '));
+    const p = mockConfig(TMP, { local: { command: 'node', args: ['server.js'] } });
+    try {
+      process.chdir(TMP);
+      // File present, no opt-in → skipped, but the user must be told why.
+      discoverServers();
+      assert.ok(warnings.some(w => /found \.\/\.mcp\.json but did not load it/.test(w)),
+        'expected a hint pointing at includeProjectConfig / confirmServer');
+
+      // Opted in → loaded, and NO skip hint.
+      warnings.length = 0;
+      discoverServers(undefined, { includeProjectConfig: true });
+      assert.equal(warnings.some(w => /did not load it/.test(w)), false, 'no skip hint when opted in');
+    } finally {
+      console.warn = origWarn;
+      process.chdir(prevCwd);
+      cleanup(p);
+    }
+  });
+
+  it('stays quiet when no project .mcp.json exists', () => {
+    const prevCwd = process.cwd();
+    const origWarn = console.warn;
+    /** @type {string[]} */
+    const warnings = [];
+    console.warn = (/** @type {any[]} */ ...a) => warnings.push(a.join(' '));
+    // A fresh empty dir with no .mcp.json — the hint must not fire.
+    const emptyDir = join(TMP, 'empty');
+    mkdirSync(emptyDir, { recursive: true });
+    try {
+      process.chdir(emptyDir);
+      discoverServers();
+      assert.equal(warnings.some(w => /did not load it/.test(w)), false, 'no hint without a project config');
+    } finally {
+      console.warn = origWarn;
+      process.chdir(prevCwd);
+    }
+  });
 });
 
 // --- Bridge with file-based governance ---

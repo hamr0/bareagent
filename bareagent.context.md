@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.16.1 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.16.2 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -257,7 +257,9 @@ $HOME/IDE configs — NOT the project-cwd `./.mcp.json`** (v0.16.1): a checked-i
 config in an untrusted repo would otherwise auto-spawn arbitrary commands. To
 include the project config, pass `createMCPBridge({ includeProjectConfig: true })`,
 or a `confirmServer` hook (which implies it, since the hook vets every command).
-Explicitly-passed `configPaths` are honored verbatim. Pass `confirmServer(name,
+Explicitly-passed `configPaths` are honored verbatim. So you're not left guessing,
+discovery logs a one-line hint (v0.16.2) when a `./.mcp.json` is present but skipped —
+naming the opt-in — rather than silently ignoring it. Pass `confirmServer(name,
 def) => boolean` to approve each server **before its command is spawned** (return
 `false` to skip it; a throw fails closed). When no `confirmServer` is set, the
 bridge still trusts all *discovered* servers and prints a one-time warning naming

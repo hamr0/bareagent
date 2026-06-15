@@ -89,7 +89,17 @@ function discoverServers(configPaths, { includeProjectConfig = false } = {}) {
     paths = TRUSTED_CONFIG_PATHS.map(fn => fn());
     // Project config kept at highest precedence (front) when explicitly opted in — preserves the
     // historical "project overrides home" ordering for callers that want it.
-    if (includeProjectConfig) paths.unshift(PROJECT_CONFIG_PATH());
+    if (includeProjectConfig) {
+      paths.unshift(PROJECT_CONFIG_PATH());
+    } else if (existsSync(PROJECT_CONFIG_PATH())) {
+      // Don't fail silently: a present-but-skipped project config is the common legitimate case
+      // (your own repo). Say so, and point at the opt-in — otherwise the servers just never appear
+      // and there's no on-screen reason why.
+      console.warn(
+        `[MCP Bridge] found ./.mcp.json but did not load it (untrusted-cwd default since v0.16.1). ` +
+        `Pass { includeProjectConfig: true } or a confirmServer hook to enable project-local servers.`,
+      );
+    }
   }
   /** @type {Map<string, ServerDef>} */
   const servers = new Map();

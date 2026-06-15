@@ -2,7 +2,15 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [0.16.1] — 2026-06-15
+## [0.16.2] — 2026-06-15
+
+Follow-up to the 0.16.1 MCP cwd-config tightening: stop the project-local config from failing **silently**. No behavior change to what loads — only a hint when something is skipped.
+
+### Changed
+
+- **`createMCPBridge` / `discoverServers` now emit a one-line hint when a project-cwd `./.mcp.json` exists but is skipped.** 0.16.1 made the project config opt-in (untrusted-repo safety), but a developer with a legitimate `./.mcp.json` in their *own* repo got silence — their servers just didn't appear, with no on-screen reason. Discovery now logs `found ./.mcp.json but did not load it … pass { includeProjectConfig: true } or a confirmServer hook` whenever the file is present, no explicit `configPaths` were given, and the opt-in is off. Fires only on cold/refresh discovery (when the file is actually consulted); silent when no project config exists or when opted in. `src/mcp-bridge.js`; 2 new tests (`test/mcp-bridge.test.js`).
+
+
 
 Restores Loop cost accounting for the recommended resilience pattern, plus three security fixes from a grounded audit (one trust-boundary RCE vector, one DoS, one defence-in-depth). One behavior change: MCP default discovery no longer auto-scans the project-cwd `.mcp.json` (see Security).
 

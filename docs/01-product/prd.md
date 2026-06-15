@@ -781,6 +781,19 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
+### v0.16.2 / MCP skipped-project-config hint (2026-06-15)
+
+- **A safe default must not be a silent one.** 0.16.1 made the project-cwd
+  `.mcp.json` opt-in, which closed the untrusted-repo RCE but regressed the
+  *common* case — a developer in their own repo whose project servers now just
+  don't load, with no explanation. Decision: discovery logs a one-line hint when
+  a `./.mcp.json` is present but skipped (no `configPaths`, opt-in off), naming
+  `includeProjectConfig` / `confirmServer`. The hint lives in `discoverServers`
+  (file-read phase, no spawns) so it stays hermetically testable and fires only
+  when the file is actually consulted (cold/refresh). Ecosystem-aligned: tools
+  like Claude Code require explicit consent for project MCP servers too — the
+  bluntness is "flag vs prompt," not "silent vs not."
+
 ### v0.16.1 / cost accounting survives provider wrapping (2026-06-15)
 
 - **The response's model wins over the provider's model for cost
