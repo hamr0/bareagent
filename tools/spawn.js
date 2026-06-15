@@ -66,12 +66,16 @@ function resolveCliPath() {
  * @property {string} [config] - Path to a bareagent config JSON file.
  * @property {*} [input] - Optional JSON input passed to the child on stdin.
  * @property {string} [cliPath] - Override the bareagent CLI path.
- * @property {number} [timeoutMs] - Force-kill child after this many ms.
+ * @property {number} [timeoutMs] - Force-kill child after this many ms (wall-clock hard ceiling).
+ * @property {number} [idleTimeoutMs] - Force-kill child after this many ms with NO output on either
+ *   stdout or stderr (heartbeat/liveness watchdog). The clock arms at spawn and resets on every JSONL
+ *   line, so a child doing real work is never killed, but one that hangs silently is. Opt-in
+ *   (0/undefined disables); independent of `timeoutMs`, which remains the absolute ceiling.
  * @property {Stream} [stream] - bareagent Stream — child:stderr events get re-emitted here.
  *
  * @param {SpawnChildOptions} [opts]
  */
-function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
+function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream } = {}) {
   if (typeof config !== 'string' || !config) {
     throw new Error('[spawn] requires { config: <path> }');
   }
@@ -104,10 +108,29 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
     if (i >= 0) lineSubscribers.splice(i, 1);
   }; };
 
+  // Idle watchdog: kill the child after `idleTimeoutMs` of silence on BOTH stdio streams.
+  // Distinct from `timeoutMs` (wall-clock ceiling): this catches a child that is alive but stuck
+  // producing nothing — the "no activity in stderr" hang — without punishing one doing slow work,
+  // since `armIdle()` resets on every line. Armed at spawn so a child that never emits is caught too.
+  let idleTimer = null;
+  const armIdle = () => {
+    if (!idleTimeoutMs || idleTimeoutMs <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleKilled = true;
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 5000).unref();
+    }, idleTimeoutMs);
+    idleTimer.unref();
+  };
+  let idleKilled = false;
+  armIdle();
+
   // stdout — JSONL events from the child loop
   const outRl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   outRl.on('line', (line) => {
     if (!line) return;
+    armIdle();
     let event;
     try { event = JSON.parse(line); }
     catch {
@@ -130,6 +153,7 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
   const errRl = readline.createInterface({ input: child.stderr, crlfDelay: Infinity });
   errRl.on('line', (line) => {
     if (!line) return;
+    armIdle();
     const event = { type: 'child:stderr', text: line, ts: new Date().toISOString() };
     events.push(event);
     if (stream) {
@@ -157,18 +181,20 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
   const exitPromise = new Promise((resolve) => {
     child.on('exit', async (code, signal) => {
       if (killTimer) clearTimeout(killTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       // Drain stdio readlines before resolving — last line may still be in buffer.
       await Promise.all([outClosePromise, errClosePromise]);
-      resolve({ code, signal });
+      resolve({ code, signal, idleKilled });
     });
     child.on('error', (err) => {
       if (killTimer) clearTimeout(killTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       resolve({ code: null, signal: null, spawnError: err });
     });
   });
 
   async function wait() {
-    const { code, signal, spawnError } = await exitPromise;
+    const { code, signal, spawnError, idleKilled: idle } = await exitPromise;
     if (spawnError) {
       return {
         text: '',
@@ -194,18 +220,21 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
         events,
         exitCode: code,
         signal,
+        idleKilled: !!idle,
       };
     }
     // No loop:done — child exited abnormally or never reached the LLM.
     const errEvent = events.find(e => e.type === 'loop:error' || e.type === 'error');
+    const idleNote = idle ? `[spawn] child killed after idle timeout (no output; signal=${signal})` : null;
     return {
       text: '',
       usage: { inputTokens: 0, outputTokens: 0 },
       cost: 0,
-      error: errEvent?.data?.error || `[spawn] child exited (code=${code}, signal=${signal}) without loop:done`,
+      error: idleNote || errEvent?.data?.error || `[spawn] child exited (code=${code}, signal=${signal}) without loop:done`,
       events,
       exitCode: code,
       signal,
+      idleKilled: !!idle,
     };
   }
 
@@ -222,7 +251,9 @@ function spawnChild({ config, input, cliPath, timeoutMs, stream } = {}) {
  *
  * @param {object} [options]
  * @param {string} [options.cliPath] - Override the bareagent CLI path (default: ./bin/cli.js relative to this file).
- * @param {number} [options.timeoutMs] - Force-kill child after this many ms (default 10 min).
+ * @param {number} [options.timeoutMs] - Force-kill child after this many ms (default 10 min, wall-clock ceiling).
+ * @param {number} [options.idleTimeoutMs] - Force-kill child after this many ms of no stdout/stderr output
+ *   (heartbeat watchdog; default off). Resets on every line, so slow-but-working children survive.
  * @param {Stream} [options.stream] - bareagent Stream instance — child:stderr events get re-emitted here.
  * @returns {{tool: import('../types').ToolDef, spawnChild: typeof spawnChild}}
  */
@@ -250,6 +281,7 @@ function createSpawnTool(options = {}) {
         input,
         cliPath: options.cliPath,
         timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        idleTimeoutMs: options.idleTimeoutMs,
         stream: options.stream,
       });
       return await handle.wait();

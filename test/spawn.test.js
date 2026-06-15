@@ -138,6 +138,59 @@ describe('spawn tool', () => {
       }
     });
 
+    it('idleTimeoutMs kills a silent-but-alive child (heartbeat watchdog)', async () => {
+      // Alive for 5s, never writes a line -> idle watchdog must kill it well before that.
+      const { cli, dir } = await makeMockCli(`setTimeout(() => {}, 5000);`);
+      try {
+        const startedAt = Date.now();
+        const handle = spawnChild({ config: 'unused.json', cliPath: cli, idleTimeoutMs: 200 });
+        const result = await handle.wait();
+        const elapsed = Date.now() - startedAt;
+        assert.equal(result.idleKilled, true);
+        assert.match(result.error, /idle timeout/);
+        assert.ok(elapsed < 2000, `expected fast idle kill, took ${elapsed}ms`);
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('idleTimeoutMs does NOT kill a child that keeps producing output', async () => {
+      // Emits a line every 100ms (well under the 1000ms idle window, with headroom for Node
+      // cold-start before the first line) then finishes -> must survive the watchdog.
+      const { cli, dir } = await makeMockCli(`
+        let n = 0;
+        const t = setInterval(() => {
+          process.stdout.write(JSON.stringify({ type: 'tick', data: { n: n++ } }) + '\\n');
+          if (n >= 6) {
+            clearInterval(t);
+            process.stdout.write(JSON.stringify({ type: 'loop:done', data: { text: 'ok' } }) + '\\n');
+          }
+        }, 100);
+      `);
+      try {
+        const handle = spawnChild({ config: 'unused.json', cliPath: cli, idleTimeoutMs: 1000 });
+        const result = await handle.wait();
+        assert.equal(result.idleKilled, false);
+        assert.equal(result.text, 'ok');
+        assert.equal(result.events.filter(e => e.type === 'tick').length, 6);
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('wall-clock timeoutMs still kills an active child (idle disabled)', async () => {
+      // Chatty forever -> idle never fires; the wall-clock ceiling must still terminate it.
+      const { cli, dir } = await makeMockCli(`setInterval(() => process.stdout.write(JSON.stringify({ type: 'tick' }) + '\\n'), 50);`);
+      try {
+        const handle = spawnChild({ config: 'unused.json', cliPath: cli, idleTimeoutMs: 3000, timeoutMs: 500 });
+        const result = await handle.wait();
+        assert.equal(result.idleKilled, false); // killed by wall-clock, not idle
+        assert.ok(result.signal === 'SIGTERM' || result.exitCode !== 0);
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it('kill terminates the child', async () => {
       const { cli, dir } = await makeMockCli(`
         // Hang forever on stdin then never write loop:done.
