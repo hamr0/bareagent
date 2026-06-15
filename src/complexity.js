@@ -21,8 +21,11 @@
 const has = (/** @type {Set<string>} */ words, /** @type {Set<string>} */ set) =>
   [...set].filter(w => words.has(w));
 const wordSet = (/** @type {string} */ s) => new Set(s.match(/\b\w+\b/g) || []);
+// Escape regex metacharacters so a keyword can't break (or alter) the word-boundary match — the
+// lists below are plain words today, but a future entry like "c++" or ".net" must stay literal.
+const esc = (/** @type {string} */ k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const hasAny = (/** @type {string} */ s, /** @type {string[]} */ list) =>
-  list.some(k => new RegExp(`\\b${k}\\b`).test(s));
+  list.some(k => new RegExp(`\\b${esc(k)}\\b`).test(s));
 
 // --- critical safety override: high-stakes work jumps straight to the top tier ---
 const CRIT_INCIDENT = ['emergency', 'outage', 'breach', 'vulnerability', 'exploit', 'corruption', 'data loss', 'incident', 'penetration'];

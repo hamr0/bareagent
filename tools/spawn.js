@@ -113,6 +113,7 @@ function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream }
   // producing nothing — the "no activity in stderr" hang — without punishing one doing slow work,
   // since `armIdle()` resets on every line. Armed at spawn so a child that never emits is caught too.
   let idleTimer = null;
+  let idleKilled = false;
   const armIdle = () => {
     if (!idleTimeoutMs || idleTimeoutMs <= 0) return;
     if (idleTimer) clearTimeout(idleTimer);
@@ -123,7 +124,6 @@ function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream }
     }, idleTimeoutMs);
     idleTimer.unref();
   };
-  let idleKilled = false;
   armIdle();
 
   // stdout — JSONL events from the child loop
@@ -204,6 +204,7 @@ function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream }
         events,
         exitCode: null,
         signal: null,
+        idleKilled: false,
       };
     }
     // Pluck the final loop:done event — that's the canonical child result.
