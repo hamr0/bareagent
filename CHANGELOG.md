@@ -2,6 +2,15 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+Two resilience/routing primitives drawn from running multi-turn agent families (Aurora/SOAR): a heartbeat watchdog so a child agent that hangs silently doesn't tie up a slot until the wall-clock cap, and a zero-cost pre-planner that sizes a goal before spending tokens. Both additive and opt-in; no breaking API changes.
+
+### Added
+
+- **Spawn idle/heartbeat watchdog (`idleTimeoutMs`).** Opt-in liveness timeout for forked child agents (`spawnChild` + `createSpawnTool`), complementing the existing wall-clock `timeoutMs`. It arms at spawn and **resets on every child stdout/stderr line**, so a child doing slow-but-real work is never killed, but one that goes silent (the "alive but stuck, no output" hang) is terminated after `idleTimeoutMs` (SIGTERM → 5s grace → SIGKILL). The result carries `idleKilled` and a clear error string; `timeoutMs` remains the absolute ceiling. Default off — a spawn with no `idleTimeoutMs` is unchanged. `tools/spawn.js`; 3 tests in `test/spawn.test.js`.
+- **`assessComplexity` — pure-code keyword pre-planner (no LLM).** Classifies a goal `simple` / `medium` / `complex` / `critical` from its text alone via tiered action-verb scoring, feature-noun/scope/structure signals, and a **critical safety override** (security / production / compliance / financial work). Returns `{ level, score, needsPlanning, signals }` — `needsPlanning` gates whether to spend a `Planner` pass (`simple` → run single-shot), and `critical` flags work that warrants extra scrutiny (a checkpoint / adversarial verification) before acting. A transparent, debuggable heuristic — not a model call — so it's free and instant. Concept-port of Aurora's SOAR keyword assessor (~89% on its 112-prompt corpus). The assessed text is length-capped (`MAX_ASSESS_LEN`) so `.*`-bearing signal patterns can't backtrack quadratically on adversarial input (a pre-ship security finding: 500KB of a repeated trigger token went from ~28s to ~3ms). New export: `assessComplexity` (`src/complexity.js`); 10 tests in `test/complexity.test.js`. Independent component — not wired into Loop/Planner; the consumer composes the routing branch.
+
 ## [0.15.0] — 2026-06-14
 
 The **litectx-runtime trim slice** — RT-2, the destructive transcript-trim seam (`Loop({ trim })`) plus the harvest-before-evict interlock, un-deferred now that litectx 0.16.0 shipped the `trim(units, policy)` verb. It's the bounded counterpart to RT-1's non-destructive `assemble` view: for an unbounded long-running agent it caps the canonical transcript, evicting old turns only after they're harvested to a durable store. **Opt-in and inert unless wired** (a Loop with no `trim` is byte-identical to before) — no breaking API changes. Bumps the `litectx` devDep to `^0.16.0`.

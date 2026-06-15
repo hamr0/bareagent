@@ -14,7 +14,7 @@ npm install bare-agent
 ```
 
 Eight entry points:
-- `require('bare-agent')` — Loop, Planner, StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, **toUnits, fromUnits, unitAssembler** (the `assemble` context-units adapter, v0.13+), **unitTrimmer, harvestKey** (the destructive `trim` seam adapter — RT-2 harvest-before-evict, needs a consumer on litectx ≥ 0.16.0), BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
+- `require('bare-agent')` — Loop, Planner, **assessComplexity** (pure-code no-LLM pre-planner → `{level, score, needsPlanning, signals}`), StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, **toUnits, fromUnits, unitAssembler** (the `assemble` context-units adapter, v0.13+), **unitTrimmer, harvestKey** (the destructive `trim` seam adapter — RT-2 harvest-before-evict, needs a consumer on litectx ≥ 0.16.0), BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
 - `require('bare-agent/errors')` — same error classes via a stable subpath (v0.10.1+) for adopters who want to import only the error surface
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback (the canonical short names; `*Provider` aliases — `OpenAIProvider`, `AnthropicProvider`, etc. — are also exported and match the class names, so either destructure works, v0.12.1+)
 - `require('bare-agent/stores')` — SQLite (FTS5), JsonFile
@@ -31,6 +31,8 @@ Eight entry points:
 |---|---|
 | Call an LLM with tools and get a result | Loop + a Provider |
 | Break a goal into steps | Planner + a Provider |
+| Size a goal before planning (no LLM) | assessComplexity — `needsPlanning` gates a Planner pass |
+| Kill a spawned child that hangs silently | createSpawnTool / spawnChild `{ idleTimeoutMs }` |
 | Execute a step DAG with parallelism | runPlan + executeFn |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |

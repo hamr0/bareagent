@@ -781,6 +781,34 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
+### Unreleased / agent-family resilience + routing primitives (2026-06-15)
+
+- **Spawn gets a heartbeat (`idleTimeoutMs`) distinct from the wall-clock
+  ceiling.** Running multi-turn agent families surfaced the "alive but stuck,
+  no output" hang: a child still resident but emitting nothing. The existing
+  `timeoutMs` is a blunt wall-clock cap — it can't tell a child doing slow
+  real work from one that's wedged, and a child that hangs at minute 1 ties up
+  a slot until minute 10. Decision: add an opt-in idle timer that **arms at
+  spawn and resets on every stdout/stderr line**, killing only on genuine
+  silence (SIGTERM → 5s → SIGKILL). It reuses the existing `onLine`/`kill`
+  plumbing (~12 lines), defaults off (a spawn with no `idleTimeoutMs` is
+  byte-identical), and keeps `timeoutMs` as the absolute ceiling. The in-loop
+  path needs nothing equivalent: `Retry`'s per-attempt timeout already bounds a
+  stuck `generate`/tool, and providers resolve on completion (not streaming).
+- **Complexity assessment is a pure-code pre-planner, NOT a litectx/CE concern
+  and NOT an LLM call.** A 4-tier classifier (simple/medium/complex/critical)
+  answers a *routing* question — single-shot vs. invoke Planner, and whether to
+  escalate scrutiny — which is orchestration, not context engineering (litectx
+  decides what's *in* the window from `ctx.budget`/`ctx.task`; it has no use
+  for an effort tier). Ported as `assessComplexity` (concept-port of Aurora's
+  SOAR keyword assessor, ~89% on its corpus vs. the ~95% full version — the gap
+  is long-tail ambiguity, accepted for a lightweight readable heuristic). It is
+  a **standalone pure function, deliberately not wired into Loop or Planner** —
+  the consumer composes the `needsPlanning`/`critical` branch (components stay
+  independent). The assessed text is length-capped (`MAX_ASSESS_LEN`) because
+  several signal patterns carry `.*` and went quadratic on adversarial repeated
+  trigger tokens (a grounded pre-ship security finding: ~28s → ~3ms).
+
 ### v0.13.1 / MCP-bridge + provider hardening pass (2026-06-13)
 
 - **A broken MCP stdin pipe must never crash the host.** A spawned server that

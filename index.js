@@ -2,6 +2,7 @@
 
 const { Loop } = require('./src/loop');
 const { Planner } = require('./src/planner');
+const { assessComplexity } = require('./src/complexity');
 const { StateMachine } = require('./src/state');
 const { Scheduler } = require('./src/scheduler');
 const { Checkpoint } = require('./src/checkpoint');
@@ -25,6 +26,7 @@ const {
 module.exports = {
   Loop,
   Planner,
+  assessComplexity,
   StateMachine,
   Scheduler,
   Checkpoint,

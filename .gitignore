@@ -14,6 +14,9 @@ contrib/python/__pycache__/
 # RT-1 POCs under poc/rt1-*.mjs are tracked deliberately; these are not.
 poc/rt4-*.mjs
 poc/rt2-*.mjs
+poc/spawn-idle-*.mjs
+poc/preplan-*.mjs
+poc/assess-*.mjs
 
 # Generated TypeScript declarations (emitted from JSDoc by `npm run build:types`,
 # shipped via prepublishOnly). Hand-written declarations under types/ are tracked.
