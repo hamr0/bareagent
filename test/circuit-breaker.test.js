@@ -89,4 +89,17 @@ describe('CircuitBreaker', () => {
     const result = await wrapped.generate([], []);
     assert.equal(result.text, 'hi');
   });
+
+  it('wrapProvider preserves passthrough props (model, name) for cost accounting', async () => {
+    const cb = new CircuitBreaker({ threshold: 2 });
+    const provider = {
+      model: 'gpt-4o',
+      name: 'openai',
+      generate: async () => ({ text: 'hi', toolCalls: [], usage: {} }),
+    };
+    const wrapped = cb.wrapProvider(provider, 'p1');
+    // Loop reads provider.model to derive cost — the wrapper must not drop it.
+    assert.equal(wrapped.model, 'gpt-4o');
+    assert.equal(wrapped.name, 'openai');
+  });
 });

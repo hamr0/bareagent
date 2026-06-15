@@ -62,8 +62,12 @@ const { ToolError } = require('./errors');
 
 // --- Config discovery (from IDE configs) ---
 
-const DEFAULT_CONFIG_PATHS = [
-  () => join(process.cwd(), '.mcp.json'),                              // project
+// The project-cwd `.mcp.json` is the untrusted-repo vector: discovering it auto-spawns its
+// `command`, so cloning a hostile repo and running an agent inside it would be arbitrary code
+// execution. It is therefore NOT in the trusted defaults — these are user/IDE-authored configs
+// under $HOME, which the user owns. The project config is opt-in (see `includeProjectConfig`).
+const PROJECT_CONFIG_PATH = () => join(process.cwd(), '.mcp.json');
+const TRUSTED_CONFIG_PATHS = [
   () => join(homedir(), '.mcp.json'),                                  // home
   () => join(homedir(), '.claude', 'mcp_servers.json'),                // Claude Code
   () => join(homedir(), '.config', 'Claude', 'claude_desktop_config.json'), // Claude Desktop
@@ -71,11 +75,22 @@ const DEFAULT_CONFIG_PATHS = [
 ];
 
 /**
- * @param {string[]} [configPaths]
+ * @param {string[]} [configPaths] - Explicit config paths. When given, honored verbatim (the
+ *   caller owns the choice). When omitted, the trusted $HOME/IDE defaults are scanned.
+ * @param {{ includeProjectConfig?: boolean }} [opts] - When no explicit `configPaths` are given,
+ *   set `includeProjectConfig: true` to also scan `./.mcp.json`. Default false — see PROJECT_CONFIG_PATH.
  * @returns {Map<string, ServerDef>}
  */
-function discoverServers(configPaths) {
-  const paths = configPaths || DEFAULT_CONFIG_PATHS.map(fn => fn());
+function discoverServers(configPaths, { includeProjectConfig = false } = {}) {
+  let paths;
+  if (configPaths) {
+    paths = configPaths;
+  } else {
+    paths = TRUSTED_CONFIG_PATHS.map(fn => fn());
+    // Project config kept at highest precedence (front) when explicitly opted in — preserves the
+    // historical "project overrides home" ordering for callers that want it.
+    if (includeProjectConfig) paths.unshift(PROJECT_CONFIG_PATH());
+  }
   /** @type {Map<string, ServerDef>} */
   const servers = new Map();
 
@@ -594,7 +609,11 @@ function buildMetaTools(tools, discoveredAt) {
  *
  * @param {object} [opts]
  * @param {string} [opts.bridgePath] - Path to .mcp-bridge.json. Default: .mcp-bridge.json in cwd.
- * @param {string[]} [opts.configPaths] - IDE config paths for discovery.
+ * @param {string[]} [opts.configPaths] - Explicit config paths for discovery. When given, honored
+ *   verbatim. When omitted, only the trusted $HOME/IDE defaults are scanned (NOT `./.mcp.json`).
+ * @param {boolean} [opts.includeProjectConfig=false] - Also scan the project-cwd `./.mcp.json`
+ *   during default discovery. Off by default: a project config in an untrusted repo can auto-spawn
+ *   arbitrary commands. Implied true when a `confirmServer` hook is present (it vets each command).
  * @param {string[]} [opts.servers] - Limit to these server names.
  * @param {number} [opts.timeout=15000] - Per-server handshake timeout in ms (initialize + tools/list).
  * @param {number} [opts.callTimeout=120000] - Per-invocation timeout in ms for tools/call. Bounds a
@@ -602,11 +621,11 @@ function buildMetaTools(tools, discoveredAt) {
  * @param {boolean} [opts.refresh=false] - Force re-discovery regardless of TTL.
  * @param {(name: string, def: ServerDef) => boolean | Promise<boolean>} [opts.confirmServer]
  *   Vet each discovered server BEFORE its `command` is spawned. Connecting to an
- *   MCP server runs its command, and discovery reads configs from the cwd (a
- *   `.mcp.json` in an untrusted repo) as well as the user's home/IDE configs.
- *   Return false to skip a server (its command is never executed). A throw is
- *   treated as a deny (fail-closed). Default: every discovered server is trusted
- *   (unchanged behavior) — pass this to gate command execution.
+ *   MCP server runs its command. Return false to skip a server (its command is
+ *   never executed). A throw is treated as a deny (fail-closed). Default: every
+ *   discovered server is trusted — pass this to gate command execution. Presence
+ *   of this hook also opts default discovery into the project-cwd `./.mcp.json`,
+ *   since each command is then vetted regardless of source.
  * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, close: Function}>}
  */
 async function createMCPBridge(opts = {}) {
@@ -632,9 +651,10 @@ async function createMCPBridge(opts = {}) {
     catch { return false; }
   };
 
-  // Connecting to a server EXECUTES its `command`, which can originate from a
-  // cwd-relative .mcp.json in an untrusted repo (discoverServers reads project
-  // configs). With no confirmServer hook, every discovered command runs unvetted.
+  // Connecting to a server EXECUTES its `command`. The project-cwd `.mcp.json` is excluded from
+  // default discovery (see TRUSTED_CONFIG_PATHS / includeProjectConfig), so the untrusted-repo
+  // path is closed by default; this warning covers the residual case where home/IDE configs (or an
+  // explicit opt-in) contribute commands and no confirmServer hook is present to vet them.
   // Warn ONCE per call, BEFORE the first spawn — and the first spawn is the
   // discovery phase on a cold/refresh run, not the main-connect phase below.
   let warnedUnvetted = false;
@@ -654,8 +674,11 @@ async function createMCPBridge(opts = {}) {
   const needsRefresh = opts.refresh || !config || isExpired(config);
 
   if (needsRefresh) {
-    // Discover from IDE configs
-    const discovered = discoverServers(opts.configPaths);
+    // Discover from IDE configs. The project-cwd `.mcp.json` is excluded by default (untrusted-repo
+    // RCE vector); it is scanned only on explicit opt-in, or when a `confirmServer` hook is present
+    // (which vets every command before it spawns, so cwd discovery is safe under it).
+    const includeProjectConfig = opts.includeProjectConfig === true || !!confirmServer;
+    const discovered = discoverServers(opts.configPaths, { includeProjectConfig });
 
     if (discovered.size === 0 && !config) {
       return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };

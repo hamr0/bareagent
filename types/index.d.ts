@@ -22,6 +22,8 @@ export interface GenerateResult {
   text: string;
   toolCalls: ToolCall[];
   usage: Usage;
+  /** Model id the response was produced by; preferred over Provider.model for cost accounting. */
+  model?: string | null;
 }
 
 /** A conversation message in OpenAI chat format. */

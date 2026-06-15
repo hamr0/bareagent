@@ -72,6 +72,7 @@ class OpenAIProvider {
         name: tc.function.name,
         arguments: JSON.parse(tc.function.arguments),
       })),
+      model: data.model || this.model,
       usage: {
         inputTokens: data.usage?.prompt_tokens || 0,
         outputTokens: data.usage?.completion_tokens || 0,

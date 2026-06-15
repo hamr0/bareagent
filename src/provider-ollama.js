@@ -60,6 +60,7 @@ class OllamaProvider {
           ? JSON.parse(tc.function.arguments)
           : tc.function.arguments,
       })),
+      model: data.model || this.model,
       usage: {
         inputTokens: data.prompt_eval_count || 0,
         outputTokens: data.eval_count || 0,

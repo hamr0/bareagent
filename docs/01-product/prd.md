@@ -1,6 +1,6 @@
 # bareagent — Product Requirements Document (PRD)
 
-**Status:** THE single bareagent PRD — current as of v0.16.0 (2026-06-15). Core spec landed v0.4 (bareagent v0.8.0, 2026-04-30); §22 decisions log carries the running record since. **This doc is now self-contained:** the former standalone `api-reference.md` (component/API reference → §24) and `litectx-runtime-prd.md` (the CE-library runtime seams → §23) were folded in and deleted (2026-06-13); the old v0.2-era `Project Plan` `prd.md` it replaced was retired at the same time. bareguard is a hard dep at `^0.4.2`.
+**Status:** THE single bareagent PRD — current as of v0.16.1 (2026-06-15). Core spec landed v0.4 (bareagent v0.8.0, 2026-04-30); §22 decisions log carries the running record since. **This doc is now self-contained:** the former standalone `api-reference.md` (component/API reference → §24) and `litectx-runtime-prd.md` (the CE-library runtime seams → §23) were folded in and deleted (2026-06-13); the old v0.2-era `Project Plan` `prd.md` it replaced was retired at the same time. bareguard is a hard dep at `^0.4.2`.
 **Owner:** hamr0
 **Last updated:** 2026-06-13
 **Language:** Node.js (JavaScript), CJS at the public surface; bareguard is ESM and consumed via the `wireGate` adapter without bareagent importing it directly.
@@ -781,7 +781,44 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
-### Unreleased / agent-family resilience + routing primitives (2026-06-15)
+### v0.16.1 / cost accounting survives provider wrapping (2026-06-15)
+
+- **The response's model wins over the provider's model for cost
+  estimation.** A downstream consumer (multis) hit a silent cost-cap failure:
+  `CircuitBreaker.wrapProvider` returned a bare `{ generate }`, dropping
+  `.model`, and Loop derives per-round cost from `provider.model` — so the
+  recommended resilience pattern (wrap providers in a breaker) silently zeroed
+  out `budget.maxCostUsd`. The narrow fix is to make the wrapper preserve
+  passthrough props, and we did (`{ ...provider, generate }`). But the
+  **decision** is the broader one: Loop now resolves the model as
+  `result.model || provider.model || null`. The provider object is the wrong
+  single source of truth for "what model produced this response" — it's absent
+  on `FallbackProvider` (which has no `.model` and picks a provider per call)
+  and can vary per response. So providers now **echo `model` in their
+  `generate()` result** (`data.model || this.model`, using the id the API
+  reports back), and the response is authoritative. `GenerateResult.model?` is
+  additive and optional; CLIPipe stays unchanged (zero usage → nothing to
+  cost). This keeps `onLlmResult` cost (and the bareguard budget halt) correct
+  through any wrapping or fallback composition, not just the one bug reported.
+
+- **Security pass (3 grounded findings).** (a) **MCP cwd-config trust flipped.**
+  `createMCPBridge` discovered the project-cwd `.mcp.json` *first* and spawned its
+  `command` unvetted by default — arbitrary code execution from a hostile repo's
+  checked-in config. Decision: the cwd config is no longer a trusted default;
+  default discovery is $HOME/IDE configs only, and `./.mcp.json` is opt-in
+  (`includeProjectConfig`, implied by a `confirmServer` hook). A behavior change,
+  justified — auto-running code drawn from the cwd is the wrong default polarity
+  for a library, even though it matches IDE convenience. (b) **`shell_grep` ReDoS
+  is bounded by isolation, not heuristics.** The static `looksCatastrophic` guard
+  was provably incomplete (`(a|a|a)*$` passes it and hangs the loop); since JS
+  backtracking is uninterruptible on its thread and a tighter heuristic would
+  false-positive on legit alternation, the match now runs in a worker thread with
+  a hard timeout (`worker.terminate()` on overrun). The guard stays only as a
+  cheap fast-reject. (c) **`defer` queue fold** uses a `Map` + string-id check so
+  a tampered `"__proto__"` id can't reach the prototype setter. Each finding was
+  reproduced before fixing (see CHANGELOG 0.16.1 §Security).
+
+### v0.16.0 / agent-family resilience + routing primitives (2026-06-15)
 
 - **Spawn gets a heartbeat (`idleTimeoutMs`) distinct from the wall-clock
   ceiling.** Running multi-turn agent families surfaced the "alive but stuck,

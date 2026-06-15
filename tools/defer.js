@@ -133,16 +133,19 @@ async function readQueue(queuePath) {
   const path = resolveQueuePath(queuePath);
   try {
     const text = await fsp.readFile(path, 'utf8');
-    /** @type {Record<string, Record<string, any>>} */
-    const records = {};
+    // Fold append-only status lines by id (latest wins). A Map — not a plain object — so an
+    // attacker-influenced id from a tampered queue file (e.g. "__proto__", "constructor") is just
+    // an ordinary key and cannot reach the prototype-setter path. Also require a string id.
+    /** @type {Map<string, Record<string, any>>} */
+    const records = new Map();
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       let r;
       try { r = JSON.parse(line); } catch { continue; }
-      if (!r.id) continue;
-      records[r.id] = { ...records[r.id], ...r };
+      if (typeof r.id !== 'string' || !r.id) continue;
+      records.set(r.id, { ...records.get(r.id), ...r });
     }
-    return Object.values(records);
+    return [...records.values()];
   } catch (/** @type {any} */ err) {
     if (err.code === 'ENOENT') return [];
     throw err;

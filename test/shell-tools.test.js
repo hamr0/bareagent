@@ -160,6 +160,24 @@ describe('createShellTools', () => {
       }
     });
 
+    it('bounds a guard-evading catastrophic pattern via worker timeout (no event-loop hang)', async () => {
+      const { tools } = createShellTools();
+      // (a|a|a)*$ defeats the static looksCatastrophic guard (overlapping alternation, no inner
+      // quantifier) yet backtracks exponentially — grounded to hang the main thread on a 20-char
+      // line. The worker timeout must convert that infinite hang into a bounded rejection.
+      const f = path.join(TMP, 'redos-bypass.txt');
+      fs.writeFileSync(f, 'a'.repeat(60) + '!');
+      const t0 = Date.now();
+      await assert.rejects(
+        () => findTool(tools, 'shell_grep').execute({ pattern: '(a|a|a)*$', path: f, flags: '', timeout: 400 }),
+        /time budget|catastrophic/,
+        'guard-evading ReDoS pattern must be rejected by the timeout, not hang',
+      );
+      const elapsed = Date.now() - t0;
+      // Bounded: well under what an unbounded backtrack would take, and not far past the 400ms budget.
+      assert.ok(elapsed < 3000, `should reject near the time budget, took ${elapsed}ms`);
+    });
+
     it('still accepts safe quantified patterns', async () => {
       const { tools } = createShellTools();
       const f = path.join(TMP, 'safe.txt');

@@ -17,9 +17,11 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { exec, execFile } = require('node:child_process');
+const { Worker } = require('node:worker_threads');
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;       // 256 KB
 const DEFAULT_GREP_MAX_MATCHES = 200;
+const DEFAULT_GREP_TIMEOUT_MS = 5_000;           // hard ceiling on a single grep — bounds ReDoS
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_MAX_BUFFER = 1024 * 1024;     // 1 MB
 
@@ -137,18 +139,22 @@ function looksCatastrophic(pattern) {
  * @property {boolean} [recursive]
  * @property {number} [maxMatches]
  * @property {string} [flags]
+ * @property {number} [timeout] - Hard wall-clock ceiling in ms (default 5000). The match runs in a
+ *   worker thread; on overrun the worker is terminated and the call rejects, so a pattern that slips
+ *   past `looksCatastrophic` can no longer hang the host event loop.
  */
 
-/** @param {GrepArgs} args */
-async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i' }) {
+/**
+ * The actual search: walk, skip binaries, regex-test each line. Runs in a worker thread (see
+ * grep-worker.js) so a runaway regex is killable via `worker.terminate()`. JS RegExp has no
+ * execution timeout and backtracking is uninterruptible on its own thread — isolation is the
+ * only sound bound (the static `looksCatastrophic` guard is a best-effort fast-reject, not a
+ * guarantee; a grounded bypass like `(a|a|a)*` passes it yet backtracks exponentially).
+ * @param {GrepArgs} args
+ */
+async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i' }) {
   const resolved = path.resolve(expandHome(rawPath));
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
-  if (looksCatastrophic(pattern)) {
-    throw new Error(
-      `shell_grep: pattern rejected — nested unbounded quantifier (e.g. "(a+)+") risks catastrophic ` +
-      `backtracking that would block the process. Simplify the regex.`,
-    );
-  }
   let re;
   try {
     re = new RegExp(pattern, flags);
@@ -188,6 +194,53 @@ async function grepPath({ pattern, path: rawPath, recursive = true, maxMatches, 
 
   const truncated = hits.length >= cap;
   return { hits, truncated, fileCount: files.length };
+}
+
+/**
+ * Public grep entry. Fast-rejects obviously catastrophic patterns without paying for a worker,
+ * then runs the search in a worker thread bounded by a hard timeout — so even a pattern that
+ * defeats the static guard degrades to a bounded rejection instead of an event-loop hang.
+ * @param {GrepArgs} args
+ */
+function grepPath(args) {
+  const { pattern, flags = 'i', timeout } = args;
+  if (looksCatastrophic(pattern)) {
+    return Promise.reject(new Error(
+      `shell_grep: pattern rejected — nested unbounded quantifier (e.g. "(a+)+") risks catastrophic ` +
+      `backtracking that would block the process. Simplify the regex.`,
+    ));
+  }
+  // Cheap up-front validation so a syntactically invalid regex fails clearly without a worker spin-up.
+  try {
+    new RegExp(pattern, flags);
+  } catch (/** @type {any} */ err) {
+    return Promise.reject(new Error(`shell_grep: invalid regex — ${err.message}`));
+  }
+
+  const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: args });
+    let settled = false;
+    const done = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate();
+      fn(val);
+    };
+    const timer = setTimeout(() => {
+      done(reject, new Error(
+        `shell_grep: pattern exceeded ${budgetMs}ms time budget — likely catastrophic backtracking. ` +
+        `Simplify the regex.`,
+      ));
+    }, budgetMs);
+    timer.unref?.();
+    worker.once('message', (msg) => {
+      if (msg && msg.ok) done(resolve, msg.result);
+      else done(reject, new Error((msg && msg.error) || 'shell_grep: worker failed'));
+    });
+    worker.once('error', (err) => done(reject, err));
+  });
 }
 
 /**
@@ -360,4 +413,4 @@ function createShellTools() {
   return { tools };
 }
 
-module.exports = { createShellTools };
+module.exports = { createShellTools, _grepCore };

@@ -112,13 +112,16 @@ class CircuitBreaker {
   }
 
   /**
-   * Wrap a provider so generate() goes through the circuit breaker.
-   * @param {{ generate: (...args: any[]) => Promise<any> }} provider - Provider with generate().
+   * Wrap a provider so generate() goes through the circuit breaker. Passthrough props (e.g.
+   * `model`, `name`) are preserved so Loop cost accounting — which reads `provider.model` —
+   * keeps working through the wrapper.
+   * @param {{ generate: (...args: any[]) => Promise<any>, [k: string]: any }} provider - Provider with generate().
    * @param {string} [key] - Circuit key.
-   * @returns {{ generate: (...args: any[]) => Promise<any> }} Wrapped provider with generate().
+   * @returns {{ generate: (...args: any[]) => Promise<any>, [k: string]: any }} Wrapped provider.
    */
   wrapProvider(provider, key) {
     return {
+      ...provider,
       /** @param {...any} args */
       generate: (...args) => this.call(() => provider.generate(...args), key),
     };

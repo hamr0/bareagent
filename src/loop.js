@@ -331,7 +331,7 @@ class Loop {
         const startedAt = Date.now();
         const result = await loop.provider.generate(prompt, [], { temperature: 0, ...genOpts });
         const usage = (result && result.usage) || null;
-        const model = loop.provider.model || null;
+        const model = (result && result.model) || loop.provider.model || null;
         const cost = estimateCost(model, usage);
         if (cost !== null) totalCost += cost;
         loop._safeEmit({ type: 'loop:summarize', data: { usage, costUsd: cost, durationMs: Date.now() - startedAt } });
@@ -421,7 +421,9 @@ class Loop {
       }
 
       lastUsage = result.usage || lastUsage;
-      const model = this.provider.model || null;
+      // Prefer the model the response reports (robust when provider.model is absent or varies per
+      // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
+      const model = result.model || this.provider.model || null;
       const roundCost = estimateCost(model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
 

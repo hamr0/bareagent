@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.16.0 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
+> v0.16.1 | Node.js >= 18 | one required dep (`bareguard ^0.4.2`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -251,16 +251,17 @@ invoked tool name lives in `args.name`. To deny specific MCP tools when
 using metaTools, use `tools.denyArgPatterns: { mcp_invoke: [/"name":"linear_admin_/] }`
 or `content.denyPatterns` over the serialized action.
 
-**Vetting server commands (v0.11.0).** Connecting to a server runs its
-`command`, and discovery reads `.mcp.json` from the cwd (an untrusted
-repo) as well as your home/IDE configs. Pass `confirmServer(name, def)
-=> boolean` to `createMCPBridge` to approve each server **before its
-command is spawned** (return `false` to skip it; a throw fails closed).
-Default trusts all discovered servers — unchanged behavior. **When no
-`confirmServer` is set, the bridge prints a one-time warning naming every
-command it is about to spawn** (before the first spawn, discovery included),
-so a cwd `.mcp.json` can't run a command unannounced — `confirmServer` is
-still how you actually *gate* it.
+**Vetting server commands (v0.11.0; cwd default tightened v0.16.1).** Connecting
+to a server runs its `command`. **Default discovery now scans only your
+$HOME/IDE configs — NOT the project-cwd `./.mcp.json`** (v0.16.1): a checked-in
+config in an untrusted repo would otherwise auto-spawn arbitrary commands. To
+include the project config, pass `createMCPBridge({ includeProjectConfig: true })`,
+or a `confirmServer` hook (which implies it, since the hook vets every command).
+Explicitly-passed `configPaths` are honored verbatim. Pass `confirmServer(name,
+def) => boolean` to approve each server **before its command is spawned** (return
+`false` to skip it; a throw fails closed). When no `confirmServer` is set, the
+bridge still trusts all *discovered* servers and prints a one-time warning naming
+every command it is about to spawn — `confirmServer` is how you actually *gate* it.
 
 **RPC timeouts (Unreleased).** Every JSON-RPC round-trip is now bounded, so a
 server that never answers can't hang the bridge or the loop. `opts.timeout`
@@ -554,13 +555,13 @@ new CLIPipe({ command: 'claude', args: ['--print'], systemPromptFlag: '--system-
 new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 ```
 
-All return `{ text, toolCalls, usage: { inputTokens, outputTokens } }`. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens).
+All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model? }`. The optional `model` (v0.16.1+) is the id the response was produced by — Loop prefers it over `provider.model` for cost accounting. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens), and omits `model`.
 
 **Error body (v0.11.0):** on an HTTP error the OpenAI/Anthropic/Ollama providers throw a `ProviderError` whose `message` carries the upstream error string. The full parsed response is **not** attached to `err.body` by default (so an unexpected field can't leak through logs that dump the error object). Pass `{ exposeErrorBody: true }` to attach it for debugging.
 
 **Plaintext-key warning (Unreleased):** the OpenAI provider's `baseUrl` accepts `http://` (for local/OpenAI-compatible endpoints), but a `Bearer` key sent over plaintext http to a **non-loopback** host is exposed on the wire. The provider now warns once when that happens. Loopback hosts (`localhost`/`127.0.0.0/8`/`::1` — local proxies, Ollama-style endpoints) stay silent, since that's the legitimate keyless-local case. The header is **not** stripped (some local proxies want a key), so use `https` for any remote endpoint, or drop `apiKey` when the local endpoint needs none.
 
-**Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. Pricing covers OpenAI and Anthropic models; unknown models use a default average. To adjust rates, edit `COST_PER_1K` at the top of `src/loop.js`.
+**Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. Pricing covers OpenAI and Anthropic models; unknown models use a default average. To adjust rates, edit `COST_PER_1K` at the top of `src/loop.js`. The model is resolved as `result.model || provider.model` (v0.16.1+) — providers now echo the model in their `generate()` result, so cost accounting holds even when `provider.model` is absent or varies per response, e.g. behind `FallbackProvider` or `CircuitBreaker.wrapProvider` (the wrapper also preserves `model`/`name` passthrough props). Wire `onLlmResult` (via `wireGate`) and a `budget.maxCostUsd` cap then halts on token-heavy workloads too.
 
 ## Store options
 
@@ -642,7 +643,7 @@ All error classes extend `Error` — `instanceof Error` always works. The `retry
 ## Key contracts
 
 - Loop builds messages in OpenAI format internally. Each provider normalizes to its native format.
-- `provider.generate(messages, tools, options)` must return `{ text, toolCalls, usage }`.
+- `provider.generate(messages, tools, options)` must return `{ text, toolCalls, usage }` (and may include `model` for accurate cost accounting).
 - Store must implement `store(content, metadata) → id`, `search(query, options) → [{id, content, metadata, score}]`, `get(id)`, `delete(id)`.
 - Components are independent: Memory doesn't know Loop, Scheduler doesn't know Planner. You compose them.
 

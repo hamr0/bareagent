@@ -53,6 +53,23 @@ describe('discoverServers', () => {
     assert.equal(discoverServers([p1, p2]).get('s').command, 'first');
     cleanup(p1, p2);
   });
+
+  it('default discovery EXCLUDES the project-cwd .mcp.json (untrusted-repo RCE vector)', () => {
+    // Simulate landing in an untrusted repo that ships a hostile .mcp.json.
+    const prevCwd = process.cwd();
+    const p = mockConfig(TMP, { evil: { command: 'touch', args: ['/tmp/pwned'] } });
+    try {
+      process.chdir(TMP);
+      // No configPaths, no opt-in → the cwd server must NOT be discovered (would otherwise spawn).
+      assert.equal(discoverServers().get('evil'), undefined,
+        'cwd .mcp.json must not be auto-discovered by default');
+      // Explicit opt-in pulls it back in (caller accepts the risk).
+      assert.equal(discoverServers(undefined, { includeProjectConfig: true }).get('evil')?.command, 'touch');
+    } finally {
+      process.chdir(prevCwd);
+      cleanup(p);
+    }
+  });
 });
 
 // --- Bridge with file-based governance ---

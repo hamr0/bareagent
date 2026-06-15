@@ -83,6 +83,7 @@ class AnthropicProvider {
     return {
       text,
       toolCalls,
+      model: data.model || this.model,
       usage: {
         inputTokens: data.usage?.input_tokens || 0,
         outputTokens: data.usage?.output_tokens || 0,

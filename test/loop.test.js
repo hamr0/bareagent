@@ -542,6 +542,41 @@ describe('Loop', () => {
 
       assert.equal(result.cost, 0);
     });
+
+    it('falls back to result.model when provider.model is absent', async () => {
+      // FallbackProvider has no .model; the model surfaces only in the response.
+      const provider = {
+        async generate() {
+          return { text: 'Hello', toolCalls: [], model: 'gpt-4o-mini', usage: { inputTokens: 1000, outputTokens: 500 } };
+        },
+      };
+      const llm = [];
+      const loop = new Loop({ provider, onLlmResult: (r) => llm.push(r) });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      assert.ok(Math.abs(result.cost - 0.00045) < 0.0001);
+      assert.equal(llm[0].model, 'gpt-4o-mini');
+      assert.ok(llm[0].costUsd > 0, 'onLlmResult.costUsd is non-null with model from response');
+    });
+
+    it('keeps cost accounting through a CircuitBreaker-wrapped provider', async () => {
+      const { CircuitBreaker } = require('../src/circuit-breaker');
+      const base = {
+        model: 'gpt-4o-mini',
+        name: 'openai',
+        async generate() {
+          return { text: 'Hello', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } };
+        },
+      };
+      const wrapped = new CircuitBreaker().wrapProvider(base, 'p1');
+      const llm = [];
+      const loop = new Loop({ provider: wrapped, onLlmResult: (r) => llm.push(r) });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      assert.ok(result.cost > 0, 'wrapped provider still accrues cost');
+      assert.ok(llm[0].costUsd > 0, 'onLlmResult.costUsd is non-null through the wrapper');
+      assert.equal(llm[0].provider, 'openai');
+    });
   });
 
   describe('tool validation', () => {
