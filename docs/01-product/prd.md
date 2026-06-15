@@ -1,6 +1,6 @@
 # bareagent — Product Requirements Document (PRD)
 
-**Status:** THE single bareagent PRD — current as of v0.15.0 (2026-06-14). Core spec landed v0.4 (bareagent v0.8.0, 2026-04-30); §22 decisions log carries the running record since. **This doc is now self-contained:** the former standalone `api-reference.md` (component/API reference → §24) and `litectx-runtime-prd.md` (the CE-library runtime seams → §23) were folded in and deleted (2026-06-13); the old v0.2-era `Project Plan` `prd.md` it replaced was retired at the same time. bareguard is a hard dep at `^0.4.2`.
+**Status:** THE single bareagent PRD — current as of v0.16.0 (2026-06-15). Core spec landed v0.4 (bareagent v0.8.0, 2026-04-30); §22 decisions log carries the running record since. **This doc is now self-contained:** the former standalone `api-reference.md` (component/API reference → §24) and `litectx-runtime-prd.md` (the CE-library runtime seams → §23) were folded in and deleted (2026-06-13); the old v0.2-era `Project Plan` `prd.md` it replaced was retired at the same time. bareguard is a hard dep at `^0.4.2`.
 **Owner:** hamr0
 **Last updated:** 2026-06-13
 **Language:** Node.js (JavaScript), CJS at the public surface; bareguard is ESM and consumed via the `wireGate` adapter without bareagent importing it directly.

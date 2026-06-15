@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.16.0] — 2026-06-15
 
 Two resilience/routing primitives drawn from running multi-turn agent families (Aurora/SOAR): a heartbeat watchdog so a child agent that hangs silently doesn't tie up a slot until the wall-clock cap, and a zero-cost pre-planner that sizes a goal before spending tokens. Both additive and opt-in; no breaking API changes.
 
