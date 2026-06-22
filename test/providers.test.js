@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { OpenAIProvider } = require('../src/provider-openai');
 const { AnthropicProvider } = require('../src/provider-anthropic');
+const { GeminiProvider } = require('../src/provider-gemini');
 const { OllamaProvider } = require('../src/provider-ollama');
 
 // A loopback server that returns a 401 whose body carries an unexpected field.
@@ -153,6 +154,68 @@ describe('usage normalization — cache token tiers', () => {
     });
     const r = await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
     assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    server.close();
+  });
+});
+
+describe('GeminiProvider', () => {
+  it('constructs with defaults (native generateContent endpoint)', () => {
+    const p = new GeminiProvider({ apiKey: 'test' });
+    assert.equal(p.model, 'gemini-2.5-flash');
+    assert.equal(p.baseUrl, 'https://generativelanguage.googleapis.com/v1beta');
+  });
+
+  it('converts OpenAI-format messages to Gemini contents + posts to :generateContent', async () => {
+    const { server, url, received } = await jsonServer({
+      candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2 },
+    });
+    await new GeminiProvider({ apiKey: 'x', baseUrl: url, model: 'gemini-2.5-flash' }).generate(
+      [{ role: 'system', content: 'be terse' }, { role: 'user', content: 'hi' }], []);
+    assert.match(received[0].url, /\/models\/gemini-2\.5-flash:generateContent$/);
+    assert.deepEqual(received[0].body.systemInstruction, { parts: [{ text: 'be terse' }] });
+    assert.deepEqual(received[0].body.contents, [{ role: 'user', parts: [{ text: 'hi' }] }]);
+    server.close();
+  });
+
+  it('round-trips tool calls: assistant tool_calls → functionCall, tool result → functionResponse (name resolved)', async () => {
+    const { server, url, received } = await jsonServer({
+      candidates: [{ content: { parts: [{ text: 'done' }] } }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+    });
+    await new GeminiProvider({ apiKey: 'x', baseUrl: url }).generate([
+      { role: 'user', content: 'weather in Paris?' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Paris"}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: '18C' },
+    ], [{ name: 'get_weather', description: 'w', parameters: { type: 'object' } }]);
+    const c = received[0].body.contents;
+    assert.deepEqual(c[1], { role: 'model', parts: [{ functionCall: { name: 'get_weather', args: { city: 'Paris' } } }] });
+    // tool result names the function (resolved from the call id), not the bare id — Gemini matches by name.
+    assert.deepEqual(c[2], { role: 'user', parts: [{ functionResponse: { name: 'get_weather', response: { content: '18C' } } }] });
+    assert.deepEqual(received[0].body.tools, [{ functionDeclarations: [{ name: 'get_weather', description: 'w', parameters: { type: 'object' } }] }]);
+    server.close();
+  });
+
+  it('parses functionCall parts into toolCalls with synthesized ids', async () => {
+    const { server, url } = await jsonServer({
+      candidates: [{ content: { parts: [{ functionCall: { name: 'get_weather', args: { city: 'Paris' } } }] } }],
+      usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 4 },
+    });
+    const r = await new GeminiProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    assert.equal(r.toolCalls.length, 1);
+    assert.equal(r.toolCalls[0].name, 'get_weather');
+    assert.deepEqual(r.toolCalls[0].arguments, { city: 'Paris' });
+    assert.ok(r.toolCalls[0].id, 'a synthesized call id must be present so the Loop can pair the result');
+    server.close();
+  });
+
+  it('normalizes usage: subtracts cachedContentTokenCount; folds thoughts into output', async () => {
+    const { server, url } = await jsonServer({
+      candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+      usageMetadata: { promptTokenCount: 39594, candidatesTokenCount: 1, cachedContentTokenCount: 38885, thoughtsTokenCount: 3 },
+    });
+    const r = await new GeminiProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    // input = 39594 - 38885 = 709 (uncached remainder); output = candidates 1 + thoughts 3 = 4.
+    assert.deepEqual(r.usage, { inputTokens: 709, outputTokens: 4, cacheReadTokens: 38885, cacheCreationTokens: 0 });
     server.close();
   });
 });

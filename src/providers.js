@@ -2,6 +2,7 @@
 
 const { OpenAIProvider } = require('./provider-openai');
 const { AnthropicProvider } = require('./provider-anthropic');
+const { GeminiProvider } = require('./provider-gemini');
 const { OllamaProvider } = require('./provider-ollama');
 const { CLIPipeProvider } = require('./provider-clipipe');
 const { FallbackProvider } = require('./provider-fallback');
@@ -10,6 +11,7 @@ module.exports = {
   // Short names (canonical — used throughout docs and the integration guide)
   OpenAI: OpenAIProvider,
   Anthropic: AnthropicProvider,
+  Gemini: GeminiProvider,
   Ollama: OllamaProvider,
   CLIPipe: CLIPipeProvider,
   Fallback: FallbackProvider,
@@ -17,6 +19,7 @@ module.exports = {
   // `const { OpenAIProvider } = require('bare-agent/providers')` also works.
   OpenAIProvider,
   AnthropicProvider,
+  GeminiProvider,
   OllamaProvider,
   CLIPipeProvider,
   FallbackProvider,
