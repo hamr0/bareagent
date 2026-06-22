@@ -24,6 +24,28 @@ export interface Usage {
   cacheCreationTokens?: number;
 }
 
+/**
+ * Canonical per-run counters returned on a Loop result as `result.metrics` (Feature 3 — the meter).
+ * Present on every run, gate-wired or not. `tokens` is CUMULATIVE across all rounds and all four tiers
+ * (the run total — unlike `result.usage`, which is the last round only and kept for back-compat).
+ */
+export interface RunMetrics {
+  /** Rounds (LLM turns) executed. */
+  turns: number;
+  /** Total tool calls the model made (every invocation, including denied/unknown). */
+  toolCalls: number;
+  /** Per-tool invocation counts, keyed by tool name. */
+  byTool: Record<string, number>;
+  /** Cumulative token spend across all rounds (incl. summarize calls), by tier. */
+  tokens: { input: number; output: number; cacheCreation: number; cacheRead: number };
+  /** Cumulative USD over priced rounds; null ONLY if nothing could be priced (explicit-unknown, not free). */
+  costUsd: number | null;
+  /** Count of rounds whose cost could not be computed (no model / no rate) — the loud-unpriced signal. */
+  unpricedRounds: number;
+  /** Wall-clock duration of the run in ms. */
+  durationMs: number;
+}
+
 /** A single tool invocation requested by the model. `arguments` is parsed JSON. */
 export interface ToolCall {
   id: string;
