@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { assessComplexity } = require('../src/complexity');
+const { assessComplexity, isCritical } = require('../src/complexity');
 
 describe('assessComplexity', () => {
   it('classifies simple lookups/commands as simple (no planning)', () => {
@@ -111,5 +111,51 @@ describe('assessComplexity', () => {
     const route = (goal) => assessComplexity(goal).needsPlanning ? 'plan' : 'single-shot';
     assert.equal(route('what time is it'), 'single-shot');
     assert.equal(route('migrate the auth service and refactor all call sites across the codebase'), 'plan');
+  });
+});
+
+describe('isCritical (standalone durable floor)', () => {
+  const CRITICAL = [
+    'fix security vulnerability in authentication',
+    'investigate data breach in user table',
+    'production outage emergency',
+    'ensure gdpr compliance for user data',
+    'encrypt sensitive payment data',
+  ];
+  const NOT_CRITICAL = [
+    'what is python',
+    'implement oauth',                 // complex, but not the critical floor
+    'build an admin dashboard',
+    'add validation to the form',
+    'explain how the authentication works',  // SEC_CONTEXT word but no securing ACTION verb
+  ];
+
+  it('returns true for high-stakes work', () => {
+    for (const p of CRITICAL) assert.equal(isCritical(p), true, `"${p}" should be critical`);
+  });
+
+  it('returns false for ordinary work (including complex-but-not-critical)', () => {
+    for (const p of NOT_CRITICAL) assert.equal(isCritical(p), false, `"${p}" should NOT be critical`);
+  });
+
+  it('normalizes input — case-insensitive and whitespace-tolerant (the wrapper does the lowercasing)', () => {
+    assert.equal(isCritical('FIX SECURITY VULNERABILITY'), true);
+    assert.equal(isCritical('  Investigate Data Breach  '), true);
+    assert.equal(isCritical('Encrypt Payment Data'), true);
+  });
+
+  it('is the exact override assessComplexity applies — equivalence invariant', () => {
+    for (const p of [...CRITICAL, ...NOT_CRITICAL,
+      'migrate the database and then update all call sites',
+      'fix the typo in readme']) {
+      assert.equal(isCritical(p), assessComplexity(p).level === 'critical',
+        `isCritical and the critical tier must agree for "${p}"`);
+    }
+  });
+
+  it('degenerate input is false, never throws', () => {
+    for (const g of ['', '   ', /** @type {any} */ (null), /** @type {any} */ (undefined), /** @type {any} */ (42)]) {
+      assert.equal(isCritical(g), false);
+    }
   });
 });
