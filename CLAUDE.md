@@ -75,3 +75,7 @@ Source is pure JS + JSDoc; `.d.ts` are generated (git-ignored, shipped on publis
 
 For full development and testing standards, see `.claude/memory/AGENT_RULES.md`.
 For detailed docs, see `docs/KNOWLEDGE_BASE.md`.
+
+<!-- MEMORY:START -->
+@.claude/memory/MEMORY.md
+<!-- MEMORY:END -->
