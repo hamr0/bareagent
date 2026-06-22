@@ -16,6 +16,25 @@ function errorServer() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
+// A loopback server that records each request body and returns a canned 200 JSON response — lets us
+// drive a provider's real generate() over the wire and assert both the normalized usage it returns
+// and the request it sent (e.g. did cacheSystem add a cache_control breakpoint).
+function jsonServer(responseBody) {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    let chunks = '';
+    req.on('data', d => (chunks += d));
+    req.on('end', () => {
+      received.push({ url: req.url, body: chunks ? JSON.parse(chunks) : null });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(responseBody));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ server, received, url: `http://127.0.0.1:${server.address().port}` })));
+}
+
 describe('OpenAIProvider', () => {
   it('constructs with defaults', () => {
     const p = new OpenAIProvider({ apiKey: 'test' });
@@ -89,6 +108,77 @@ describe('provider error body exposure', () => {
     catch (e) { err = e; }
     assert.ok(err.body && JSON.stringify(err.body).includes('leak-me-xyz'),
       'opt-in should retain the full upstream body for debugging');
+    server.close();
+  });
+});
+
+describe('usage normalization — cache token tiers', () => {
+  it('OpenAI: subtracts cached_tokens from prompt_tokens (uncached remainder) + surfaces cacheRead', async () => {
+    // prompt_tokens INCLUDES the 80 cached → uncached input must be 20, not 100 (the ~2x bug).
+    const { server, url } = await jsonServer({
+      model: 'gpt-4o-mini',
+      choices: [{ message: { content: 'ok' } }],
+      usage: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 80 } },
+    });
+    const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    assert.deepEqual(r.usage, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 80, cacheCreationTokens: 0 });
+    server.close();
+  });
+
+  it('OpenAI: no cache details → every prompt token is uncached input, cache tiers 0', async () => {
+    const { server, url } = await jsonServer({
+      choices: [{ message: { content: 'ok' } }],
+      usage: { prompt_tokens: 50, completion_tokens: 5 },
+    });
+    const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    assert.deepEqual(r.usage, { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    server.close();
+  });
+
+  it('Anthropic: maps cache_read/cache_creation tiers; input_tokens is used as-is (already uncached)', async () => {
+    const { server, url } = await jsonServer({
+      model: 'claude-haiku-4-5',
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 10, output_tokens: 4, cache_creation_input_tokens: 0, cache_read_input_tokens: 23510 },
+    });
+    const r = await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    assert.deepEqual(r.usage, { inputTokens: 10, outputTokens: 4, cacheReadTokens: 23510, cacheCreationTokens: 0 });
+    server.close();
+  });
+
+  it('Anthropic: absent cache fields default to 0 (model/prompt that did not cache)', async () => {
+    const { server, url } = await jsonServer({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 7, output_tokens: 2 },
+    });
+    const r = await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
+    assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    server.close();
+  });
+});
+
+describe('Anthropic cacheSystem opt-in (cache_control on the system prompt)', () => {
+  const RESP = { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 5, output_tokens: 1 } };
+  const MSGS = [{ role: 'system', content: 'be terse' }, { role: 'user', content: 'hi' }];
+
+  it('default off: system is sent as a plain string (request byte-compatible with before)', async () => {
+    const { server, url, received } = await jsonServer(RESP);
+    await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate(MSGS, []);
+    assert.equal(received[0].body.system, 'be terse');
+    server.close();
+  });
+
+  it('cacheSystem:true wraps the system prompt with a cache_control breakpoint', async () => {
+    const { server, url, received } = await jsonServer(RESP);
+    await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheSystem: true }).generate(MSGS, []);
+    assert.deepEqual(received[0].body.system, [{ type: 'text', text: 'be terse', cache_control: { type: 'ephemeral' } }]);
+    server.close();
+  });
+
+  it('per-call cacheSystem:false overrides an instance default of true', async () => {
+    const { server, url, received } = await jsonServer(RESP);
+    await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheSystem: true }).generate(MSGS, [], { cacheSystem: false });
+    assert.equal(received[0].body.system, 'be terse');
     server.close();
   });
 });

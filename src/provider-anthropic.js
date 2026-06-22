@@ -1,7 +1,14 @@
 'use strict';
 
 const https = require('https');
+const http = require('http');
 const { ProviderError } = require('./errors');
+
+/** @param {string} hostname @returns {boolean} */
+function isLoopbackHost(hostname) {
+  const h = hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h.startsWith('127.');
+}
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -11,6 +18,8 @@ const { ProviderError } = require('./errors');
  * @typedef {object} AnthropicOptions
  * @property {string} [apiKey] - Anthropic API key (required).
  * @property {string} [model='claude-haiku-4-5-20251001'] - Model ID.
+ * @property {string} [baseUrl='https://api.anthropic.com/v1'] - API base (override for proxies/gateways; the request posts to `${baseUrl}/messages`).
+ * @property {boolean} [cacheSystem=false] - Opt-in prompt caching: send the system prompt with a `cache_control` breakpoint so Anthropic caches it. Anthropic does NOT auto-cache, so without this its cache tiers are always 0. Overridable per call via `generate(..., { cacheSystem })`.
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
  */
 
@@ -23,6 +32,11 @@ class AnthropicProvider {
     if (!options.apiKey) throw new Error('[AnthropicProvider] requires apiKey');
     this.apiKey = options.apiKey.trim();
     this.model = options.model || 'claude-haiku-4-5-20251001';
+    this.baseUrl = options.baseUrl || 'https://api.anthropic.com/v1';
+    // Opt-in prompt caching: when true, the system prompt is sent with a cache_control breakpoint so
+    // Anthropic caches it (unlike OpenAI/Gemini, Anthropic does NOT auto-cache — without this its
+    // cache_read/cache_creation tiers are always 0). Default off keeps requests byte-identical to before.
+    this.cacheSystem = options.cacheSystem === true;
     // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
     this.exposeErrorBody = options.exposeErrorBody === true;
   }
@@ -51,6 +65,15 @@ class AnthropicProvider {
 
     // Override with options.system if provided
     if (options.system) system = options.system;
+
+    // Opt-in caching: mark a string system prompt as a cache breakpoint. Anthropic caches the prefix
+    // up to this point (min ~1024-4096 tok depending on model; a shorter prompt silently won't cache —
+    // harmless). A per-call options.cacheSystem can override the instance default. Arrays are passed
+    // through untouched (the caller already shaped their own cache_control blocks).
+    const cacheSystem = options.cacheSystem != null ? options.cacheSystem === true : this.cacheSystem;
+    if (cacheSystem && typeof system === 'string' && system.length > 0) {
+      system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+    }
 
     /** @type {Record<string, any>} */
     const body = {
@@ -84,9 +107,13 @@ class AnthropicProvider {
       text,
       toolCalls,
       model: data.model || this.model,
+      // Anthropic's `input_tokens` is ALREADY the uncached remainder (cached tokens are reported
+      // separately, not folded in — verified live), so no subtraction here, unlike OpenAI/Gemini.
       usage: {
         inputTokens: data.usage?.input_tokens || 0,
         outputTokens: data.usage?.output_tokens || 0,
+        cacheReadTokens: data.usage?.cache_read_input_tokens || 0,
+        cacheCreationTokens: data.usage?.cache_creation_input_tokens || 0,
       },
     };
   }
@@ -134,7 +161,15 @@ class AnthropicProvider {
   _request(body) {
     return new Promise((resolve, reject) => {
       const payload = JSON.stringify(body);
-      const req = https.request('https://api.anthropic.com/v1/messages', {
+      const url = new URL(this.baseUrl + '/messages');
+      const transport = url.protocol === 'https:' ? https : http;
+      // Plaintext key to a remote host exposes it on the wire; loopback (test servers / local
+      // proxies) is the legitimate http case. Warn once, mirror OpenAIProvider.
+      if (url.protocol === 'http:' && !isLoopbackHost(url.hostname) && !this._warnedInsecure) {
+        this._warnedInsecure = true;
+        console.warn(`[AnthropicProvider] sending x-api-key over PLAINTEXT http to ${url.hostname} — key exposed on the wire. Use https.`);
+      }
+      const req = transport.request(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
