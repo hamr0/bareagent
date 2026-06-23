@@ -256,6 +256,22 @@ describe('createStashSkill — auto-compaction (Module 4, token pressure §2.11)
     assert.ok(restoreHandles().some(l => l.startsWith('auto:')), 'the folded middle is parked (restorable)');
   });
 
+  it('auto-fold with the DEFAULT summarize strategy invokes ctx.summarize and stays valid (the default config path)', async () => {
+    const ctx = fakeCtx();
+    ctx.summarize = async (span) => `gist of ${span.length} folded turns`;
+    // default strategy is 'summarize' (no compaction.strategy override) — the ctx.summarize-during-middle-fold combo.
+    const { trim, restoreHandles } = createStashSkill({ compaction: { ceilingTokens: 1000, triggerAt: 0.7, keepHeadTurns: 1, keepRecentTurns: 2 } });
+    const msgs = transcript(8);
+    ctx.usage = { inputTokens: 900 };
+    await trim(msgs, ctx);
+    assert.ok(msgs.length < 17, 'middle folded');
+    assert.deepEqual(structuralErrors(msgs), [], 'no orphaned tool pairs');
+    assert.deepEqual(alternationErrors(msgs), [], 'alternation valid');
+    assert.ok(msgs.some(m => m.role === 'tool' && /summarized.*gist of \d+ folded turns/.test(m.content || '')), 'the summary gist is folded inline');
+    assert.ok(!ctx._store.has('stash:auto:0'), 'summarize auto-fold parks NO verbatim (lossy)');
+    assert.ok(restoreHandles().includes('auto:0'), 'the auto fold is tracked (as a lossy summary handle)');
+  });
+
   it('does not fire below the trigger fraction', async () => {
     const ctx = fakeCtx();
     const { trim } = createStashSkill({ compaction: { ceilingTokens: 1000, triggerAt: 0.7, strategy: 'stash' } });
