@@ -340,6 +340,11 @@ class Loop {
       byTool: {},
       tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
       unpricedRounds: 0,
+      // §3.6 CE-activity rollup — convenience counts derived in-place from the same events already
+      // on the Stream (loop:trim, loop:summarize), not a second source. `compactions` counts
+      // destructive trim evictions (stash adds to this once F2 lands); `summaries` counts
+      // ctx.summarize calls. tokensTrimmed + the memory.* footprint are deferred (see PRD §3.10).
+      context: { compactions: 0, summaries: 0 },
     };
     /** Accumulate one usage object into the cumulative token tiers. @param {Usage|null|undefined} u */
     const addUsage = (u) => {
@@ -357,6 +362,8 @@ class Loop {
       tokens: { ...metrics.tokens },
       costUsd: pricedAny ? totalCost : null,
       unpricedRounds: metrics.unpricedRounds,
+      spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
+      context: { ...metrics.context }, // §3.6 CE-activity rollup
       durationMs: Date.now() - meterStartedAt,
     });
 
@@ -391,6 +398,7 @@ class Loop {
         const cost = estimateCost(model, usage);
         if (cost !== null) { totalCost += cost; pricedAny = true; }
         addUsage(usage); // summarize tokens are real spend → count them in the cumulative meter
+        metrics.context.summaries++; // §3.6 CE-activity rollup
         loop._safeEmit({ type: 'loop:summarize', data: { usage, costUsd: cost, durationMs: Date.now() - startedAt } });
         if (loop.onLlmResult) {
           try {
@@ -440,7 +448,7 @@ class Loop {
           if (Array.isArray(kept) && kept !== msgs) {
             msgs.length = 0;
             msgs.push(...kept);
-            if (msgs.length !== before) this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } });
+            if (msgs.length !== before) { metrics.context.compactions++; this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } }); }
           }
         } catch (err) {
           if (err instanceof HaltError) throw err;

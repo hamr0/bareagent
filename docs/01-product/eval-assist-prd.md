@@ -577,6 +577,13 @@ Net: bareagent emits a complete, honestly-priced signal; bareguard decides on it
 - **No bareguard-side metrics store** — it keeps only decision-state.
 - **No historical/cross-run aggregation** — `result.metrics` is per-run; rolling up runs is the consumer's Memory/store concern.
 
+### §3.6 deferred — the rest of the rollup (future feat)
+
+The §3.6 shape lists more than the meter can honestly source today. **Shipped now** (the sourceable subset, derived in-place from existing Stream events): `metrics.spawned`, `metrics.context.compactions` (trim evictions), `metrics.context.summaries` (`ctx.summarize` calls). **Deferred** — these have no source today and would emit silent zeros (the very anti-pattern §3.7 rejects), so they wait:
+
+1. **`metrics.context.tokensTrimmed`** — the `loop:trim` event carries message *counts* (`before`/`after`), not tokens. Needs an approx token-estimate over evicted turns — a small but real decision (which estimator), not a free rollup.
+2. **`metrics.memory.{stashed,episodes,facts,recalls}`** — the Memory wrapper (`src/memory.js`) emits nothing today, and `memory.stashed` has no referent until **F2** ships stash. Land this block **with F2**, instrumenting the Memory wrapper in one coherent pass — not as four hardcoded zeros now.
+
 ## 3.11 Decisions log (do not re-litigate)
 
 - **D1 — bareagent is the meter; bareguard is the gate.** Counts originate in bareagent (round counter, tool exec, usage, `estimateCost`). One emits, the other collects-to-decide.

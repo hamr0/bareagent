@@ -27,6 +27,8 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(m.turns, 1);
     assert.equal(m.toolCalls, 0);
     assert.deepEqual(m.byTool, {});
+    assert.equal(m.spawned, 0);
+    assert.deepEqual(m.context, { compactions: 0, summaries: 0 });
     assert.equal(typeof m.durationMs, 'number');
     assert.ok(m.durationMs >= 0);
   });
@@ -94,6 +96,53 @@ describe('result.metrics — the meter (Feature 3)', () => {
     const unpriced = { async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
     await new Loop({ provider: unpriced, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
     assert.equal(seen[0].pricing, 'unpriced');
+  });
+
+  // §3.6 CE-activity rollup — the sourceable subset (compactions, summaries, spawned). Derived in-place
+  // from events already on the Stream; tokensTrimmed + the memory.* footprint are deferred (PRD §3.10).
+  it('spawned counts child-agent spawns (the spawn tool), 0 when none', async () => {
+    const basic = { model: 'gpt-4o-mini', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } }; } };
+    const noSpawn = await new Loop({ provider: basic }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(noSpawn.metrics.spawned, 0);
+
+    // Model fires the `spawn` tool twice, then finishes.
+    const spawner = { model: 'gpt-4o-mini', async generate(messages) {
+      if (messages.some(m => m.role === 'tool')) return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      return { text: '', toolCalls: [
+        { id: 's1', name: 'spawn', arguments: {} }, { id: 's2', name: 'spawn', arguments: {} },
+      ], usage: { inputTokens: 1, outputTokens: 1 } };
+    } };
+    const result = await new Loop({ provider: spawner }).run([{ role: 'user', content: 'Hi' }], [
+      { name: 'spawn', execute: async () => 'child ok' },
+    ]);
+    assert.equal(result.metrics.spawned, 2);
+    assert.equal(result.metrics.byTool.spawn, 2, 'spawned mirrors the spawn tool count');
+  });
+
+  it('context.compactions counts destructive trim evictions (0 with no trim wired)', async () => {
+    const provider = twoRoundProvider({ inputTokens: 1, outputTokens: 1 }, { inputTokens: 1, outputTokens: 1 });
+    const noTrim = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }]);
+    assert.equal(noTrim.metrics.context.compactions, 0);
+    assert.equal(noTrim.metrics.context.summaries, 0);
+
+    // A trim that evicts the oldest message each round (returns a strictly smaller new array).
+    const provider2 = twoRoundProvider({ inputTokens: 1, outputTokens: 1 }, { inputTokens: 1, outputTokens: 1 });
+    const trim = async (msgs) => (msgs.length > 1 ? msgs.slice(1) : msgs);
+    const result = await new Loop({ provider: provider2, trim }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }]);
+    assert.ok(result.metrics.context.compactions >= 1, 'at least one eviction counted');
+  });
+
+  it('context.summaries counts ctx.summarize calls made from the assemble seam', async () => {
+    // Provider tags out-of-band summary calls (system prompt says "summarizer") vs main turns.
+    const provider = { model: 'gpt-4o-mini', async generate(messages) {
+      const sys = messages[0] && messages[0].role === 'system' ? String(messages[0].content) : '';
+      if (sys.includes('summarizer')) return { text: 'SUMMARY', usage: { inputTokens: 2, outputTokens: 1 } };
+      return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+    } };
+    // assemble (the CE seam) drives the lent ctx.summarize once this round.
+    const assemble = async (m, c) => { if (c && c.summarize) await c.summarize('an excerpt'); return m; };
+    const result = await new Loop({ provider, assemble }).run([{ role: 'user', content: 'Hi' }], [], { ctx: { task: 't' } });
+    assert.equal(result.metrics.context.summaries, 1);
   });
 
   it('metrics is attached even when the run halts/errors (provider throw path)', async () => {

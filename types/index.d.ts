@@ -42,6 +42,15 @@ export interface RunMetrics {
   costUsd: number | null;
   /** Count of rounds whose cost could not be computed (no model / no rate) — the loud-unpriced signal. */
   unpricedRounds: number;
+  /** Spawn-tool invocations this run (the `spawn` tool count — counts every call, incl. denied/failed). */
+  spawned: number;
+  /**
+   * CE-activity rollup, derived in-place from Stream events (loop:trim, loop:summarize) — a
+   * convenience view, not a second source. `compactions`: destructive trim evictions (stash joins
+   * this in F2). `summaries`: ctx.summarize calls. (tokensTrimmed + a memory.* footprint are deferred —
+   * see eval-assist PRD §3.10.)
+   */
+  context: { compactions: number; summaries: number };
   /** Wall-clock duration of the run in ms. */
   durationMs: number;
 }
