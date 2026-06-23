@@ -119,7 +119,9 @@ function createStashSkill(options = {}) {
   // assistant notes break Anthropic's strict alternation; this pair satisfies both pairing and alternation
   // by construction when it follows a tool-result (user) boundary — which the checkpoint anchor always is.
   const noteMessages = (/** @type {string} */ text) => {
-    const id = `${keyPrefix}note:${noteSeq++}`;
+    // The id goes ON THE WIRE as a tool_use.id — Anthropic enforces ^[a-zA-Z0-9_-]+$ on it (live-POC
+    // caught a colon'd id being rejected). Keep it in-charset; do NOT reuse keyPrefix (it has a colon).
+    const id = `stash_note_${noteSeq++}`;
     return [
       { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'context_compacted', arguments: '{}' } }] },
       { role: 'tool', tool_call_id: id, content: text },

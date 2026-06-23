@@ -35,10 +35,14 @@ function alternationErrors(msgs) {
   for (let k = 1; k < conv.length; k++) if (conv[k] === conv[k - 1]) errs.push(`consecutive '${conv[k]}' at ${k}`);
   return errs;
 }
+const WIRE_ID = /^[a-zA-Z0-9_-]+$/; // Anthropic enforces this on tool_use.id (live-POC-confirmed)
 function structuralErrors(msgs) {
   const errs = [], declared = new Set(), satisfied = new Set();
   for (const m of msgs) {
-    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) declared.add(tc.id);
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) {
+      declared.add(tc.id);
+      if (!WIRE_ID.test(tc.id)) errs.push(`tool_use.id "${tc.id}" outside ^[a-zA-Z0-9_-]+$ (Anthropic rejects)`);
+    }
     if (m.role === 'tool') { if (!declared.has(m.tool_call_id)) errs.push(`orphan result ${m.tool_call_id}`); else satisfied.add(m.tool_call_id); }
   }
   for (const id of declared) if (!satisfied.has(id)) errs.push(`orphan call ${id}`);
