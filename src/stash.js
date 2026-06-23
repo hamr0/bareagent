@@ -215,8 +215,9 @@ function createStashSkill(options = {}) {
 
   // Fold msgs[from, to) into a parked stash (or a lossy summary) + a provider-safe note pair, IN PLACE.
   // Shared by on-demand compact (to = end) and the auto-trigger (a middle range). Callers must pass a
-  // range whose left edge follows a user-normalized message and whose right edge is an assistant turn
-  // start, so the spliced note pair keeps both tool-pairing and alternation valid.
+  // range whose left edge follows a user-normalized message (so the assistant-led note pair alternates)
+  // and whose right edge is either an assistant turn start or the end of the transcript — so the spliced
+  // note pair keeps both tool-pairing and alternation valid.
   const foldRange = async (/** @type {any[]} */ msgs, /** @type {any} */ ctx, /** @type {string} */ label, /** @type {number} */ from, /** @type {number} */ to, /** @type {string} */ strategy, /** @type {string|undefined} */ reason) => {
     const span = msgs.slice(from, to);
     if (!span.length) return false;
@@ -296,11 +297,14 @@ function createStashSkill(options = {}) {
         anchors.set(op.label, msgs.length ? msgs[msgs.length - 1] : null);
       } else if (op.action === 'compact') {
         const anchorMsg = anchors.get(op.label);
-        const at = anchorMsg == null ? -1 : msgs.indexOf(anchorMsg);
-        if (anchorMsg !== null && at < 0) { anchors.delete(op.label); continue; } // anchor already folded
-        const from = anchorMsg === null ? 0 : at + 1;
         anchors.delete(op.label);
-        await foldRange(msgs, ctx, op.label, from, msgs.length, op.strategy || defaultStrategy, op.reason); // on-demand: anchor→now
+        // No-op unless there's a real anchor message still in the transcript. A null anchor (checkpoint
+        // planted on an empty transcript) or one already folded away (indexOf < 0) has no coherent span —
+        // and folding from 0 would splice the assistant-led note pair at index 0, breaking the
+        // first-message-must-be-user rule. Fold strictly AFTER the anchor.
+        const at = anchorMsg == null ? -1 : msgs.indexOf(anchorMsg);
+        if (at < 0) continue;
+        await foldRange(msgs, ctx, op.label, at + 1, msgs.length, op.strategy || defaultStrategy, op.reason); // on-demand: anchor→now
       } else if (op.action === 'restore') {
         const handle = parked.get(op.label);
         if (handle && handle.backend === 'summary') {

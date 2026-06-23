@@ -99,6 +99,20 @@ describe('createStashSkill — shape & contract', () => {
     await assert.rejects(() => restore.execute({ label: 'never-compacted' }), /nothing compacted/);
   });
 
+  it('a checkpoint planted on an empty transcript makes compact a safe no-op (never folds from 0)', async () => {
+    const ctx = fakeCtx();
+    const { skill, trim } = createStashSkill();
+    const [cp, compact] = skill.tools;
+    const msgs = []; // empty at checkpoint-drain time → anchor is null
+    await cp.execute({ label: 'x' });
+    await trim(msgs, ctx);
+    msgs.push({ role: 'user', content: 'now there is content' });
+    await compact.execute({ label: 'x', strategy: 'stash' });
+    await trim(msgs, ctx); // must NOT fold from 0 (that would splice an assistant-led note at index 0)
+    assert.deepEqual(msgs, [{ role: 'user', content: 'now there is content' }], 'compact was a no-op; transcript intact');
+    assert.deepEqual(alternationErrors(msgs), [], 'transcript still valid (no assistant-led note at index 0)');
+  });
+
   it('accepts both planned strategies and rejects an unknown one (D10)', async () => {
     const { skill } = createStashSkill();
     const [cp, compact] = skill.tools;
