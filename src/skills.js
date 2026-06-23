@@ -38,6 +38,12 @@ const { ValidationError, ToolError } = require('./errors');
 
 const META_NAME = 'skill_use';
 
+// Provider-safe identifier charset. OpenAI enforces `^[a-zA-Z0-9_-]+$` on tool names and Anthropic the
+// same shape (the POC, poc/f2-skill-thunk.mjs, proved a dot is rejected at generate time). Skill names and
+// bare tool names must satisfy this so the prefixed result — joined by `_`, itself in the set — is accepted
+// by every provider. Validating at register() fails fast, instead of surfacing as a mid-run provider error.
+const SAFE_NAME = /^[a-zA-Z0-9_-]+$/;
+
 class SkillRegistry {
   /**
    * @param {Object} [options]
@@ -56,6 +62,9 @@ class SkillRegistry {
     /** @type {Set<string>} externally-reserved names (native/MCP) for collision detection */
     this._reserved = new Set(options.reserved || []);
     this.metaToolName = options.metaToolName || META_NAME;
+    if (!SAFE_NAME.test(this.metaToolName)) {
+      throw new ValidationError(`[SkillRegistry] meta-tool name "${this.metaToolName}" must match ${SAFE_NAME} (provider tool-name charset).`);
+    }
     if (this._reserved.has(this.metaToolName)) {
       throw new ValidationError(`[SkillRegistry] meta-tool name "${this.metaToolName}" collides with a reserved tool name.`);
     }
@@ -78,6 +87,9 @@ class SkillRegistry {
     const { name, description, instructions, tools = [] } = skill;
     if (typeof name !== 'string' || !name) {
       throw new ValidationError(`[SkillRegistry] skill name must be a non-empty string (got ${JSON.stringify(name)}).`);
+    }
+    if (!SAFE_NAME.test(name)) {
+      throw new ValidationError(`[SkillRegistry] skill name "${name}" must match ${SAFE_NAME} — it prefixes tool names, which providers reject outside that charset (e.g. a dot breaks OpenAI/Anthropic).`);
     }
     if (this._skills.has(name)) {
       throw new ValidationError(`[SkillRegistry] duplicate skill name "${name}".`);
@@ -103,6 +115,9 @@ class SkillRegistry {
       }
       if (typeof tool.execute !== 'function') {
         throw new ValidationError(`[SkillRegistry] skill "${name}" tool "${tool.name}" is missing an execute() function.`);
+      }
+      if (!SAFE_NAME.test(tool.name)) {
+        throw new ValidationError(`[SkillRegistry] skill "${name}" tool name "${tool.name}" must match ${SAFE_NAME} (provider tool-name charset).`);
       }
       const fullName = `${name}_${tool.name}`;
       if (seenThisSkill.has(fullName)) {

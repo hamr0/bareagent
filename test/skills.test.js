@@ -74,6 +74,19 @@ describe('SkillRegistry — registration & catalog', () => {
     );
   });
 
+  it('rejects a skill name or tool name outside the provider-safe charset (fail-fast, not mid-run)', () => {
+    const skills = new SkillRegistry();
+    // A dot in the skill name → prefixed tool name breaks OpenAI/Anthropic at generate time; reject early.
+    assert.throws(() => skills.register({ name: 'my.skill', description: 'd', instructions: 'i', tools: [] }), ValidationError);
+    // A dot in a bare tool name has the same effect.
+    assert.throws(
+      () => skills.register({ name: 'ok', description: 'd', instructions: 'i', tools: [mkTool('bad.name')] }),
+      ValidationError,
+    );
+    // An unsafe meta-tool name is rejected at construction.
+    assert.throws(() => new SkillRegistry({ metaToolName: 'skill.use' }), ValidationError);
+  });
+
   it('rejects a missing description or instructions', () => {
     const skills = new SkillRegistry();
     assert.throws(() => skills.register({ name: 's', instructions: 'i', tools: [] }), ValidationError);
