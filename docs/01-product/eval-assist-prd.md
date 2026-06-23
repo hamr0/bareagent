@@ -243,6 +243,8 @@ This pattern is not just "from a talk" — Anthropic ships it as a **production 
 
 # Feature 2 — Skill mechanism + Stash (reference skill)
 
+> **POC-VALIDATED (eval-assist F2) — Part A mechanism proven; build next.** POC-first applies here (no D11 waiver). `poc/f2-skill-thunk.mjs` drives the exact progressive-disclosure + tools-as-thunk cycle (D2/D3/D4) against a real provider, mirroring `loop.js:306/481`, and is falsifiable (enforces the negative — `stash_*` never offered before `skill_use` — and requires `skill_use` → a later native `stash_*` call). **PASS on OpenAI (gpt-4o-mini) + Anthropic (claude-haiku-4-5)**; Gemini blocked by free-tier quota (`limit: 0`, external — not a mechanism failure). **Defect caught:** the dot separator (`stash.compact`) is rejected by both providers' tool-name regex → corrected to `_` (§2.6, MCP's established separator). Part B (stash strategies over `ctx.summarize`/litectx) and the Loop thunk primitive are the build that follows.
+
 ## 2.1 One-line summary
 
 A general **skill** layer for bareagent — operator-registered bundles of `{name, description, instructions, tools}` surfaced to the agent by **progressive disclosure** (one meta-tool, catalog of one-liners, instructions + tools revealed only on use) — and **stash**, the reference skill: deliberate, agent-triggered context compaction (`checkpoint` → `compact` → `restore`).
@@ -262,7 +264,7 @@ Two needs, one mechanism:
 
 - A **`SkillRegistry`** the operator populates: `register({ name, description, instructions, tools })`.
 - **Progressive disclosure via one meta-tool, `skill_use({ name })`.** Its description carries the catalog (`name: one-liner` per registered skill). Until a skill is used, only its one-liner is in context — never its instructions or tool schemas.
-- **On `skill_use`, two effects:** (1) the skill's `instructions` are returned **as the tool result** (on-demand injection, lands naturally in the transcript); (2) the skill's tools are **unlocked into the active tool set** for subsequent rounds, called **natively** (`stash.compact({...})`), not through a dispatcher.
+- **On `skill_use`, two effects:** (1) the skill's `instructions` are returned **as the tool result** (on-demand injection, lands naturally in the transcript); (2) the skill's tools are **unlocked into the active tool set** for subsequent rounds, called **natively** (`stash_compact({...})`), not through a dispatcher.
 - The only new Loop primitive: **`tools` may be a `() => ToolDef[]` thunk**, re-evaluated each round (in addition to today's static array). `SkillRegistry.activeTools` is that thunk; `skill_use` mutates the unlocked set, reflected next round.
 
 ## 2.4 What it is NOT
@@ -280,11 +282,11 @@ catalog in context:  skill_use({ stash: "compact finished sub-tasks to keep cont
 
 model → skill_use({ name: 'stash' })
   ↳ tool result:  <stash instructions>            (injected on demand)
-  ↳ registry unlocks stash.checkpoint / stash.compact / stash.restore   (next round's thunk)
+  ↳ registry unlocks stash_checkpoint / stash_compact / stash_restore   (next round's thunk)
 
-model → stash.checkpoint({ label: 'auth-refactor' })   ← native call, gated like any tool
+model → stash_checkpoint({ label: 'auth-refactor' })   ← native call, gated like any tool
 … sub-task turns …
-model → stash.compact({ label: 'auth-refactor' })       ← native call, gated like any tool
+model → stash_compact({ label: 'auth-refactor' })       ← native call, gated like any tool
 
 later: the instructions + sub-task turns are themselves compacted away by trim/stash
        → free retraction; no skill_release needed in v1
@@ -298,7 +300,8 @@ The single most important property, and the simplest:
 
 - **The gate judges `(tool, args)` — the action — and ignores origin.** A tool call's verdict is identical whether it came from a native tool, MCP, or a skill. There is **no provenance, no per-skill rule, no "allow X from skill Y"** — that would be a privilege-escalation hole and was explicitly rejected.
 - **Skills affect *discovery*, never *authorization*.** A skill can make a tool *visible*; bareguard decides if a *call* succeeds, blind to how the tool was reached. So **invoking a skill can never reach an otherwise-prohibited tool** — discovery ≠ authorization. `rm -rf` from a skill's `shell_exec` hits the exact same wall as from a native one.
-- **Tool names are globally unique — a *dispatch* requirement, not a security feature.** The runtime resolves a call name to exactly one function (the tool registry is a map; keys can't collide). Prefixing skill tools (`stash.compact`) is just *how* uniqueness is guaranteed across native + MCP + all skills. This is the **same pattern MCP already uses** — `wrapTools` prefixes `${serverName}_${tool}` (`src/mcp-bridge.js:372`) purely for unique dispatch, and the gate governs each `mcp_invoke` agnostically by that unique name (the `context:{server}` at `mcp-bridge.js:379` is *error diagnostics only*, never a policy input).
+- **Tool names are globally unique — a *dispatch* requirement, not a security feature.** The runtime resolves a call name to exactly one function (the tool registry is a map; keys can't collide). Prefixing skill tools (`stash_compact`) is just *how* uniqueness is guaranteed across native + MCP + all skills. This is the **same pattern MCP already uses** — `wrapTools` prefixes `${serverName}_${tool}` (`src/mcp-bridge.js:372`) purely for unique dispatch, and the gate governs each `mcp_invoke` agnostically by that unique name (the `context:{server}` at `mcp-bridge.js:379` is *error diagnostics only*, never a policy input).
+  - **Separator is `_`, not `.` (POC-corrected).** Earlier drafts wrote `stash.compact`. The F2 POC (`poc/f2-skill-thunk.mjs`) caught that a dot is **rejected** by both providers' tool-name validators — OpenAI's `^[a-zA-Z0-9_-]+$` errored on the first unlocked call, and Anthropic enforces the same no-dot pattern. Underscore is the only separator that passes everywhere, which is exactly why MCP already chose `${server}_${tool}`. Skills inherit it.
 - **Three gate granularities, one chokepoint** (`policy(tool, args, ctx)`): (1) may the agent use skills at all → gate `skill_use`; (2) may it use *this* skill → gate `skill_use({name})` / drop it via `filterTools`; (3) may it run *this* unlocked tool with *these* args → gate the call. No new governance surface — all three are the existing chokepoint.
 
 **Operator controls stack:** *registration* (does the skill exist at all — code wiring) and *policy* (may this run invoke it / its tools — bareguard, runtime). An operator can register a powerful skill yet deny its invocation in a given context.
@@ -314,7 +317,7 @@ skills.register({
   description: 'Compact finished sub-tasks to keep the context window lean.',  // → catalog line
   instructions: 'Checkpoint at the start of a sub-task; compact once it is done and you will not '
               + 'need its detail inline again; restore if you over-compacted. Never compact work in progress.',
-  tools: [checkpointTool, compactTool, restoreTool],   // names auto-prefixed → stash.checkpoint, …
+  tools: [checkpointTool, compactTool, restoreTool],   // names auto-prefixed → stash_checkpoint, …
 });
 
 // Loop sees the meta-tool + whatever is currently unlocked, re-evaluated each round:
@@ -374,7 +377,7 @@ The operator sets the default strategy; the agent skill may override per compact
 Two independent axes: **who triggers** (auto ⟷ agent) × **which strategy** (§2.10). Both triggers can use either strategy.
 
 - **Automatic (code-driven).** bareagent owns the compaction trigger — litectx has *no* loop/trigger by doctrine ("no token/budget concerns — that's the harness layer"). It fires on **token pressure**: measured `usage.inputTokens` (provider-counted, exact) / `ceilingTokens` > `triggerAt`.
-- **On-demand (agent skill).** The `stash.*` tools (§2.12), invoked deliberately when the agent judges a sub-task done.
+- **On-demand (agent skill).** The `stash_*` tools (§2.12), invoked deliberately when the agent judges a sub-task done.
 
 **Auto-trigger config — all bareagent compaction config (the knob lives where the trigger lives; NOT a bareguard limit, which is a *halt* bound, not a *housekeeping* threshold):**
 
@@ -389,18 +392,18 @@ compaction: {
 
 **Opt-in / fail-safe:** unset `ceilingTokens` → **auto-trigger off** (no guessed ceiling; the on-demand skill still works). Same "no silent wrong-guess" instinct as the cost contract's loud-unpriced. A genuine *hard* "halt if context exceeds X" remains an optional, separate **bareguard** bound — not the compaction knob.
 
-## 2.12 API — stash tools (namespaced `stash.*`)
+## 2.12 API — stash tools (namespaced `stash_*`)
 
 ```js
-await stash.checkpoint({ label: 'auth-refactor' });
+await stash_checkpoint({ label: 'auth-refactor' });
 //   → plants a labeled anchor at the sub-task start. Re-using a live label re-anchors (upsert, §2.13).
 
-await stash.compact({ label: 'auth-refactor', strategy: 'stash', reason: 'auth wired + tested' });
+await stash_compact({ label: 'auth-refactor', strategy: 'stash', reason: 'auth wired + tested' });
 //   → folds anchor→now: 'summarize' replaces span with a summary note;
 //     'stash' evicts the verbatim span to litectx's stash table + leaves a pointer.
 //   → returns { label, strategy, foldedTurns, summary? }. No such checkpoint → ValidationError.
 
-await stash.restore({ label: 'auth-refactor' });
+await stash_restore({ label: 'auth-refactor' });
 //   → rehydrates the span (verbatim for 'stash', the note for 'summarize'); returns { label, restoredTurns }.
 ```
 
@@ -436,7 +439,7 @@ Retention is **bareagent's** (the knob lives with the mechanism), but it leans o
 - **D3 — Native unlock, not a dispatcher.** Unlocked tools called by prefixed name with real schemas; dispatcher is a large-catalog fallback only.
 - **D4 — Tools-as-thunk is the only new Loop primitive.** `tools` may be `() => ToolDef[]`, re-evaluated per round; Loop stays skill-agnostic.
 - **D5 — The gate is agnostic.** Judges `(tool, args)`, ignores origin. No provenance, no per-skill rules, no bypass. Skills affect discovery, never authorization. (§2.6)
-- **D6 — Unique tool names are a dispatch requirement, not security.** Prefixing (`stash.compact`) guarantees global uniqueness; same pattern as MCP's `${server}_${tool}`.
+- **D6 — Unique tool names are a dispatch requirement, not security.** Prefixing (`stash_compact`) guarantees global uniqueness; same pattern as MCP's `${server}_${tool}`.
 - **D7 — Retraction is free.** Via trim/stash; no `skill_release` in v1.
 - **D8 — Stash is compaction-first and domain-agnostic.** Not the CC handoff doc.
 - **D9 — Span-addressing is checkpoint-bracketed.** `checkpoint(label)` then `compact(label)` folds the bracketed span; restorable by label.
