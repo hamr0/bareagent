@@ -73,6 +73,8 @@ This is an optional borrow available because the dependency points that way — 
 
 ## 1.6 API — `Evaluator` component
 
+> **BUILT (eval-assist F1) — addendum is the as-built target.** §1.6–1.7 were drafted pre-brief; the §1.13 addendum + §1.14 SDK mapping superseded them and are what shipped. Reconciled deltas vs. the sketch below: (1) **`Verdict` is tri-state** — `{ status: 'satisfied'|'needs_revision'|'failed', pass (derived), score, critique, suggestions }`, mirroring Outcomes' vocabulary (the boolean-`pass`-only shape below is superseded). (2) **Isolation is by construction** — the rubric grader runs in a separate context window (fresh message array, harsh independent system prompt, never the generator's transcript), not the in-process `provider.generate` framing below; that isolation is the anti-sycophancy mechanism (A1/D8), not a knob. (3) **`contract` is a first-class input** (A3/D10) — graded against, not the loose goal. (4) **No POC gate** (D11). Shipped: `src/evaluator.js`, `src/refine.js`; tests `test/evaluator.test.js` + `test/refine.test.js`. **Deferred:** the `agentic` third criteria type (D9 — spawned tool-running critic) and the live rubric calibration (the inside-the-build empirical pass, needs a real provider key).
+
 Mirrors `Planner` (`src/planner.js`): a small class, constructed with a provider (optional — only the rubric path needs it), one async method, structured-output parsing.
 
 ```js
