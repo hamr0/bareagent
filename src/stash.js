@@ -71,6 +71,15 @@ const INSTRUCTIONS =
  *   when no `ctx.summarize` is wired (loud, never a silent detail-loss).
  * @param {string} [options.keyPrefix='stash:'] - Namespace for stash/episode ids.
  * @param {number} [options.maxLabels=128] - LRU backstop on DISTINCT live labels (§2.13) — visible, not silent.
+ * @param {Object} [options.compaction] - AUTOMATIC token-pressure trigger (§2.11/D12, all bareagent — a
+ *   housekeeping threshold, NEVER a bareguard halt bound). Opt-in: omit, or omit `ceilingTokens`, → OFF
+ *   (no guessed model→window table). Fires on the NEXT round's trim when the Loop's measured
+ *   `ctx.usage.inputTokens / ceilingTokens > triggerAt`.
+ * @param {number} [options.compaction.ceilingTokens] - OPERATOR-SET context ceiling (enables auto-trigger).
+ * @param {number} [options.compaction.triggerAt=0.7] - Fraction of the ceiling that fires a fold.
+ * @param {'summarize'|'stash'} [options.compaction.strategy] - Strategy for auto-folds (default: defaultStrategy).
+ * @param {number} [options.compaction.keepHeadTurns=1] - Recent turns to keep at the START (initial context).
+ * @param {number} [options.compaction.keepRecentTurns=3] - Recent turns to keep at the END (live working set).
  * @param {(msg: string) => void} [options.onNote=console.warn] - Sink for the loud one-time/backstop notes.
  * @returns {{ skill: { name: string, description: string, instructions: string, tools: ToolDef[] }, trim: (msgs: any[], ctx: any) => Promise<any[]>, restoreHandles: () => string[] }}
  */
@@ -79,8 +88,13 @@ function createStashSkill(options = {}) {
     defaultStrategy = 'summarize',
     keyPrefix = DEFAULT_KEY_PREFIX,
     maxLabels = DEFAULT_MAX_LABELS,
+    compaction = null,
     onNote = (/** @type {string} */ msg) => console.warn(msg),
   } = options;
+  const auto = compaction && compaction.ceilingTokens
+    ? { ceilingTokens: compaction.ceilingTokens, triggerAt: compaction.triggerAt ?? 0.7, strategy: compaction.strategy || defaultStrategy, keepHeadTurns: compaction.keepHeadTurns ?? 1, keepRecentTurns: compaction.keepRecentTurns ?? 3 }
+    : null;
+  let autoSeq = 0;
 
   /** @type {Map<string, any>} label → identity-ref to the boundary message (the anchor). */
   const anchors = new Map();
@@ -197,6 +211,72 @@ function createStashSkill(options = {}) {
     }
   };
 
+  // Fold msgs[from, to) into a parked stash (or a lossy summary) + a provider-safe note pair, IN PLACE.
+  // Shared by on-demand compact (to = end) and the auto-trigger (a middle range). Callers must pass a
+  // range whose left edge follows a user-normalized message and whose right edge is an assistant turn
+  // start, so the spliced note pair keeps both tool-pairing and alternation valid.
+  const foldRange = async (/** @type {any[]} */ msgs, /** @type {any} */ ctx, /** @type {string} */ label, /** @type {number} */ from, /** @type {number} */ to, /** @type {string} */ strategy, /** @type {string|undefined} */ reason) => {
+    const span = msgs.slice(from, to);
+    if (!span.length) return false;
+    let note;
+    if (strategy === 'summarize') {
+      let summary = '';
+      if (ctx && typeof ctx.summarize === 'function') {
+        try { summary = await ctx.summarize(span); }
+        catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] summarize failed for "${label}": ${err && err.message}`); }
+      }
+      if (summary) {
+        parked.set(label, { backend: 'summary', id: idFor(label) }); // lossy: nothing verbatim retained
+        note = `Compacted "${label}" (${span.length} turns, summarized; not restorable): ${summary}`;
+      } else {
+        onNote(`[stash] 'summarize' for "${label}" has no ctx.summarize — parked verbatim (lossless) instead.`);
+        park(ctx, label, JSON.stringify(span));
+        note = `Compacted "${label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
+      }
+    } else { // 'stash' — lossless
+      park(ctx, label, JSON.stringify(span));
+      note = `Compacted "${label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
+    }
+    msgs.splice(from, to - from, ...noteMessages(note)); // replace the span with the note pair, in place
+    if (reason && ctx && typeof ctx.remember === 'function') {
+      try { await ctx.remember(`${keyPrefix}episode:${label}`, reason, { kind: 'episode' }); }
+      catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] episode stance write failed for "${label}": ${err && err.message}`); }
+    }
+    enforceBackstop(ctx);
+    return true;
+  };
+
+  // Assistant turn starts: indices where an assistant turn begins after a user-normalized message (tool
+  // results normalize to user). Folding between two such indices removes WHOLE turns and lands the note
+  // pair on a user→assistant boundary — both transcript invariants hold by construction.
+  const turnStarts = (/** @type {any[]} */ msgs) => {
+    const out = [];
+    for (let i = 0; i < msgs.length; i++) {
+      const norm = msgs[i].role === 'tool' ? 'user' : msgs[i].role;
+      const prev = i === 0 ? null : (msgs[i - 1].role === 'tool' ? 'user' : msgs[i - 1].role);
+      if (norm === 'assistant' && prev !== 'assistant') out.push(i);
+    }
+    return out;
+  };
+
+  // Automatic token-pressure compaction (§2.11): fold the MIDDLE — keep the first `keepHeadTurns` turns
+  // (initial context) and the last `keepRecentTurns` turns (the live working set) — when measured context
+  // pressure crosses the ceiling. Reuses foldRange's validated machinery.
+  const autoCompact = async (/** @type {any[]} */ msgs, /** @type {any} */ ctx) => {
+    if (!auto || !ctx || !ctx.usage) return false;
+    const used = ctx.usage.inputTokens || 0;
+    if (!(used / auto.ceilingTokens > auto.triggerAt)) return false;
+    const starts = turnStarts(msgs);
+    if (starts.length < auto.keepHeadTurns + auto.keepRecentTurns + 1) return false; // too little to fold
+    const from = starts[auto.keepHeadTurns];
+    const to = starts[starts.length - auto.keepRecentTurns];
+    if (to == null || to <= from) return false;
+    const label = `auto:${autoSeq++}`;
+    const folded = await foldRange(msgs, ctx, label, from, to, auto.strategy, undefined);
+    if (folded) onNote(`[stash] auto-compaction fired at ${used}/${auto.ceilingTokens} tokens (>${auto.triggerAt}) — folded ${to - from} turns as "${label}".`);
+    return folded;
+  };
+
   /**
    * The trim seam (loop.js:487): drains queued intents against the LIVE canonical transcript each round,
    * at a clean round boundary. Mutates `msgs` in place and returns it. Fail-open per the trim contract:
@@ -215,41 +295,10 @@ function createStashSkill(options = {}) {
       } else if (op.action === 'compact') {
         const anchorMsg = anchors.get(op.label);
         const at = anchorMsg == null ? -1 : msgs.indexOf(anchorMsg);
-        const from = anchorMsg === null ? 0 : at + 1;
         if (anchorMsg !== null && at < 0) { anchors.delete(op.label); continue; } // anchor already folded
-        const span = msgs.slice(from);
-        if (!span.length) { anchors.delete(op.label); continue; }
+        const from = anchorMsg === null ? 0 : at + 1;
         anchors.delete(op.label);
-
-        let note;
-        if (op.strategy === 'summarize') {
-          let summary = '';
-          if (ctx && typeof ctx.summarize === 'function') {
-            try { summary = await ctx.summarize(span); }
-            catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] summarize failed for "${op.label}": ${err && err.message}`); }
-          }
-          if (summary) {
-            parked.set(op.label, { backend: 'summary', id: idFor(op.label) }); // lossy: nothing verbatim retained
-            note = `Compacted "${op.label}" (${span.length} turns, summarized; not restorable): ${summary}`;
-          } else {
-            // No summarizer (or it failed) → degrade to a lossless park rather than silently lose detail.
-            onNote(`[stash] 'summarize' for "${op.label}" has no ctx.summarize — parked verbatim (lossless) instead.`);
-            park(ctx, op.label, JSON.stringify(span));
-            note = `Compacted "${op.label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
-          }
-        } else { // 'stash' — lossless
-          park(ctx, op.label, JSON.stringify(span));
-          note = `Compacted "${op.label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
-        }
-
-        msgs.length = from;                 // EVICT the span
-        msgs.push(...noteMessages(note));   // leave a provider-safe inline breadcrumb (pair)
-
-        if (op.reason && ctx && typeof ctx.remember === 'function') {
-          try { await ctx.remember(`${keyPrefix}episode:${op.label}`, op.reason, { kind: 'episode' }); }
-          catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] episode stance write failed for "${op.label}": ${err && err.message}`); }
-        }
-        enforceBackstop(ctx);
+        await foldRange(msgs, ctx, op.label, from, msgs.length, op.strategy || defaultStrategy, op.reason); // on-demand: anchor→now
       } else if (op.action === 'restore') {
         const handle = parked.get(op.label);
         if (handle && handle.backend === 'summary') {
@@ -263,6 +312,8 @@ function createStashSkill(options = {}) {
         if (Array.isArray(span)) msgs.push(...span); // verbatim re-append (whole rounds → still valid)
       }
     }
+    // After on-demand intents, fire the automatic token-pressure fold if the ceiling is crossed (§2.11).
+    if (auto) await autoCompact(msgs, ctx);
     return msgs;
   };
 

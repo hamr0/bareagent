@@ -201,6 +201,79 @@ describe('createStashSkill — end-to-end fold through a real Loop', () => {
   });
 });
 
+describe('createStashSkill — auto-compaction (Module 4, token pressure §2.11)', () => {
+  // A transcript of N whole tool-rounds: user, then (assistant[tool_call] + tool_result) × N.
+  const transcript = (n) => {
+    const msgs = [{ role: 'user', content: 'initial task — keep this head context' }];
+    for (let k = 0; k < n; k++) {
+      msgs.push({ role: 'assistant', content: null, tool_calls: [{ id: `t${k}`, type: 'function', function: { name: 'work', arguments: '{}' } }] });
+      msgs.push({ role: 'tool', tool_call_id: `t${k}`, content: `result ${k}` });
+    }
+    return msgs;
+  };
+
+  it('is OPT-IN: no compaction config (or no ceiling) → never auto-folds', async () => {
+    const ctx = fakeCtx();
+    const { trim } = createStashSkill(); // no compaction
+    const msgs = transcript(8);
+    ctx.usage = { inputTokens: 999999 };
+    const before = msgs.length;
+    await trim(msgs, ctx);
+    assert.equal(msgs.length, before, 'unset ceiling → auto-trigger off (no guessed window)');
+  });
+
+  it('folds the MIDDLE when measured usage crosses the ceiling, keeping head + recent tail (both invariants hold)', async () => {
+    const ctx = fakeCtx();
+    const { trim, restoreHandles } = createStashSkill({ compaction: { ceilingTokens: 1000, triggerAt: 0.7, strategy: 'stash', keepHeadTurns: 1, keepRecentTurns: 3 } });
+    const msgs = transcript(8);
+    const head = JSON.stringify(msgs[0]);
+    const tailLast = JSON.stringify(msgs[msgs.length - 1]);
+    ctx.usage = { inputTokens: 800 }; // 800/1000 = 0.8 > 0.7 → fires
+    await trim(msgs, ctx);
+    assert.ok(msgs.length < 17, `middle folded (was 17, now ${msgs.length})`);
+    assert.equal(JSON.stringify(msgs[0]), head, 'head context preserved');
+    assert.equal(JSON.stringify(msgs[msgs.length - 1]), tailLast, 'most-recent turn preserved');
+    assert.deepEqual(structuralErrors(msgs), [], 'no orphaned tool pairs after a middle fold');
+    assert.deepEqual(alternationErrors(msgs), [], 'alternation valid after a middle fold');
+    assert.ok(restoreHandles().some(l => l.startsWith('auto:')), 'the folded middle is parked (restorable)');
+  });
+
+  it('does not fire below the trigger fraction', async () => {
+    const ctx = fakeCtx();
+    const { trim } = createStashSkill({ compaction: { ceilingTokens: 1000, triggerAt: 0.7, strategy: 'stash' } });
+    const msgs = transcript(8);
+    ctx.usage = { inputTokens: 500 }; // 0.5 < 0.7
+    const before = msgs.length;
+    await trim(msgs, ctx);
+    assert.equal(msgs.length, before, 'below threshold → no fold');
+  });
+
+  it('fires end-to-end through a real Loop (Loop publishes ctx.usage → trim reads it)', async () => {
+    const ctx = fakeCtx();
+    const skills = new SkillRegistry();
+    const { skill, trim, restoreHandles } = createStashSkill({ compaction: { ceilingTokens: 100, triggerAt: 0.7, strategy: 'stash', keepHeadTurns: 1, keepRecentTurns: 2 } });
+    skills.register(skill);
+    const work = { name: 'work', description: 'w', parameters: { type: 'object', properties: {} }, execute: async () => ({ ok: true }) };
+    const tools = () => [...skills.activeTools(), work];
+    let n = 0;
+    const provider = {
+      name: 'mock', model: 'fake',
+      async generate(_m, t) {
+        if (!t || !t.length) return { text: 'g', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+        n++;
+        const usage = { inputTokens: 200, outputTokens: 1 }; // always above the 100*0.7 ceiling
+        if (n >= 7) return { text: 'done', toolCalls: [], usage };
+        return { text: '', toolCalls: [{ id: `c${n}`, name: 'work', arguments: {} }], usage };
+      },
+    };
+    const result = await new Loop({ provider, trim }).run([{ role: 'user', content: 'go' }], tools, { ctx });
+    assert.equal(result.error, null);
+    assert.deepEqual(structuralErrors(result.msgs), [], 'transcript valid end-to-end despite auto-folds');
+    assert.deepEqual(alternationErrors(result.msgs), [], 'alternation valid end-to-end');
+    assert.ok(restoreHandles().some(l => l.startsWith('auto:')), 'auto-compaction fired during the run');
+  });
+});
+
 describe('createStashSkill — backstop', () => {
   it('evicts the oldest distinct label past maxLabels, visibly', async () => {
     const notes = [];

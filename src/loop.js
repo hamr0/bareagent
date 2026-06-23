@@ -530,6 +530,14 @@ class Loop {
       }
 
       lastUsage = result.usage || lastUsage;
+      // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
+      // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
+      // pressure on the NEXT round's trim. Symmetric with lending ctx.summarize; the Loop stays unaware of
+      // the consumer. A frozen/sealed ctx simply doesn't get it (reported, never fatal).
+      if (ctx && typeof ctx === 'object') {
+        try { Object.defineProperty(ctx, 'usage', { value: lastUsage, enumerable: false, configurable: true, writable: true }); }
+        catch (err) { this._reportError('usage-attach', err); }
+      }
       // Prefer the model the response reports (robust when provider.model is absent or varies per
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;
