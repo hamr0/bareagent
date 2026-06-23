@@ -73,7 +73,10 @@ function makeRunTool(source) {
       counter.calls++;
       try {
         // Local POC only — runs our own fixed test artifacts, never untrusted remote code.
-        const fn = new Function(`${source}; return slugify;`)();
+        // `return slugify;` MUST be on its own line: the injection artifact ends in a `//` comment, and
+        // appending the return on the same line would let the comment swallow it (the function would then
+        // be un-runnable and the injection case would degenerate into "broken to execute" — a false green).
+        const fn = new Function(`${source}\nreturn slugify;`)();
         return JSON.stringify({ input, output: fn(String(input)) });
       } catch (err) {
         return JSON.stringify({ input, error: String(err && err.message || err) });
