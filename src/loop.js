@@ -284,7 +284,9 @@ class Loop {
   /**
    * Run the think/act/observe loop.
    * @param {Message[]} messages - Conversation messages in OpenAI format.
-   * @param {ToolDef[]} [tools=[]] - Tool definitions with name, execute, description, parameters.
+   * @param {ToolDef[] | (() => ToolDef[])} [tools=[]] - Tool definitions, or a thunk returning them. A
+   *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
+   *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
    * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
@@ -303,23 +305,46 @@ class Loop {
     const msgs = system
       ? [{ role: 'system', content: system }, ...messages]
       : [...messages];
-    const toolMap = new Map(tools.map(t => [t.name, t]));
+    // D4 (eval-assist F2): `tools` may be a `() => ToolDef[]` thunk, re-evaluated each round so a set that
+    // grows mid-run (e.g. a skill unlocking its tools via skill_use last round) is offered to the model on
+    // the NEXT round's generate(). Loop stays skill-agnostic — it only gains the general tools-as-thunk
+    // capability, the same independence as the assemble/trim seams. A static array keeps today's exact
+    // behavior (resolved once at wire time, never changes).
+    const toolsThunk = typeof tools === 'function' ? tools : null;
+    const resolveTools = () => {
+      const list = toolsThunk ? toolsThunk() : tools;
+      if (!Array.isArray(list)) {
+        throw new Error(`[Loop] tools must be an array of ToolDef or a () => ToolDef[] thunk returning one, got ${typeof list}.`);
+      }
+      return list;
+    };
+    // A non-string description is a soft warning, not a throw — but validateTools re-runs every round for a
+    // thunk, so dedup the warning by tool name to avoid per-round log spam (warn once per offending tool/run).
+    const warnedBadDesc = new Set();
+    /** Validate a resolved tool list — wire-time contract, re-checked each round for thunks. @param {ToolDef[]} list */
+    const validateTools = (list) => {
+      for (const tool of list) {
+        if (typeof tool.name !== 'string' || !tool.name) {
+          throw new Error(`[Loop] Tool is missing a name (got ${JSON.stringify(tool.name)}). Every tool must have a non-empty string name.`);
+        }
+        if (typeof tool.execute !== 'function') {
+          throw new Error(`[Loop] Tool "${tool.name}" is missing an execute() function.`);
+        }
+        if (tool.description !== undefined && typeof tool.description !== 'string' && !warnedBadDesc.has(tool.name)) {
+          warnedBadDesc.add(tool.name);
+          console.warn(`[Loop] Tool "${tool.name}" has a non-string description — providers may ignore it.`);
+        }
+        if (tool.parameters !== undefined && (typeof tool.parameters !== 'object' || tool.parameters === null)) {
+          throw new Error(`[Loop] Tool "${tool.name}" has invalid parameters — expected an object, got ${typeof tool.parameters}.`);
+        }
+      }
+    };
 
-    // Validate tools at wire time
-    for (const tool of tools) {
-      if (typeof tool.name !== 'string' || !tool.name) {
-        throw new Error(`[Loop] Tool is missing a name (got ${JSON.stringify(tool.name)}). Every tool must have a non-empty string name.`);
-      }
-      if (typeof tool.execute !== 'function') {
-        throw new Error(`[Loop] Tool "${tool.name}" is missing an execute() function.`);
-      }
-      if (tool.description !== undefined && typeof tool.description !== 'string') {
-        console.warn(`[Loop] Tool "${tool.name}" has a non-string description — providers may ignore it.`);
-      }
-      if (tool.parameters !== undefined && (typeof tool.parameters !== 'object' || tool.parameters === null)) {
-        throw new Error(`[Loop] Tool "${tool.name}" has invalid parameters — expected an object, got ${typeof tool.parameters}.`);
-      }
-    }
+    // Resolve + validate once at wire time (this throws for a misconfigured static array OR thunk —
+    // fail-fast on setup). Per-round re-resolution for thunks happens at the top of the loop below.
+    let activeTools = resolveTools();
+    validateTools(activeTools);
+    let toolMap = new Map(activeTools.map(t => [t.name, t]));
 
     this._safeEmit({ type: 'loop:start', data: { messageCount: msgs.length } });
 
@@ -433,6 +458,24 @@ class Loop {
     for (let round = 0; round < HARD_ROUND_LIMIT; round++) {
       if (this._stopped) break;
 
+      // D4: re-evaluate the tools thunk for THIS round, so a tool unlocked last round (e.g. by skill_use)
+      // is now offered to the model. Static arrays skip this (toolsThunk === null) and keep their wire-time
+      // set. Round 0 also skips — the wire-time resolution above already produced its set, so the thunk is
+      // called exactly once per round, never twice for round 0. Fail-OPEN like the assemble/trim seams: a
+      // thunk fault degrades to the previous round's set (a tool-discovery bug must not halt the agent); a
+      // HaltError is a governance exit and propagates.
+      if (toolsThunk && round > 0) {
+        try {
+          const next = resolveTools();
+          validateTools(next);
+          activeTools = next;
+          toolMap = new Map(activeTools.map(t => [t.name, t]));
+        } catch (err) {
+          if (err instanceof HaltError) throw err;
+          this._reportError('tools', err, { round });
+        }
+      }
+
       // RT-2: destructive transcript-trim chokepoint — bound the canonical transcript before assembling
       // the window. Runs BEFORE assemble (trim shrinks canonical; assemble shapes the per-call view of
       // what remains). The trimmer harvests every evicted turn BEFORE returning the smaller set, so this
@@ -478,7 +521,7 @@ class Loop {
       let result;
       const llmStartedAt = Date.now();
       try {
-        const generate = () => this.provider.generate(toSend, tools, options);
+        const generate = () => this.provider.generate(toSend, activeTools, options);
         result = this.retry ? await this.retry.call(generate) : await generate();
       } catch (err) {
         this._reportError('provider', err, { round });
@@ -487,6 +530,14 @@ class Loop {
       }
 
       lastUsage = result.usage || lastUsage;
+      // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
+      // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
+      // pressure on the NEXT round's trim. Symmetric with lending ctx.summarize; the Loop stays unaware of
+      // the consumer. A frozen/sealed ctx simply doesn't get it (reported, never fatal).
+      if (ctx && typeof ctx === 'object') {
+        try { Object.defineProperty(ctx, 'usage', { value: lastUsage, enumerable: false, configurable: true, writable: true }); }
+        catch (err) { this._reportError('usage-attach', err); }
+      }
       // Prefer the model the response reports (robust when provider.model is absent or varies per
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;

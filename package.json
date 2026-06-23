@@ -91,7 +91,8 @@
     }
   },
   "scripts": {
-    "test": "node --test test/**/*.test.js",
+    "test": "node --test --test-force-exit test/**/*.test.js",
+    "test:unit": "node --test --test-force-exit \"test/!(integration*|*mcp*|spawn*).test.js\"",
     "typecheck": "tsc --noEmit",
     "prebuild:types": "node scripts/clean-types.js",
     "build:types": "tsc",
