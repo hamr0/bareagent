@@ -73,6 +73,21 @@ describe('Loop tools-as-thunk (D4)', () => {
     assert.equal(bonusRan, true, 'the mid-run-unlocked tool actually executed');
   });
 
+  it('resolves the thunk once per round — wire-time serves round 0, no double call', async () => {
+    let calls = 0;
+    const toolsThunk = () => { calls++; return [mkTool('a')]; };
+    const { provider } = recordingProvider([
+      { text: '', toolCalls: [{ id: 'c0', name: 'a', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } },
+      { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const loop = new Loop({ provider });
+    const result = await loop.run([{ role: 'user', content: 'hi' }], toolsThunk);
+    assert.equal(result.error, null);
+    // 2-round run (round 0 + round 1): wire-time resolution covers round 0, round 1 re-resolves → 2 calls,
+    // not 3. Guards against the round-0 double-resolution.
+    assert.equal(calls, 2);
+  });
+
   it('fail-open: a throwing thunk degrades to the previous round set and reports, run continues', async () => {
     const errors = [];
     let calls = 0;

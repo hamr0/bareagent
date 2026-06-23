@@ -318,6 +318,9 @@ class Loop {
       }
       return list;
     };
+    // A non-string description is a soft warning, not a throw — but validateTools re-runs every round for a
+    // thunk, so dedup the warning by tool name to avoid per-round log spam (warn once per offending tool/run).
+    const warnedBadDesc = new Set();
     /** Validate a resolved tool list — wire-time contract, re-checked each round for thunks. @param {ToolDef[]} list */
     const validateTools = (list) => {
       for (const tool of list) {
@@ -327,7 +330,8 @@ class Loop {
         if (typeof tool.execute !== 'function') {
           throw new Error(`[Loop] Tool "${tool.name}" is missing an execute() function.`);
         }
-        if (tool.description !== undefined && typeof tool.description !== 'string') {
+        if (tool.description !== undefined && typeof tool.description !== 'string' && !warnedBadDesc.has(tool.name)) {
+          warnedBadDesc.add(tool.name);
           console.warn(`[Loop] Tool "${tool.name}" has a non-string description — providers may ignore it.`);
         }
         if (tool.parameters !== undefined && (typeof tool.parameters !== 'object' || tool.parameters === null)) {
@@ -456,9 +460,11 @@ class Loop {
 
       // D4: re-evaluate the tools thunk for THIS round, so a tool unlocked last round (e.g. by skill_use)
       // is now offered to the model. Static arrays skip this (toolsThunk === null) and keep their wire-time
-      // set. Fail-OPEN like the assemble/trim seams: a thunk fault degrades to the previous round's set
-      // (a tool-discovery bug must not halt the agent); a HaltError is a governance exit and propagates.
-      if (toolsThunk) {
+      // set. Round 0 also skips — the wire-time resolution above already produced its set, so the thunk is
+      // called exactly once per round, never twice for round 0. Fail-OPEN like the assemble/trim seams: a
+      // thunk fault degrades to the previous round's set (a tool-discovery bug must not halt the agent); a
+      // HaltError is a governance exit and propagates.
+      if (toolsThunk && round > 0) {
         try {
           const next = resolveTools();
           validateTools(next);
