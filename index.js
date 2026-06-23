@@ -6,6 +6,7 @@ const { Evaluator } = require('./src/evaluator');
 const { refine } = require('./src/refine');
 const { assessComplexity, isCritical } = require('./src/complexity');
 const { SkillRegistry } = require('./src/skills');
+const { createStashSkill } = require('./src/stash');
 const { StateMachine } = require('./src/state');
 const { Scheduler } = require('./src/scheduler');
 const { Checkpoint } = require('./src/checkpoint');
@@ -34,6 +35,7 @@ module.exports = {
   assessComplexity,
   isCritical,
   SkillRegistry,
+  createStashSkill,
   StateMachine,
   Scheduler,
   Checkpoint,
