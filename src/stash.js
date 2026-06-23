@@ -10,25 +10,28 @@
 // THE LOAD-BEARING DESIGN (validated by poc/f2-stash-fold.mjs against a real Loop + real litectx 0.16.0):
 //   • Tool execute() receives ARGS ONLY — no `msgs`, no `ctx` (loop.js:676) — and the Loop runs on a COPY
 //     of the caller's messages (loop.js:305). So a tool CANNOT touch the live transcript directly. The
-//     tools therefore QUEUE INTENT; the work happens in `trim(msgs, ctx)` (loop.js:487) — the one seam that
-//     receives the live canonical transcript + ctx and may mutate it in place.
+//     tools QUEUE INTENT; the work happens in `trim(msgs, ctx)` (loop.js:487) — the one seam that receives
+//     the live canonical transcript + ctx and may mutate it in place.
 //   • Deferring the fold to trim is not just convenient, it is CORRECT: a synchronous fold inside execute()
 //     would capture the triggering stash_compact's own assistant-tool_calls message but NOT yet its
 //     tool-result (the Loop appends that after execute returns) — orphaning its own pair. trim runs at a
 //     clean ROUND BOUNDARY, so every fold spans whole rounds.
 //   • Anchor = an identity REFERENCE to the existing boundary message at checkpoint time — NOT an injected
-//     marker. A `system`-role marker would be hoisted out of position and clobber the system prompt on
-//     Anthropic (provider-anthropic.js:59); a bare user/assistant note breaks Anthropic's strict
-//     user/assistant alternation (no consecutive-role merging, provider-anthropic.js:127). So the lossless
-//     fold EVICTS the whole span and injects NO inline note — both the tool-pairing and the alternation
-//     invariants hold by construction. The restore handle lives in this closure (label→id), the breadcrumb
-//     rides the compact tool-result; restore re-appends the verbatim span (whole rounds → still valid).
+//     marker (a `system` marker is hoisted out of position + clobbers the system prompt on Anthropic,
+//     provider-anthropic.js:59).
+//   • TWO transcript invariants must survive a fold or real providers reject the next call: (1) every
+//     assistant tool_call has its tool_result and vice-versa; (2) strict user/assistant alternation after
+//     Anthropic normalization (provider-anthropic.js:127 does NO consecutive-role merging). The fold EVICTS
+//     whole rounds (preserves both) and, where it leaves an inline note, injects it as a self-contained
+//     `assistant(tool_call) + tool(result)` PAIR — pairing-safe and alternation-safe by construction (a
+//     bare user/assistant note would break alternation).
 //
-// Composition (D14): the lossless path uses litectx's `stash(id,text)`/`get(id)`/`evict(sel)` when a litectx
-// ctx is wired; absent it, an in-process Map keeps the run-scoped lossless guarantee (stash compaction's
-// lifetime is "within one run", §2.8 — so the Map is a faithful backend, not a lossy degrade). The stance
-// side (D13) writes a litectx `episode` via `remember` when a `reason` is given and ctx supports it.
-// Governance is unchanged: stash tools flow through the same `Loop({ policy })` chokepoint as any tool.
+// Two strategies (D10): 'stash' (lossless — verbatim parked to litectx's stash table or an in-process Map,
+// restorable byte-exact) and 'summarize' (lossy — `ctx.summarize` folds the span into an inline gist; the
+// detail is NOT retained, the smallest footprint). The note pair carries the gist ('summarize') or a
+// "restorable" breadcrumb ('stash') so the model is never left blind about what it just folded. The stance
+// side (D13) writes a litectx `episode` via `remember` when a `reason` is given. Governance is unchanged:
+// stash tools flow through the same `Loop({ policy })` chokepoint as any tool.
 
 const { ToolError } = require('./errors');
 
@@ -36,12 +39,13 @@ const { ToolError } = require('./errors');
 
 const DEFAULT_KEY_PREFIX = 'stash:';
 const DEFAULT_MAX_LABELS = 128;
+const STRATEGIES = new Set(['stash', 'summarize']);
 
 const ARG_SCHEMA = {
   type: 'object',
   properties: {
     label: { type: 'string', description: 'The sub-task label that brackets the span (set at checkpoint).' },
-    strategy: { type: 'string', description: "Compaction strategy. v1: 'stash' (lossless, restorable verbatim)." },
+    strategy: { type: 'string', description: "Compaction strategy: 'summarize' (lossy gist) or 'stash' (lossless, restorable verbatim)." },
     reason: { type: 'string', description: 'Short note on what the sub-task accomplished (recorded as the durable stance).' },
   },
   required: ['label'],
@@ -50,29 +54,29 @@ const ARG_SCHEMA = {
 const INSTRUCTIONS =
   'Keep the working context lean by folding FINISHED sub-tasks out of it:\n'
   + '• stash_checkpoint({ label }) at the START of a self-contained sub-task — plants a labeled anchor.\n'
-  + '• stash_compact({ label, reason }) once that sub-task is DONE and you will not need its step-by-step '
-  + 'detail inline again — folds everything since the checkpoint into a restorable stash (it disappears from '
-  + 'context on the next turn). Pass a short `reason` describing the outcome.\n'
-  + '• stash_restore({ label }) if you over-compacted and need the detail back verbatim.\n'
-  + 'Never compact work that is still in progress. Compaction is hygiene, not a handoff — the detail is '
-  + 'preserved and restorable, only removed from the live window.';
+  + '• stash_compact({ label, reason, strategy }) once that sub-task is DONE and you will not need its '
+  + 'step-by-step detail inline again — folds everything since the checkpoint out of context, leaving a '
+  + "short note. strategy 'summarize' (default) keeps a gist and drops the detail; 'stash' keeps the detail "
+  + 'restorable verbatim. Pass a short `reason` describing the outcome.\n'
+  + "• stash_restore({ label }) to bring a 'stash'-compacted sub-task back verbatim (a 'summarize'd one "
+  + 'cannot be restored — its detail was not retained).\n'
+  + 'Never compact work that is still in progress.';
 
 /**
  * Build the stash reference skill + the trim function that executes its folds.
  *
  * @param {Object} [options]
- * @param {'stash'} [options.defaultStrategy='stash'] - Default compaction strategy. Only 'stash' (lossless)
- *   is functional in v1; 'summarize' (lossy inline note) is deferred (its provider-safe injection — a
- *   synthetic tool_call/result pair — is designed but not yet shipped) and coerces to 'stash' with a note.
+ * @param {'summarize'|'stash'} [options.defaultStrategy='summarize'] - Strategy when the model omits one.
+ *   'summarize' (OQ5 lean / §2.11) is lossy; 'stash' is lossless. 'summarize' degrades to a lossless park
+ *   when no `ctx.summarize` is wired (loud, never a silent detail-loss).
  * @param {string} [options.keyPrefix='stash:'] - Namespace for stash/episode ids.
- * @param {number} [options.maxLabels=128] - LRU backstop on DISTINCT live labels (§2.13) — the conservative,
- *   VISIBLE cap covering the pathological ever-unique-label run. Oldest parked label is evicted past it.
+ * @param {number} [options.maxLabels=128] - LRU backstop on DISTINCT live labels (§2.13) — visible, not silent.
  * @param {(msg: string) => void} [options.onNote=console.warn] - Sink for the loud one-time/backstop notes.
  * @returns {{ skill: { name: string, description: string, instructions: string, tools: ToolDef[] }, trim: (msgs: any[], ctx: any) => Promise<any[]>, restoreHandles: () => string[] }}
  */
 function createStashSkill(options = {}) {
   const {
-    defaultStrategy = 'stash',
+    defaultStrategy = 'summarize',
     keyPrefix = DEFAULT_KEY_PREFIX,
     maxLabels = DEFAULT_MAX_LABELS,
     onNote = (/** @type {string} */ msg) => console.warn(msg),
@@ -80,23 +84,32 @@ function createStashSkill(options = {}) {
 
   /** @type {Map<string, any>} label → identity-ref to the boundary message (the anchor). */
   const anchors = new Map();
-  /** @type {Map<string, { backend: 'ctx'|'local', id: string }>} label → restore handle. */
+  /** @type {Map<string, { backend: 'ctx'|'local'|'summary', id: string }>} label → restore handle. */
   const parked = new Map();
   /** @type {Map<string, string>} id → parked JSON, the in-process lossless backend (no litectx). */
   const local = new Map();
   /** @type {Array<{ action: string, label: string, strategy?: string, reason?: string }>} intent queue. */
   const pending = [];
   let warnedNoStash = false;
+  let noteSeq = 0;
 
   const idFor = (/** @type {string} */ label) => `${keyPrefix}${label}`;
   const hasCheckpoint = (/** @type {string} */ label) =>
     anchors.has(label) || pending.some(p => p.action === 'checkpoint' && p.label === label);
 
-  /** Validate the model-supplied label; throw a model-facing ToolError on a bad one. */
   const requireLabel = (/** @type {string} */ label, /** @type {string} */ tool) => {
-    if (typeof label !== 'string' || !label) {
-      throw new ToolError(`[${tool}] requires a non-empty string "label".`);
-    }
+    if (typeof label !== 'string' || !label) throw new ToolError(`[${tool}] requires a non-empty string "label".`);
+  };
+
+  // A provider-safe inline note: a self-contained assistant(tool_call)+tool(result) PAIR. Bare user/
+  // assistant notes break Anthropic's strict alternation; this pair satisfies both pairing and alternation
+  // by construction when it follows a tool-result (user) boundary — which the checkpoint anchor always is.
+  const noteMessages = (/** @type {string} */ text) => {
+    const id = `${keyPrefix}note:${noteSeq++}`;
+    return [
+      { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'context_compacted', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: id, content: text },
+    ];
   };
 
   // Tools — they only QUEUE intent (args-only signature); trim does the transcript work next round.
@@ -114,17 +127,16 @@ function createStashSkill(options = {}) {
   /** @type {ToolDef} */
   const compactTool = {
     name: 'compact',
-    description: 'Fold everything since the matching checkpoint out of the live context (restorable verbatim).',
+    description: 'Fold everything since the matching checkpoint out of the live context, leaving a short note.',
     parameters: ARG_SCHEMA,
     execute: async ({ label, strategy, reason } = {}) => {
       requireLabel(label, 'stash_compact');
       if (!hasCheckpoint(label)) {
         throw new ToolError(`[stash_compact] no checkpoint for "${label}" — call stash_checkpoint({ label: "${label}" }) first.`);
       }
-      let used = strategy || defaultStrategy;
-      if (used !== 'stash') {
-        onNote(`[stash] strategy "${used}" is not available in v1 — using lossless "stash" for "${label}".`);
-        used = 'stash';
+      const used = strategy || defaultStrategy;
+      if (!STRATEGIES.has(used)) {
+        throw new ToolError(`[stash_compact] strategy must be 'summarize' (lossy) or 'stash' (lossless); got "${used}".`);
       }
       pending.push({ action: 'compact', label, strategy: used, reason });
       return { label, strategy: used, status: 'compaction scheduled' };
@@ -133,7 +145,7 @@ function createStashSkill(options = {}) {
   /** @type {ToolDef} */
   const restoreTool = {
     name: 'restore',
-    description: 'Rehydrate a previously compacted sub-task verbatim into the live context.',
+    description: "Rehydrate a 'stash'-compacted sub-task verbatim into the live context.",
     parameters: ARG_SCHEMA,
     execute: async ({ label } = {}) => {
       requireLabel(label, 'stash_restore');
@@ -167,7 +179,8 @@ function createStashSkill(options = {}) {
       const item = ctx && typeof ctx.get === 'function' ? ctx.get(handle.id) : null;
       return item && typeof item.text === 'string' ? item.text : null;
     }
-    return local.get(handle.id) ?? null;
+    if (handle.backend === 'local') return local.get(handle.id) ?? null;
+    return null; // 'summary' — lossy, no verbatim retained
   };
 
   // LRU backstop on distinct live labels (§2.13) — visible, never silent.
@@ -177,7 +190,7 @@ function createStashSkill(options = {}) {
       const handle = parked.get(oldest);
       if (handle) {
         if (handle.backend === 'ctx') { if (ctx && typeof ctx.evict === 'function') { try { ctx.evict(handle.id); } catch { /* best-effort */ } } }
-        else local.delete(handle.id);
+        else if (handle.backend === 'local') local.delete(handle.id);
       }
       parked.delete(oldest);
       onNote(`[stash] label backstop (${maxLabels}) exceeded — evicted oldest stash "${oldest}".`);
@@ -187,8 +200,8 @@ function createStashSkill(options = {}) {
   /**
    * The trim seam (loop.js:487): drains queued intents against the LIVE canonical transcript each round,
    * at a clean round boundary. Mutates `msgs` in place and returns it. Fail-open per the trim contract:
-   * a HaltError from a litectx write-gate propagates; anything else is contained so a hygiene bug never
-   * halts the agent.
+   * a HaltError (e.g. a litectx write-gate deny) propagates; anything else is contained so a hygiene bug
+   * never halts the agent.
    * @param {any[]} msgs
    * @param {any} ctx
    * @returns {Promise<any[]>}
@@ -198,33 +211,56 @@ function createStashSkill(options = {}) {
       const op = pending.shift();
       if (!op) break;
       if (op.action === 'checkpoint') {
-        // Anchor on the current last message — a round boundary at trim time. Identity-ref so later folds
-        // that reindex the transcript never invalidate it. null only if the transcript is somehow empty.
         anchors.set(op.label, msgs.length ? msgs[msgs.length - 1] : null);
       } else if (op.action === 'compact') {
         const anchorMsg = anchors.get(op.label);
-        const at = anchorMsg === null ? -1 : (anchorMsg === undefined ? -2 : msgs.indexOf(anchorMsg));
-        // anchorMsg === null → checkpoint at an empty transcript → fold from the start (from = 0).
-        // at === -1 (not found) → anchor already folded by an earlier compaction → no-op.
+        const at = anchorMsg == null ? -1 : msgs.indexOf(anchorMsg);
         const from = anchorMsg === null ? 0 : at + 1;
-        if (anchorMsg !== null && at < 0) { anchors.delete(op.label); continue; }
+        if (anchorMsg !== null && at < 0) { anchors.delete(op.label); continue; } // anchor already folded
         const span = msgs.slice(from);
         if (!span.length) { anchors.delete(op.label); continue; }
-        park(ctx, op.label, JSON.stringify(span));     // lossless: verbatim → litectx stash table or Map
-        msgs.length = from;                            // EVICT the span; no inline note (alternation-safe)
         anchors.delete(op.label);
-        // Stance (D13): record what the sub-task became as a durable, upsert-by-key litectx episode.
+
+        let note;
+        if (op.strategy === 'summarize') {
+          let summary = '';
+          if (ctx && typeof ctx.summarize === 'function') {
+            try { summary = await ctx.summarize(span); }
+            catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] summarize failed for "${op.label}": ${err && err.message}`); }
+          }
+          if (summary) {
+            parked.set(op.label, { backend: 'summary', id: idFor(op.label) }); // lossy: nothing verbatim retained
+            note = `Compacted "${op.label}" (${span.length} turns, summarized; not restorable): ${summary}`;
+          } else {
+            // No summarizer (or it failed) → degrade to a lossless park rather than silently lose detail.
+            onNote(`[stash] 'summarize' for "${op.label}" has no ctx.summarize — parked verbatim (lossless) instead.`);
+            park(ctx, op.label, JSON.stringify(span));
+            note = `Compacted "${op.label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
+          }
+        } else { // 'stash' — lossless
+          park(ctx, op.label, JSON.stringify(span));
+          note = `Compacted "${op.label}" (${span.length} turns) — restorable verbatim via stash_restore.`;
+        }
+
+        msgs.length = from;                 // EVICT the span
+        msgs.push(...noteMessages(note));   // leave a provider-safe inline breadcrumb (pair)
+
         if (op.reason && ctx && typeof ctx.remember === 'function') {
           try { await ctx.remember(`${keyPrefix}episode:${op.label}`, op.reason, { kind: 'episode' }); }
           catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] episode stance write failed for "${op.label}": ${err && err.message}`); }
         }
         enforceBackstop(ctx);
       } else if (op.action === 'restore') {
+        const handle = parked.get(op.label);
+        if (handle && handle.backend === 'summary') {
+          msgs.push(...noteMessages(`Cannot restore "${op.label}" verbatim — it was compacted with the lossy 'summarize' strategy.`));
+          continue;
+        }
         const json = rehydrate(ctx, op.label);
         if (json == null) { onNote(`[stash] restore "${op.label}": nothing parked (or backend lost it).`); continue; }
         let span;
         try { span = JSON.parse(json); } catch { onNote(`[stash] restore "${op.label}": parked payload was not valid JSON.`); continue; }
-        if (Array.isArray(span)) msgs.push(...span);   // verbatim re-append (whole rounds → still valid)
+        if (Array.isArray(span)) msgs.push(...span); // verbatim re-append (whole rounds → still valid)
       }
     }
     return msgs;
@@ -232,7 +268,7 @@ function createStashSkill(options = {}) {
 
   const skill = {
     name: 'stash',
-    description: 'Compact finished sub-tasks to keep the live context window lean (restorable verbatim).',
+    description: 'Compact finished sub-tasks to keep the live context window lean.',
     instructions: INSTRUCTIONS,
     tools: [checkpointTool, compactTool, restoreTool],
   };
