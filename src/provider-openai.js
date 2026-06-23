@@ -73,10 +73,26 @@ class OpenAIProvider {
         arguments: JSON.parse(tc.function.arguments),
       })),
       model: data.model || this.model,
-      usage: {
-        inputTokens: data.usage?.prompt_tokens || 0,
-        outputTokens: data.usage?.completion_tokens || 0,
-      },
+      usage: this._normalizeUsage(data.usage),
+    };
+  }
+
+  /**
+   * Normalize OpenAI usage to the neutral {@link Usage} shape. OpenAI auto-caches prompt prefixes
+   * (>=1024 tokens) and reports the cached portion in `prompt_tokens_details.cached_tokens` —
+   * crucially, `prompt_tokens` INCLUDES those cached tokens, so we subtract them to get the uncached
+   * remainder (else the cached tokens are double-counted and priced at the full input rate, a ~2x
+   * over-charge on a warm prompt). OpenAI has no separate cache-write tier → cacheCreationTokens 0.
+   * @param {any} u - raw `data.usage`
+   * @returns {import('../types').Usage}
+   */
+  _normalizeUsage(u) {
+    const cacheRead = u?.prompt_tokens_details?.cached_tokens || 0;
+    return {
+      inputTokens: Math.max(0, (u?.prompt_tokens || 0) - cacheRead),
+      outputTokens: u?.completion_tokens || 0,
+      cacheReadTokens: cacheRead,
+      cacheCreationTokens: 0,
     };
   }
 

@@ -9,7 +9,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 |-----------|------|---------|
 | Loop | src/loop.js | Core think/act/observe cycle (throwOnError: true, cost estimation, `policy(tool, args, ctx)` chokepoint for bareguard adapter, `assemble(msgs, ctx)` context-assembly chokepoint for a CE library [RT-1: returns a view, transcript untouched, fail-open, HaltError propagates; `src/context-units.js` `unitAssembler` adapts it to the neutral-unit verb `assemble(units, ctx)`], `trim(msgs, ctx)` DESTRUCTIVE transcript-bound chokepoint [RT-2: runs before assemble, evicts old turns AFTER harvest, mutates canonical msgs, fail-open, HaltError propagates; `unitTrimmer`/`harvestKey` wrap litectx's `trim` verb (≥0.16.0) for harvest-before-evict + F2 residual `.flush`], fail-safe verdict, unified `loop:error`+`onError` for every silent-ish failure). Internal `HARD_ROUND_LIMIT = 100` safety net only — real bounds come from bareguard `limits.maxTurns` |
 | Planner | src/planner.js | Goal -> step DAG via LLM structured output |
-| assessComplexity | src/complexity.js | Pure-code (no-LLM) pre-planner: classifies a goal simple/medium/complex/critical from text alone via tiered keyword scoring + a critical safety override (security/production/compliance/financial). Returns `{level, score, needsPlanning, signals}` — `needsPlanning` gates whether to invoke Planner; `critical` flags work for extra scrutiny. Concept-port of Aurora's SOAR keyword assessor (~89% on its corpus) |
+| assessComplexity | src/complexity.js | Pure-code (no-LLM) pre-planner: classifies a goal simple/medium/complex/critical from text alone via tiered keyword scoring + a critical safety override (security/production/compliance/financial). Returns `{level, score, needsPlanning, signals}` — `needsPlanning` gates whether to invoke Planner; `critical` flags work for extra scrutiny. Concept-port of Aurora's SOAR keyword assessor (~89% on its corpus). **FROZEN** (eval-assist F4): don't extend the keyword lists. `isCritical(goal)` exports the durable critical-safety floor standalone (gates adversarial verification without the scorer) |
 | runPlan | src/run-plan.js | Execute step DAG with wave-based parallelism |
 | StateMachine | src/state.js | Task lifecycle (pending/running/done/failed/waiting/cancelled) |
 | Scheduler | src/scheduler.js | Time-triggered turns (cron + relative) |
@@ -25,7 +25,7 @@ Node.js >= 18, pure JS + JSDoc, `node:test` for testing. Flat `src/` layout with
 | Spawn | tools/spawn.js | Fork child bareagent (`bin/cli.js --config`). LLM-callable blocks; library `spawnChild` returns handle. One JSONL channel per child (stderr re-emitted as `child:stderr`). Threads BAREGUARD env vars; bareguard 0.2+ caps per-family via `spawn.ratePerMinute` + `limits.maxDepth`. `timeoutMs` = wall-clock ceiling; opt-in `idleTimeoutMs` = heartbeat watchdog (kills a child silent on both stdio for N ms; resets per line, so slow-but-working children survive — result carries `idleKilled`) |
 | Defer | tools/defer.js | Append `{id, action, when}` to JSONL queue for an external waker (cron + `examples/wake.sh`) to fire later. Two-phase gov: emit-time gate.check on `defer` action; fire-time gate.check on inner action. bareguard 0.2+ caps via `defer.ratePerMinute` |
 
-Providers: OpenAI, Anthropic, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`
+Providers: OpenAI, Anthropic, Gemini, Ollama, CLIPipe, Fallback -- each in `src/provider-*.js`. All normalize `usage` to one neutral shape incl. prompt-cache tiers (`cacheReadTokens`/`cacheCreationTokens`; `inputTokens` = uncached remainder). Gemini is native `generateContent` (its OpenAI-compat endpoint drops the cache tier). Anthropic has opt-in `cacheSystem` (cache_control) + `baseUrl`. Loop returns `result.metrics` (the meter: cumulative 4-tier tokens, byTool, costUsd null-not-zero, unpricedRounds, spawned, context.{compactions,summaries}) — `estimateCost` prices the 4 tiers separately. The §3.6 CE rollup ships only its sourceable subset (compactions/summaries/spawned, derived from existing Stream events); tokensTrimmed + memory.* are deferred to F2
 Stores: SQLiteStore (peer dep: better-sqlite3), JsonFileStore (zero deps) -- each in `src/store-*.js`
 Tools: BrowsingTools (tools/browse.js, optional dep: barebrowse) — library tools for inline snapshots, CLI session (`npx barebrowse`) for token-efficient disk-based browsing
 Tools: MobileTools (tools/mobile.js, optional dep: baremobile) — Android + iOS device control via snapshot/tap/type pattern
@@ -35,7 +35,7 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 
 | Entry point | Contents |
 |-------------|----------|
-| `bare-agent` | Components + error classes + CircuitBreaker + wireGate |
+| `bare-agent` | Components (incl. `assessComplexity`, `isCritical`) + error classes + CircuitBreaker + wireGate |
 | `bare-agent/providers` | All providers including Fallback |
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
@@ -75,3 +75,7 @@ Source is pure JS + JSDoc; `.d.ts` are generated (git-ignored, shipped on publis
 
 For full development and testing standards, see `.claude/memory/AGENT_RULES.md`.
 For detailed docs, see `docs/KNOWLEDGE_BASE.md`.
+
+<!-- MEMORY:START -->
+@.claude/memory/MEMORY.md
+<!-- MEMORY:END -->

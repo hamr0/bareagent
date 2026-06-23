@@ -16,6 +16,15 @@
  * and two calibrated thresholds. It is a heuristic — transparent and debuggable via `signals`, not
  * a model. On the upstream validation corpus it lands ~89% (the fuller LLM-free original ~95%);
  * the gap is long-tail ambiguity ("add a button" is genuinely context-dependent).
+ *
+ * FROZEN (eval-assist Feature 4, do not re-litigate). The 3-tier scorer is deletable scaffolding —
+ * the exact input-side routing a stronger model does better — so it is kept optional but NOT grown:
+ * **do not extend the keyword lists or add tiers.** The durable half is the deterministic critical
+ * override (`isCritical`), a safety FLOOR for high-stakes work (security/production/compliance/
+ * financial), exported standalone so a consumer can gate adversarial verification on it (the
+ * Evaluator, Feature 1) without the scorer. Adding critical keywords reopens the same treadmill the
+ * scorer froze, so the override list is frozen too. Input-side LLM subgoal-decomposition is a
+ * deliberate NO-BUILD (mechanical anchoring + cascading errors); the Planner is the durable form.
  */
 
 const has = (/** @type {Set<string>} */ words, /** @type {Set<string>} */ set) =>
@@ -35,8 +44,12 @@ const CRIT_ACTIONS = ['fix', 'patch', 'investigate', 'secure', 'protect', 'mitig
 const FINANCIAL = ['payment', 'transaction', 'billing', 'financial'];
 const SECURE_ACTS = ['encrypt', 'secure', 'protect', 'audit'];
 
-/** @param {string} s lowercased prompt */
-function isCritical(s) {
+/**
+ * Internal: the critical override over an already-lowercased string. Public callers use
+ * {@link isCritical}, which normalizes first; `assessComplexity` calls this on its lowered text.
+ * @param {string} s lowercased prompt
+ */
+function isCriticalLower(s) {
   if (hasAny(s, CRIT_INCIDENT) || hasAny(s, CRIT_COMPLIANCE)) return true;
   if (hasAny(s, SEC_CONTEXT) && hasAny(s, CRIT_ACTIONS)) return true;     // e.g. "fix security ..."
   if (hasAny(s, FINANCIAL) && hasAny(s, SECURE_ACTS)) return true;        // e.g. "encrypt payment ..."
@@ -83,7 +96,7 @@ function assessComplexity(prompt) {
   }
   const text = prompt.trim().slice(0, MAX_ASSESS_LEN);
   const lower = text.toLowerCase();
-  if (isCritical(lower)) {
+  if (isCriticalLower(lower)) {
     return { level: 'critical', score: 100, needsPlanning: true, signals: ['critical_override'] };
   }
 
@@ -146,4 +159,20 @@ function assessComplexity(prompt) {
   return { level, score, needsPlanning: level !== 'simple', signals };
 }
 
-module.exports = { assessComplexity };
+/**
+ * The durable critical-safety floor, standalone. Returns `true` when a goal touches high-stakes
+ * work (security/production/compliance/financial incidents, or a securing action on a sensitive
+ * domain) — the same deterministic override `assessComplexity` applies, exported on its own so a
+ * consumer can gate extra scrutiny (e.g. the Evaluator's adversarial verification, Feature 1)
+ * WITHOUT pulling in the frozen 3-tier scorer. Deterministic, auditable, testable — not a
+ * capability estimate. Normalizes input (trims, length-caps, lowercases) then applies the override;
+ * non-string / blank input is `false`.
+ * @param {string} prompt - The goal to test.
+ * @returns {boolean}
+ */
+function isCritical(prompt) {
+  if (typeof prompt !== 'string' || !prompt.trim()) return false;
+  return isCriticalLower(prompt.trim().slice(0, MAX_ASSESS_LEN).toLowerCase());
+}
+
+module.exports = { assessComplexity, isCritical };

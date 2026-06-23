@@ -7,6 +7,7 @@ const { ToolError, HaltError } = require('./errors');
 /** @typedef {import('../types').ToolDef} ToolDef */
 /** @typedef {import('../types').ToolCall} ToolCall */
 /** @typedef {import('../types').Usage} Usage */
+/** @typedef {import('../types').RunMetrics} RunMetrics */
 /** @typedef {import('../types').GenerateResult} GenerateResult */
 /** @typedef {import('../types').Store} Store */
 /** @typedef {import('./checkpoint').Checkpoint} Checkpoint */
@@ -52,24 +53,36 @@ const { ToolError, HaltError } = require('./errors');
  */
 
 // Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
-// Last updated: 2026-05-18. Source: public provider pricing pages.
-/** @type {Record<string, {in: number, out: number}>} */
+// Last updated: 2026-06-22. Source: public provider pricing pages (Anthropic rates + cache multipliers
+// cross-checked against the claude-api reference). Rates are USD per 1K tokens. `cacheReadMult` /
+// `cacheWriteMult` are multipliers ON the input rate for the two cache tiers (see estimateCost); when
+// omitted they default to Anthropic's convention (read 0.1×, write 1.25×). OpenAI/Gemini have no
+// cache-WRITE surcharge (their providers report cacheCreationTokens=0), so only cacheReadMult matters
+// there. NOTE: OpenAI's cached discount is ~0.5× on the 4o family; some newer models (4.1/o-series) are
+// ~0.25× — set to 0.5× here as the documented general value; refine per-model against current pricing.
+/** @type {Record<string, {in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}>} */
 const COST_PER_1K = {
-  // OpenAI
-  'gpt-4o': { in: 0.0025, out: 0.01 },
-  'gpt-4o-mini': { in: 0.00015, out: 0.0006 },
-  'gpt-4.1': { in: 0.002, out: 0.008 },
-  'gpt-4.1-mini': { in: 0.0004, out: 0.0016 },
-  'gpt-4.1-nano': { in: 0.0001, out: 0.0004 },
-  'o3-mini': { in: 0.0011, out: 0.0044 },
-  // Anthropic — Claude 4.x current generation (2026-05)
-  'claude-opus-4-7': { in: 0.015, out: 0.075 },
+  // OpenAI — cached input ~0.5× (no write tier)
+  'gpt-4o': { in: 0.0025, out: 0.01, cacheReadMult: 0.5 },
+  'gpt-4o-mini': { in: 0.00015, out: 0.0006, cacheReadMult: 0.5 },
+  'gpt-4.1': { in: 0.002, out: 0.008, cacheReadMult: 0.5 },
+  'gpt-4.1-mini': { in: 0.0004, out: 0.0016, cacheReadMult: 0.5 },
+  'gpt-4.1-nano': { in: 0.0001, out: 0.0004, cacheReadMult: 0.5 },
+  'o3-mini': { in: 0.0011, out: 0.0044, cacheReadMult: 0.5 },
+  // Anthropic — Claude current generation (2026-06). Cache tiers use the default 0.1×/1.25×.
+  'claude-fable-5': { in: 0.01, out: 0.05 },
+  'claude-opus-4-8': { in: 0.005, out: 0.025 },
+  'claude-opus-4-7': { in: 0.005, out: 0.025 },
+  'claude-opus-4-6': { in: 0.005, out: 0.025 },
   'claude-sonnet-4-6': { in: 0.003, out: 0.015 },
-  'claude-haiku-4-5-20251001': { in: 0.0008, out: 0.004 },
-  'claude-haiku-4-5': { in: 0.0008, out: 0.004 },
-  // Anthropic — earlier 4.x snapshots
+  'claude-haiku-4-5-20251001': { in: 0.001, out: 0.005 },
+  'claude-haiku-4-5': { in: 0.001, out: 0.005 },
+  // Anthropic — earlier snapshots (the original Opus 4 / Sonnet 4 generation, genuinely different rates)
   'claude-sonnet-4-20250514': { in: 0.003, out: 0.015 },
   'claude-opus-4-20250514': { in: 0.015, out: 0.075 },
+  // Google Gemini — cached content ~0.25× (no write tier). Native provider lands in a following piece.
+  'gemini-2.5-flash': { in: 0.0003, out: 0.0025, cacheReadMult: 0.25 },
+  'gemini-2.5-pro': { in: 0.00125, out: 0.01, cacheReadMult: 0.25 },
   // Fallback average across popular models (~$0.002 in, ~$0.008 out per 1K)
   '_default': { in: 0.002, out: 0.008 },
 };
@@ -105,6 +118,11 @@ function sealDanglingToolCalls(msgs, rule) {
 }
 
 /**
+ * Estimate the USD cost of one round's usage, pricing the FOUR token tiers separately (D9/L7):
+ * uncached input, output, cache-read, and cache-creation. Folding cache tokens into the full input
+ * rate mis-prices badly — a warm prompt is mostly cache-read (~0.1–0.5× input) and Anthropic's
+ * cache-creation is a ~1.25× premium — so each tier gets its own rate. Returns null (not 0) when the
+ * model is unknown/absent so the caller can mark the round `unpriced` rather than silently free.
  * @param {string|null} model
  * @param {Usage|null} usage
  * @returns {number|null}
@@ -112,10 +130,14 @@ function sealDanglingToolCalls(msgs, rule) {
 function estimateCost(model, usage) {
   if (!usage || !model) return null;
   const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
+  const readMult = rates.cacheReadMult ?? 0.1;    // Anthropic convention when unspecified
+  const writeMult = rates.cacheWriteMult ?? 1.25;
   return (
-    ((usage.inputTokens || 0) * rates.in +
-      (usage.outputTokens || 0) * rates.out) / 1000
-  );
+    (usage.inputTokens || 0) * rates.in +
+    (usage.outputTokens || 0) * rates.out +
+    (usage.cacheReadTokens || 0) * rates.in * readMult +
+    (usage.cacheCreationTokens || 0) * rates.in * writeMult
+  ) / 1000;
 }
 
 // R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
@@ -264,7 +286,7 @@ class Loop {
    * @param {Message[]} messages - Conversation messages in OpenAI format.
    * @param {ToolDef[]} [tools=[]] - Tool definitions with name, execute, description, parameters.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[]}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -304,6 +326,47 @@ class Loop {
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
 
+    // The meter (Feature 3): bareagent is the canonical run counter. Accumulates across rounds and is
+    // returned as `result.metrics`. `tokens` is CUMULATIVE over all four tiers (fixes the last-round-only
+    // `result.usage` bug — result.usage stays last-round for back-compat; metrics.tokens is the run total).
+    // `costUsd` is the priced cumulative (null only if NOTHING could be priced — the explicit-unknown
+    // signal, distinct from a genuine 0); `unpricedRounds` makes an unenforceable-on-budget run visible.
+    const meterStartedAt = Date.now();
+    let pricedAny = false;
+    const metrics = {
+      turns: 0,
+      toolCalls: 0,
+      /** @type {Record<string, number>} */
+      byTool: {},
+      tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      unpricedRounds: 0,
+      // §3.6 CE-activity rollup — convenience counts derived in-place from the same events already
+      // on the Stream (loop:trim, loop:summarize), not a second source. `compactions` counts
+      // destructive trim evictions (stash adds to this once F2 lands); `summaries` counts
+      // ctx.summarize calls. tokensTrimmed + the memory.* footprint are deferred (see PRD §3.10).
+      context: { compactions: 0, summaries: 0 },
+    };
+    /** Accumulate one usage object into the cumulative token tiers. @param {Usage|null|undefined} u */
+    const addUsage = (u) => {
+      if (!u) return;
+      metrics.tokens.input += u.inputTokens || 0;
+      metrics.tokens.output += u.outputTokens || 0;
+      metrics.tokens.cacheCreation += u.cacheCreationTokens || 0;
+      metrics.tokens.cacheRead += u.cacheReadTokens || 0;
+    };
+    /** Snapshot the meter for a return — finalizes the run-scoped fields. @returns {RunMetrics} */
+    const finalizeMetrics = () => ({
+      turns: metrics.turns,
+      toolCalls: metrics.toolCalls,
+      byTool: metrics.byTool,
+      tokens: { ...metrics.tokens },
+      costUsd: pricedAny ? totalCost : null,
+      unpricedRounds: metrics.unpricedRounds,
+      spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
+      context: { ...metrics.context }, // §3.6 CE-activity rollup
+      durationMs: Date.now() - meterStartedAt,
+    });
+
     // R-C6: lend a provider-bound summarizer to the assemble seam via `ctx.summarize`. litectx owns
     // the trigger/N/splice (its restorable COMPRESS path keeps summarized turns recoverable by id);
     // bareagent lends ONLY the single model call. Attached NON-ENUMERABLE so it never shows up in the
@@ -333,7 +396,9 @@ class Loop {
         const usage = (result && result.usage) || null;
         const model = (result && result.model) || loop.provider.model || null;
         const cost = estimateCost(model, usage);
-        if (cost !== null) totalCost += cost;
+        if (cost !== null) { totalCost += cost; pricedAny = true; }
+        addUsage(usage); // summarize tokens are real spend → count them in the cumulative meter
+        metrics.context.summaries++; // §3.6 CE-activity rollup
         loop._safeEmit({ type: 'loop:summarize', data: { usage, costUsd: cost, durationMs: Date.now() - startedAt } });
         if (loop.onLlmResult) {
           try {
@@ -342,6 +407,7 @@ class Loop {
               provider: loop.provider.name || null,
               usage,
               costUsd: cost,
+              pricing: cost === null ? 'unpriced' : 'priced',
               durationMs: Date.now() - startedAt,
               ctx,
               kind: 'summarize',
@@ -382,7 +448,7 @@ class Loop {
           if (Array.isArray(kept) && kept !== msgs) {
             msgs.length = 0;
             msgs.push(...kept);
-            if (msgs.length !== before) this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } });
+            if (msgs.length !== before) { metrics.context.compactions++; this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } }); }
           }
         } catch (err) {
           if (err instanceof HaltError) throw err;
@@ -417,7 +483,7 @@ class Loop {
       } catch (err) {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs };
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics() };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -426,6 +492,13 @@ class Loop {
       const model = result.model || this.provider.model || null;
       const roundCost = estimateCost(model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
+
+      // Meter this round: count the turn, accumulate the four token tiers, and classify pricing —
+      // an unpriced round (null cost: no model / no rate) is tallied so the run is observably
+      // unenforceable on budget rather than silently free (the #3 cost contract).
+      metrics.turns++;
+      addUsage(result.usage);
+      if (roundCost === null) metrics.unpricedRounds++; else pricedAny = true;
 
       // BA1: forward LLM usage to gate.record (via wireGate) so budget.maxCostUsd
       // covers token-heavy / tool-light workloads. Callback errors route through
@@ -437,6 +510,9 @@ class Loop {
             provider: this.provider.name || null,
             usage: result.usage || null,
             costUsd: roundCost,
+            // Priced vs unpriced is explicit so the gate never mistakes "couldn't price" (null) for
+            // "free" (0) — the silent-zero that made #3's budget cap a no-op. (D5 / §3.7.)
+            pricing: roundCost === null ? 'unpriced' : 'priced',
             durationMs: Date.now() - llmStartedAt,
             ctx,
             kind: 'turn',
@@ -462,7 +538,7 @@ class Loop {
           try { await flush(msgs, ctx); }
           catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
         }
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs };
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics() };
       }
 
       // Execute tool calls
@@ -478,6 +554,11 @@ class Loop {
 
       for (const tc of result.toolCalls) {
         if (this._stopped) break;
+
+        // Meter every tool call the model makes (per-tool tally), regardless of outcome — a denied or
+        // unknown call is still an invocation the operator wants to see.
+        metrics.toolCalls++;
+        metrics.byTool[tc.name] = (metrics.byTool[tc.name] || 0) + 1;
 
         const tool = toolMap.get(tc.name);
         if (!tool) {
@@ -592,7 +673,7 @@ class Loop {
         sealDanglingToolCalls(msgs, rule);
         this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
         this._safeEmit({ type: 'loop:done', data: { text: '', halted: true, rule, cost: totalCost } });
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs };
+        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
       }
       throw err;
     }
@@ -601,7 +682,7 @@ class Loop {
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
-    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs };
+    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics() };
   }
 
   /**
@@ -674,7 +755,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[]}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });
@@ -691,4 +772,4 @@ class Loop {
   }
 }
 
-module.exports = { Loop };
+module.exports = { Loop, estimateCost, COST_PER_1K };

@@ -4,10 +4,55 @@
 // <-> loop <-> tools). Per-file option bags live as local @typedef blocks in
 // each module; only the genuinely shared shapes belong here.
 
-/** Token accounting returned by a provider's generate(). */
+/**
+ * Token accounting returned by a provider's generate(), normalized to one neutral shape across
+ * providers. `inputTokens` is always the UNCACHED prompt remainder — total prompt =
+ * inputTokens + cacheReadTokens + cacheCreationTokens. Providers whose API folds cached tokens
+ * into the prompt count (OpenAI `prompt_tokens`, Gemini `promptTokenCount`) subtract them out here;
+ * Anthropic's `input_tokens` is already the remainder. The cache tiers price differently from
+ * uncached input (read is cheaper, Anthropic's creation is a premium) — see `estimateCost`. Absent
+ * cache fields mean the provider/model didn't cache (local models, short prompts); treat as 0.
+ */
 export interface Usage {
+  /** Uncached prompt tokens, billed at the model's full input rate. */
   inputTokens: number;
+  /** Completion tokens (includes provider "thinking"/reasoning tokens where billed as output). */
   outputTokens: number;
+  /** Prompt tokens served from cache — a cheaper tier (OpenAI ~0.5×, Gemini ~0.25×, Anthropic ~0.1×). */
+  cacheReadTokens?: number;
+  /** Prompt tokens written to cache — a premium tier (Anthropic ~1.25×; OpenAI/Gemini have no write surcharge → 0). */
+  cacheCreationTokens?: number;
+}
+
+/**
+ * Canonical per-run counters returned on a Loop result as `result.metrics` (Feature 3 — the meter).
+ * Present on every run, gate-wired or not. `tokens` is CUMULATIVE across all rounds and all four tiers
+ * (the run total — unlike `result.usage`, which is the last round only and kept for back-compat).
+ */
+export interface RunMetrics {
+  /** Rounds (LLM turns) executed. */
+  turns: number;
+  /** Total tool calls the model made (every invocation, including denied/unknown). */
+  toolCalls: number;
+  /** Per-tool invocation counts, keyed by tool name. */
+  byTool: Record<string, number>;
+  /** Cumulative token spend across all rounds (incl. summarize calls), by tier. */
+  tokens: { input: number; output: number; cacheCreation: number; cacheRead: number };
+  /** Cumulative USD over priced rounds; null ONLY if nothing could be priced (explicit-unknown, not free). */
+  costUsd: number | null;
+  /** Count of rounds whose cost could not be computed (no model / no rate) — the loud-unpriced signal. */
+  unpricedRounds: number;
+  /** Spawn-tool invocations this run (the `spawn` tool count — counts every call, incl. denied/failed). */
+  spawned: number;
+  /**
+   * CE-activity rollup, derived in-place from Stream events (loop:trim, loop:summarize) — a
+   * convenience view, not a second source. `compactions`: destructive trim evictions (stash joins
+   * this in F2). `summaries`: ctx.summarize calls. (tokensTrimmed + a memory.* footprint are deferred —
+   * see eval-assist PRD §3.10.)
+   */
+  context: { compactions: number; summaries: number };
+  /** Wall-clock duration of the run in ms. */
+  durationMs: number;
 }
 
 /** A single tool invocation requested by the model. `arguments` is parsed JSON. */

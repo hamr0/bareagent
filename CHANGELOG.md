@@ -2,6 +2,31 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+The **eval-assist** suite — Feature 4 (assessComplexity disposition) and Feature 3 (the run meter), built and live-validated against the OpenAI, Gemini, and Anthropic APIs. Design spec: `docs/01-product/eval-assist-prd.md`. Headline: bareagent is now the canonical cost/usage **meter**, cache token tiers flow correctly across providers (closing a silent ~2–10× mis-pricing class), and there is a native Gemini provider.
+
+### Added
+
+- **`isCritical(goal)` export (Feature 4).** The durable critical-safety floor from `assessComplexity` — security/production/compliance/financial work — exported standalone so a consumer can gate extra scrutiny (e.g. adversarial verification) without the full scorer. Normalizes input then applies the same deterministic override; behavior-identical, no new keywords. The 3-tier scorer is **frozen** (don't extend the lists); LLM input-decomposition is a deliberate no-build. `src/complexity.js`, `index.js`; tests in `test/complexity.test.js`.
+- **`GeminiProvider` (`bare-agent/providers` → `Gemini`).** Native `generateContent` provider with full parity: OpenAI-format message conversion (system→systemInstruction, tool calls↔functionCall/functionResponse with name resolution), tool declarations, `baseUrl`, usage normalization. Native rather than Gemini's OpenAI-compat endpoint because that endpoint **omits the cache token tier** (POC-proven). `src/provider-gemini.js`, `src/providers.js`; 5 tests + live POC (`poc/f3-gemini-*.mjs`).
+- **`result.metrics` — the run meter (Feature 3).** Every `Loop.run()`/`chat()` now returns canonical per-run counters, gate-wired or not: `turns`, `toolCalls`, `byTool`, `tokens` (cumulative, four tiers), `costUsd` (null when unpriceable, not a silent 0), `unpricedRounds`, `spawned`, `context` (`{compactions, summaries}`), `durationMs`. `RunMetrics` type added. `src/loop.js`, `types/index.d.ts`; `test/metrics.test.js`.
+- **`metrics.spawned` + `metrics.context` — the §3.6 CE-activity rollup (sourceable subset).** `spawned` is the spawn-tool invocation count; `context.compactions` counts destructive trim evictions and `context.summaries` counts `ctx.summarize` calls — both derived in-place from events already on the Stream (`loop:trim`, `loop:summarize`), a convenience view rather than a second source. Always present (zeros are true measurements, not silent unknowns). The rest of §3.6 — `context.tokensTrimmed` and the `memory.*` footprint — is **deferred** (no honest source today; `memory.*` lands with Feature 2's stash). See `docs/01-product/eval-assist-prd.md` §3.10.
+- **Prompt-cache token tiers on `Usage`** — `cacheReadTokens` / `cacheCreationTokens` (optional). `inputTokens` is now documented and normalized as the **uncached remainder** on every provider. `types/index.d.ts`.
+- **Anthropic `cacheSystem` opt-in + `baseUrl`.** `new AnthropicProvider({ cacheSystem: true })` (or per-call) sends the system prompt with a `cache_control` breakpoint so Anthropic caches it (it does not auto-cache). `baseUrl` mirrors the OpenAI provider (proxy support). Default off → requests byte-identical to before. `src/provider-anthropic.js`.
+
+### Changed
+
+- **`estimateCost` prices the four token tiers separately** (uncached input / output / cache-read / cache-creation) instead of folding everything into the input rate. Cache tiers are multipliers on the input rate (Anthropic 0.1× read / 1.25× write; OpenAI 0.5× read; Gemini 0.25× read). Returns `null` (not 0) on an unknown model so the round is marked **unpriced**. `src/loop.js`; `test/cost.test.js`.
+- **`onLlmResult` emissions carry `pricing: 'priced' | 'unpriced'`** so the gate never mistakes "couldn't price" (null) for "free" (0) — the silent-zero that made the cost cap a no-op.
+- **Cost rate table refreshed (2026-06).** Added `claude-opus-4-8`, `claude-opus-4-6`, `claude-fable-5`, `gemini-2.5-flash`/`pro`; `claude-haiku-4-5` $0.8/$4 → $1/$5 per MTok.
+
+### Fixed
+
+- **Cumulative token usage** — `result.metrics.tokens` is the run total across all rounds and tiers. `result.usage` was (and stays, for back-compat) last-round-only, which *looked* like a total and wasn't.
+- **OpenAI cached tokens were double-counted at full price.** `prompt_tokens` includes the cached prefix; the provider now subtracts `prompt_tokens_details.cached_tokens` for the uncached remainder and surfaces the cached portion as the cheaper `cacheReadTokens` (a ~2× over-charge on a warm prompt — measured live in the POC). `src/provider-openai.js`. Gemini gets the same subtract (`cachedContentTokenCount`).
+- **`claude-opus-4-7` was priced 3× too high** in the rate table ($15/$75 → $5/$25 per MTok).
+
 ## [0.16.2] — 2026-06-15
 
 Follow-up to the 0.16.1 MCP cwd-config tightening: stop the project-local config from failing **silently**. No behavior change to what loads — only a hint when something is skipped.
