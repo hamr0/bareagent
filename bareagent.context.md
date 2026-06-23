@@ -46,6 +46,9 @@ Eight entry points:
 | Retry individual plan steps | runPlan({ stepRetry }) |
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
+| Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` criteria |
+| Offer skills on demand without bloating context | SkillRegistry — `skill_use` meta-tool + `skills.activeTools` thunk |
+| Keep the context window lean (compact finished sub-tasks) | createStashSkill — register the skill + wire its `trim` into `Loop({ trim })` |
 | Track cost per run | Automatic — `result.cost` and `loop:done` event |
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
@@ -141,6 +144,36 @@ const loop = new Loop({
   system: `Use this context:\n${context}`,
 });
 ```
+
+## Wiring with Skills + Stash (progressive disclosure + compaction)
+
+Skills are operator-registered `{ name, description, instructions, tools }` bundles surfaced on demand: only a one-liner per skill sits in context until the agent calls `skill_use({ name })`, which injects the skill's instructions and unlocks its (namespaced) tools for the next round. Pass `skills.activeTools` (a bound thunk) as the Loop's `tools` — it is re-evaluated each round, so freshly-unlocked tools appear automatically. The gate still governs every unlocked tool; skills change discovery, not authorization.
+
+The shipped reference skill is **stash** — compaction-first context hygiene. Its `trim` wires into `Loop({ trim })` and folds finished sub-tasks out of the live transcript (restorable), keeping long runs under budget. Pass a litectx instance as `ctx` for lossless verbatim parking + the `ctx.summarize` lossy path; set `compaction.ceilingTokens` to enable automatic token-pressure folding.
+
+```javascript
+const { Loop, SkillRegistry, createStashSkill } = require('bare-agent');
+const { Anthropic } = require('bare-agent/providers');
+
+const { skill, trim } = createStashSkill({
+  // optional auto-compaction: fold the middle when measured input tokens cross 70% of the ceiling
+  compaction: { ceilingTokens: 150000, triggerAt: 0.7, strategy: 'summarize' },
+});
+
+const skills = new SkillRegistry();
+skills.register(skill);                       // catalog now lists "stash" in skill_use's description
+
+const loop = new Loop({
+  provider: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
+  trim,                                       // stash's fold runs here, at each round boundary
+});
+
+// Pass the bound thunk as tools; ctx carries litectx (lossless parking + summarizer).
+await loop.run(messages, skills.activeTools, { ctx });
+// The model: skill_use({name:'stash'}) → stash_checkpoint({label}) → …work… → stash_compact({label, reason})
+```
+
+Folds are provider-safe by construction (whole rounds, alternation-preserving note pairs) and confirmed on the real Anthropic wire. Governance, budget visibility (`ctx.summarize` tokens forward to the gate), and `result.metrics.context.compactions` all flow through unchanged.
 
 ## Multi-agent: spawn + defer + wake (v0.9)
 

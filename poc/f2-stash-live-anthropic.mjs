@@ -67,7 +67,31 @@ for (const strategy of ['stash', 'summarize']) {
   }
 }
 
+// Module 4 — the auto-compaction MIDDLE fold is a DIFFERENT transcript shape (note pair spliced in the
+// middle, recent tail kept after it). Confirm that shape on the wire too.
+{
+  console.log('\n[auto-compaction middle-fold] sending the middle-folded transcript to Anthropic…');
+  const { skill, trim } = createStashSkill({ compaction: { ceilingTokens: 100, triggerAt: 0.7, strategy: 'stash', keepHeadTurns: 1, keepRecentTurns: 2 } });
+  void skill;
+  const store = new Map();
+  const ctx = { stash: (id, t) => store.set(id, t), get: (id) => store.has(id) ? { id, text: store.get(id) } : null, usage: { inputTokens: 500 } };
+  const msgs = [{ role: 'user', content: 'do a long multi-step refactor across several files' }];
+  for (let k = 0; k < 6; k++) msgs.push(
+    { role: 'assistant', content: null, tool_calls: [{ id: `w${k}`, type: 'function', function: { name: 'edit_file', arguments: JSON.stringify({ path: `f${k}.js` }) } }] },
+    { role: 'tool', tool_call_id: `w${k}`, content: `edited f${k}.js` },
+  );
+  const before = msgs.length;
+  await trim(msgs, ctx);                                   // 500/100 > 0.7 → fold the middle
+  ok(msgs.length < before, `middle actually folded (${before} -> ${msgs.length} turns)`);
+  const provider = new AnthropicProvider({ apiKey, model: 'claude-haiku-4-5-20251001' });
+  try {
+    const res = await provider.generate(msgs, TOOLS, { maxTokens: 256 });
+    ok(res && (typeof res.text === 'string' || Array.isArray(res.toolCalls)),
+      `ACCEPTED on the wire — auto middle-fold valid (${res.toolCalls?.length ? 'tool_call: ' + res.toolCalls[0].name : 'text'})`);
+  } catch (err) { ok(false, `REJECTED by Anthropic: ${err && err.message}`); }
+}
+
 console.log(failures === 0
-  ? '\n✅ LIVE POC PASS — Anthropic accepts the folded transcript for BOTH strategies. Provider-safety confirmed on the wire, not just by construction.'
+  ? '\n✅ LIVE POC PASS — Anthropic accepts the folded transcript for BOTH strategies AND the auto middle-fold. Provider-safety confirmed on the wire, not just by construction.'
   : `\n❌ LIVE POC FAIL — ${failures} rejection(s). The fold produces a transcript a real provider refuses; fix before relying on it.`);
 process.exit(failures === 0 ? 0 : 1);
