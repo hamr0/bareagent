@@ -13,7 +13,7 @@
     "LICENSE",
     "NOTICE"
   ],
-  "description": "Lightweight, composable agent orchestration for autonomous agents. Multi-agent primitives (spawn, defer, MCP meta-tools), single-gate governance via bareguard, cross-platform shell tools, MCP bridge. ~2.7K lines core, one required dep.",
+  "description": "Lightweight, composable agent orchestration for autonomous agents. Multi-agent primitives (spawn, defer, MCP meta-tools), single-gate governance via bareguard, cross-platform shell tools, MCP bridge. Lightweight core, one required dep.",
   "license": "Apache-2.0",
   "author": "hamr0",
   "repository": {

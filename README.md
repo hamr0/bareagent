@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
 </p>
 
-**Agent orchestration in ~2.7K lines of core. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.2.0).**
+**Lightweight agent orchestration. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.9.0).**
 
 Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. Single-gate governance via bareguard: every tool call traverses one policy hook, one audit log, one budget cap.
 
@@ -62,41 +62,44 @@ and show me the wiring code.
 
 ## What's inside
 
-Every piece works alone — take what you need, ignore the rest.
+Every piece works alone — take what you need, ignore the rest. Two axes: **Act** (get work done) and **Verify** (check it, keep context clean), with **one gate** over both.
+
+### Act — get work done
 
 | Component | What it does |
 |---|---|
-| **Loop** | Think → act → observe → repeat. Calls any LLM, runs your tools, loops until done, returns estimated USD cost per run. Three opt-in seams hook external libraries in without touching your code: **`policy`** (governance — wire bareguard for one gated chokepoint over every tool call), **`assemble`** (context engineering — recall/compress/trim the window per round; the seam [litectx](https://npmjs.com/package/litectx) plugs into, transcript untouched), and **`trim`** (destructively bound the transcript for unbounded runs, harvesting turns before eviction). Each is a single chokepoint, fail-open, off by default. `onError` + `loop:error` surface every silent failure |
-| **Planner** | Break a goal into a step DAG via LLM. Built-in caching (`cacheTTL`) |
-| **assessComplexity** | Pure-code pre-planner (no LLM): rates a goal `simple`/`medium`/`complex`/`critical` from its text via keyword scoring + a critical safety override. `needsPlanning` gates whether to spend a Planner pass; `critical` flags security/production/compliance work for extra scrutiny. Free, instant, debuggable via `signals` |
-| **Evaluator + refine** | Output-side verification — judge work by a `predicate` (deterministic, zero tokens), a `rubric` (an **isolated adversarial grader** in its own context window, never the generator's transcript — isolation is what defeats self-evaluation), or `agentic` (a tool-running critic that **exercises** the live artifact rather than reading text). Returns a tri-state `Verdict` (`satisfied`/`needs_revision`/`failed`). `refine({ attempt, evaluate })` is the bounded generate→evaluate→regenerate loop. Composes *around* a Loop |
-| **SkillRegistry** | Progressive-disclosure skills: a single meta-tool `skill_use` carries a one-liner catalog; activating a skill injects its instructions on demand and unlocks its (namespaced) tools, called natively next round. The only Loop coupling is a general `tools` thunk re-evaluated each round. The gate still governs every unlocked tool — skills affect discovery, never authorization |
-| **stash** | Compaction-first context hygiene as a skill (`createStashSkill`): checkpoint a sub-task, compact it out of the live transcript when done (restorable), or let auto-compaction fold the middle under token pressure. Two strategies — `summarize` (lossy gist) / `stash` (lossless verbatim via litectx). Folds preserve tool-pairing + provider alternation by construction; confirmed on the real Anthropic wire |
-| **runPlan** | Execute steps in parallel waves. Dependency-aware, failure propagation, per-step retry |
-| **Retry** | Exponential/linear backoff with jitter. Respects `err.retryable` |
-| **CircuitBreaker** | Fail fast after N errors. Auto-recovers after cooldown. Per-key isolation |
-| **Fallback** | Try providers in order — if one is down, next one picks up. Transparent to Loop |
-| **Memory** | Persist and search context across turns/sessions through a swappable `Store`. Zero-dep JSON file by default, or mount [litectx](https://npmjs.com/package/litectx) for ranked, graph-aware recall in one line — the host code never changes ([example](examples/litectx-as-store.mjs)). A minimal `SQLite` FTS5 store also ships, though litectx supersedes it for SQLite-backed memory |
-| **StateMachine** | Task lifecycle tracking with event hooks. `pending → running → done / failed / waiting / cancelled` |
-| **Checkpoint** | Human approval gate. You provide the transport — terminal, Telegram, Slack, whatever |
-| **Scheduler** | Cron (`0 9 * * 1-5`) or relative (`2h`, `30m`). Persisted jobs survive restarts |
-| **Stream** | Structured event emitter. Pipe as JSONL, subscribe in-process, or custom transport |
-| **Errors** | Typed hierarchy — `ProviderError`, `ToolError`, `TimeoutError`, `CircuitOpenError`, `ValidationError`. Halt decisions (turn cap, budget cap, content rules) come from bareguard, not Loop |
-| **bareguard adapter** | `wireGate(gate)` → `{ policy, onLlmResult, onToolResult, filterTools, formatDeny }`: one-line wiring to bareguard's `Gate`. Routes every LLM + tool result through the gate so budget caps cover token-heavy workloads, drops denied tools before the LLM ever sees them, and turns halts into a clean exit. `require('bare-agent/bareguard')` |
-| **Browsing** | Web navigation, clicking, typing, reading via `barebrowse` (17 tools). Two modes: library tools (inline snapshots, pass to Loop) or CLI session (disk-based snapshots, token-efficient for multi-step flows). Optional `assess` tool (privacy scan) when `wearehere` is installed |
-| **Mobile** | Android + iOS device control via `baremobile`. Same two modes: library tools (`createMobileTools` — action tools auto-return snapshots) or CLI session (`baremobile` CLI — disk-based snapshots) |
-| **Shell** | Cross-platform `shell_read`, `shell_grep`, `shell_run` (argv, no shell), `shell_exec` (raw shell). Pure Node — no `grep`/`rg`/`findstr` dependency. Injection-proof `shell_run` for policy-gated use |
-| **MCP Bridge** | Auto-discover MCP servers from your $HOME/IDE configs (Claude Code, Cursor, …) and expose them as bareagent tools — bulk (`tools`) or token-thrifty meta-tools (`mcp_discover` + `mcp_invoke`) for large catalogs. Same `Loop({ policy })` hook governs MCP and native tools alike. The project-cwd `.mcp.json` is **opt-in** (untrusted-repo safety); vet every server spawn with `confirmServer`; every RPC is time-bounded. Zero deps |
-| **Spawn** | Fork a child bareagent as a specialist agent — LLM-callable (blocks until exit) or a library handle (`wait`, `onLine`, `kill`). The whole family stitches into one audit log + budget; `bareguard ^0.2.0` adds per-family rate + depth caps. `timeoutMs` caps wall-clock, opt-in `idleTimeoutMs` kills a child gone silent (slow-but-working children survive) |
-| **Defer** | Queue a `{action, when}` record for a separate waker (cron / `examples/wake.sh`) to fire later. Governed twice — once when emitted, again when it fires. `bareguard ^0.2.0` adds a family-wide rate cap |
+| **Loop** | Think → act → observe until done. Any LLM, your tools, per-run cost. Opt-in seams: `policy` (govern), `assemble` (context engineering), `trim` (bound the transcript) |
+| **Planner** | Break a goal into a step DAG. Cached |
+| **assessComplexity** | Rate a goal `simple`→`critical` from its text — no LLM. Gates whether to plan |
+| **runPlan** | Run plan steps in parallel waves. Dependency-aware, per-step retry |
+| **Memory** | Persist + recall across sessions via a swappable `Store` — zero-dep JSON, SQLite, or [litectx](https://npmjs.com/package/litectx) in a one-line swap |
+| **StateMachine** | Task lifecycle: `pending → running → done / failed / waiting / cancelled` |
+| **Scheduler** | Cron or relative triggers. Jobs survive restarts |
+| **Checkpoint** | Human approval gate — bring your own transport |
+| **Spawn** | Fork a child agent. One shared audit log + budget |
+| **Defer** | Queue an action for a waker to fire later. Governed when emitted *and* when it fires |
+| **Retry · CircuitBreaker · Fallback** | Resilience: backoff with jitter, fail-fast, provider failover |
+| **Stream · Errors** | Structured JSONL events; typed error hierarchy |
+| **Browsing · Mobile · Shell** | Hands: web ([barebrowse](https://npmjs.com/package/barebrowse)), Android + iOS ([baremobile](https://npmjs.com/package/baremobile)), cross-platform shell — library tools or token-thrifty CLI sessions |
+| **MCP Bridge** | Auto-discover MCP servers from your IDE configs; expose as tools (bulk or meta-tools) |
 
-**Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Gemini (native `generateContent`), Ollama, CLIPipe (any CLI tool via stdin/stdout with real-time streaming), Fallback, or bring your own (one method: `generate`). All return the same shape — swap freely. The OpenAI provider warns if it would send your key over plaintext `http://` to a non-loopback host (use `https`, or drop `apiKey` for keyless local endpoints). Usage is normalized across providers including prompt-cache tiers, so `result.metrics` reports correct cumulative tokens and cost — plus a context-engineering footprint: `context.{compactions, summaries, tokensTrimmed}` and `memory.{stashed, episodes, recalls, stored}` (the CE ops the run initiated — memory reads *and* writes). When a bareguard gate is wired, the meter forwards an honest price signal — `costUsd: null` + `pricing: 'unpriced'` for rounds it couldn't price, never a silent `0` — so a budget cap can't be quietly defeated by an unpriceable model.
+### Verify — check the work, keep context clean *(the eval-assist suite)*
 
-**Tools:** Any function is a tool. REST APIs, MCP servers, CLI commands, shell scripts — if it's a function, it works. Built-in: `barebrowse` for web browsing, `baremobile` for Android + iOS device control (both optional) — library tools for inline results or CLI session mode for token-efficient disk-based snapshots.
+| Component | What it does |
+|---|---|
+| **Evaluator + refine** | Judge output by `predicate` (no tokens), `rubric` (an isolated adversarial grader), or `agentic` (a critic that exercises the live artifact). `refine` is the bounded generate→evaluate→regenerate loop |
+| **SkillRegistry** | Surface skills on demand: one meta-tool catalog; activating a skill injects its instructions and unlocks its tools |
+| **stash** | Compact finished work out of the live window (restorable), or auto-fold the middle under token pressure |
 
-**Cross-language:** Runs as a subprocess. Communicate via JSONL on stdin/stdout from Python, Go, Rust, Ruby, Java, or anything that can spawn a process. Ready-made wrappers in [`contrib/`](contrib/README.md).
+**Govern — one gate over both axes.** `wireGate(gate)` routes every LLM + tool call through one bareguard policy + audit + budget. Denied tools never reach the model; halts (turn / budget / content caps) exit cleanly. `require('bare-agent/bareguard')`
 
-**Deps:** 1 required (`bareguard ^0.2.0` for governance — single-gate policy + audit + budget + per-family rate caps). Optional: `cron-parser` (cron expressions), `better-sqlite3` (SQLite store), `barebrowse` (web browsing), `baremobile` (Android + iOS device control), `wearehere` (privacy assessment via barebrowse).
+**Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Gemini (native), Ollama, CLIPipe, Fallback — or bring your own (one `generate` method). All return the same shape; swap freely. Usage including prompt-cache tiers is normalized, so `result.metrics` reports honest cumulative tokens + cost — and `null`, never a silent `0`, for a model it couldn't price.
+
+**Tools:** Any function is a tool — REST, MCP, CLI, shell. Built-in web + mobile (optional).
+
+**Cross-language:** Run as a subprocess; talk JSONL over stdin/stdout from Python, Go, Rust, Ruby, or Java. Wrappers in [`contrib/`](contrib/README.md).
+
+**Deps:** 1 required (`bareguard ^0.9.0`). Optional: `cron-parser`, `better-sqlite3`, `barebrowse`, `baremobile`, `wearehere`.
 
 This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/02-features/usage-guide.md).
 

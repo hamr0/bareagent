@@ -57,11 +57,11 @@ export interface RunMetrics {
    * `ctx.recordMemoryOp` hook (bounded per run; result.metrics is a copy taken at run end). `stashed`:
    * lossless parks to the stash table/in-process. `episodes`: stance writes on compact. The Memory
    * wrapper is metered symmetrically and opt-in (0 unless the caller threads the run's ctx): `recalls`
-   * = Memory.search reads, `stored` = Memory.store writes. `facts` is a DIFFERENT op (litectx
-   * episode→fact promotion) and is intentionally ABSENT, not 0 — it has no writer until the
-   * consolidation pass exists (§3.10; a 0 would be a false "tracked and didn't happen" signal).
+   * = Memory.search reads, `stored` = Memory.store writes. `facts` = durable facts written by `remember`
+   * (the consolidation pass) — its honest producer; DISJOINT from `stored` (a distilled fact counts once,
+   * as a fact). litectx's own episode→fact promotion stays litectx-internal to surface, not this counter.
    */
-  memory: { stashed: number; episodes: number; recalls: number; stored: number };
+  memory: { stashed: number; episodes: number; recalls: number; stored: number; facts: number };
   /** Wall-clock duration of the run in ms. */
   durationMs: number;
 }

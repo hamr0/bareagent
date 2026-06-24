@@ -383,11 +383,12 @@ class Loop {
       // and result.metrics is a copy taken at run end. `stashed`/`episodes` flow through the stash fold;
       // The Memory wrapper is metered on BOTH sides, symmetrically and opt-in: `recalls` (Memory.search,
       // the read) and `stored` (Memory.store, the generic durable write). The caller threads the run's ctx so
-      // the op counts against that run (a session-scoped LiteCtx → bounded to that session). `facts` is a
-      // DIFFERENT thing — the litectx episode→fact promotion — and stays OMITTED, not zeroed (§3.7 — a 0 would
-      // imply "tracked and didn't happen"): it has no writer until the remember-consolidation pass exists.
-      // (`stored` is the everyday wrapper write the original §3.6 list missed by conflating it with `facts`.)
-      memory: { stashed: 0, episodes: 0, recalls: 0, stored: 0 },
+      // the op counts against that run (a session-scoped LiteCtx → bounded to that session). `facts` now has its
+      // writer: `remember` (src/remember.js, the consolidation pass) distills durable facts and announces each via
+      // recordMemoryOp('facts'). It is DISJOINT from `stored` (remember writes through the socket WITHOUT ctx, so a
+      // distilled fact counts once, as a fact). litectx's own episode→fact promotion stays litectx-internal to
+      // surface (recentActivity/promotionCandidates) — that is NOT this counter.
+      memory: { stashed: 0, episodes: 0, recalls: 0, stored: 0, facts: 0 },
     };
     /** Accumulate one usage object into the cumulative token tiers. @param {Usage|null|undefined} u */
     const addUsage = (u) => {
@@ -407,7 +408,7 @@ class Loop {
       unpricedRounds: metrics.unpricedRounds,
       spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
       context: { ...metrics.context }, // §3.6 CE-activity rollup
-      memory: { ...metrics.memory }, // §3.6 memory footprint (stashed/episodes/recalls/stored; see init note)
+      memory: { ...metrics.memory }, // §3.6 memory footprint (stashed/episodes/recalls/stored/facts; see init note)
       durationMs: Date.now() - meterStartedAt,
     });
     // Approximate token count of a message array (~4 chars/token over the stringified message).
@@ -739,6 +740,10 @@ class Loop {
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
         } catch (err) {
+          // A HaltError from a tool body is a deliberate governance exit, not a tool failure — re-throw it
+          // like every other seam (the outer catch pairs dangling tool_calls + returns halt cleanly). Ordinary
+          // errors (plain Error) still become a ToolError, preserving the tool-as-untrusted-execution boundary.
+          if (err instanceof HaltError) throw err;
           toolError = err instanceof ToolError ? err : new ToolError(err.message, { context: { tool: tc.name } });
           const errMsg = `[Loop] Tool error: ${toolError.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });

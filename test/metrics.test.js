@@ -29,7 +29,7 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.deepEqual(m.byTool, {});
     assert.equal(m.spawned, 0);
     assert.deepEqual(m.context, { compactions: 0, summaries: 0, tokensTrimmed: 0 });
-    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0, stored: 0 }); // true zeros: no memory ops, not "untracked"
+    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0, stored: 0, facts: 0 }); // true zeros: no memory ops, not "untracked" (facts now has a writer — remember)
     assert.equal(typeof m.durationMs, 'number');
     assert.ok(m.durationMs >= 0);
   });
@@ -53,9 +53,11 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.ok(events.some(e => e.type === 'loop:memory' && e.data.op === 'stashed'), 'loop:memory emitted');
     // recordMemoryOp is non-enumerable — it must not leak into the ctx identity contract.
     assert.equal(Object.keys(ctx).includes('recordMemoryOp'), false);
-    // unknown kinds are ignored (forward-compatible), never crash or add a key.
-    ctx.recordMemoryOp('facts');
-    assert.equal('facts' in result.metrics.memory, false);
+    // `facts` is now a known counter (writer: remember) — present and 0 here since no facts were written.
+    assert.equal(result.metrics.memory.facts, 0);
+    // unknown kinds are still ignored (forward-compatible), never crash or add a key.
+    ctx.recordMemoryOp('bogus-kind');
+    assert.equal('bogus-kind' in result.metrics.memory, false);
   });
 
   it('tokens are CUMULATIVE across rounds and across all four tiers (fixes the last-round bug)', async () => {
