@@ -52,6 +52,17 @@ catalog of MCP-exposed tools for 30 days) and `mcp_invoke` (calls them).
   stdout (when spawned by a parent), and defer queue file (when emitting
   deferred actions).
 
+> **Optional assistive components (companion spec).** A separate, *opt-in* suite
+> composes onto the Loop without the Loop imposing it — `Evaluator` + `refine`
+> (output-side verification), `SkillRegistry` + `createStashSkill` (progressive-
+> disclosure skills + compaction-first context hygiene), the `result.metrics`
+> run meter (cost/usage/CE footprint, with the meter→gate cost contract), and
+> `isCritical` (the frozen critical-safety floor). Nothing here runs unless a
+> consumer wires it — same "does not impose patterns" stance as above. Design,
+> decisions, and SDK alignment for the suite live in
+> **[`eval-assist-prd.md`](./eval-assist-prd.md)** (DELIVERED 2026-06-24);
+> this `prd.md` stays the core one-shot-runner spec.
+
 ## 4. What bareagent is NOT
 
 - **NOT a scheduler.** It does not wake up at a future time. Scheduled
