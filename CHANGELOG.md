@@ -4,6 +4,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-06-24
+
 The **eval-assist** suite — Feature 4 (assessComplexity disposition), Feature 3 (the run meter), Feature 1 (the Evaluator), and Feature 2 (the skill mechanism + stash), built and live-validated against the OpenAI, Gemini, and Anthropic APIs. Design spec: `docs/01-product/eval-assist-prd.md`. Headline: bareagent is now the canonical cost/usage **meter**, cache token tiers flow correctly across providers (closing a silent ~2–10× mis-pricing class), there is a native Gemini provider, an output-side **Evaluator** (isolated adversarial grader + bounded `refine` loop), and a **skill mechanism + stash** (progressive-disclosure skills + compaction-first context hygiene).
 
 ### Added
