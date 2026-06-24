@@ -140,8 +140,9 @@ function wireGate(gate, options = {}) {
    * @param {string|null} [arg.provider]
    * @param {Usage} [arg.usage]
    * @param {number|null} [arg.costUsd]
-   * @param {('priced'|'unpriced')} [arg.pricing] - The meter's price verdict. Absent (older
-   *   meter) ⇒ derived from costUsd so the contract is back-compatible.
+   * @param {('priced'|'unpriced')} [arg.pricing] - The meter's price verdict, forwarded VERBATIM
+   *   (never synthesized here). Absent (older meter) ⇒ forwarded as undefined; bareguard's
+   *   back-compat treats an absent flag as priced, keeping the contract back-compatible.
    * @param {number|null} [arg.durationMs]
    * @param {Ctx} [arg.ctx]
    */

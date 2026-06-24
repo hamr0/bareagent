@@ -407,7 +407,7 @@ class Loop {
       unpricedRounds: metrics.unpricedRounds,
       spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
       context: { ...metrics.context }, // §3.6 CE-activity rollup
-      memory: { ...metrics.memory }, // §3.6 memory footprint (stashed + episodes; see init note)
+      memory: { ...metrics.memory }, // §3.6 memory footprint (stashed/episodes/recalls/stored; see init note)
       durationMs: Date.now() - meterStartedAt,
     });
     // Approximate token count of a message array (~4 chars/token over the stringified message).
