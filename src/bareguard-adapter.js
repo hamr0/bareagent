@@ -139,18 +139,36 @@ function wireGate(gate, options = {}) {
    * @param {string|null} [arg.model]
    * @param {string|null} [arg.provider]
    * @param {Usage} [arg.usage]
-   * @param {number} [arg.costUsd]
+   * @param {number|null} [arg.costUsd]
+   * @param {('priced'|'unpriced')} [arg.pricing] - The meter's price verdict, forwarded VERBATIM
+   *   (never synthesized here). Absent (older meter) ⇒ forwarded as undefined; bareguard's
+   *   back-compat treats an absent flag as priced, keeping the contract back-compatible.
    * @param {number|null} [arg.durationMs]
    * @param {Ctx} [arg.ctx]
    */
-  const onLlmResult = async ({ model, provider, usage, costUsd, durationMs, ctx }) => {
+  const onLlmResult = async ({ model, provider, usage, costUsd, pricing, durationMs, ctx }) => {
     // LLM rounds bypass actionTranslator — they always use the canonical
     // {type:'llm'} action so budget rules can match without translator collusion.
     await gate.record(
       { type: 'llm', args: { model: model || null, provider: provider || null }, _ctx: ctx ?? null },
       {
-        costUsd: typeof costUsd === 'number' ? costUsd : 0,
-        tokens: (usage?.inputTokens || 0) + (usage?.outputTokens || 0),
+        // Forward costUsd AS-IS — a null (unpriced) cost must NOT coerce to 0 here. Coercing it
+        // tells the gate the round was "free" instead of "couldn't price", so an active
+        // budget.maxCostUsd cap silently accrues zero and never halts — the #3 silent-zero class
+        // (§3.7), reproduced on the adapter.
+        costUsd: costUsd ?? null,
+        // Forward the meter's price verdict VERBATIM — never synthesize it. bareguard treats an
+        // explicit pricing:'unpriced' as the SOLE trigger for the unpriced contract; a null cost
+        // WITHOUT pricing deliberately stays on bareguard's back-compat (?? 0 ⇒ priced) path. loop.js
+        // always sets pricing (loop.js:566), so faithful forwarding arms the contract on every real
+        // round. Manufacturing 'unpriced' from a bare null here would arm cases the gate intentionally
+        // leaves unarmed — the exact mirror of bareguard's budget-pricing round-trip. (§3.8 contract.)
+        pricing,
+        // ALL FOUR token tiers, not just input+output — cache read/creation are real consumed
+        // tokens; omitting them undercounts the gate's token axis on a cached run (L7). The token
+        // axis stays enforceable even when pricing is 'unpriced' — only the cost axis goes unknown.
+        tokens: (usage?.inputTokens || 0) + (usage?.outputTokens || 0)
+              + (usage?.cacheReadTokens || 0) + (usage?.cacheCreationTokens || 0),
         durationMs: durationMs ?? null,
       },
     );

@@ -132,12 +132,18 @@ function estimateCost(model, usage) {
   const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
   const readMult = rates.cacheReadMult ?? 0.1;    // Anthropic convention when unspecified
   const writeMult = rates.cacheWriteMult ?? 1.25;
-  return (
+  const cost = (
     (usage.inputTokens || 0) * rates.in +
     (usage.outputTokens || 0) * rates.out +
     (usage.cacheReadTokens || 0) * rates.in * readMult +
     (usage.cacheCreationTokens || 0) * rates.in * writeMult
   ) / 1000;
+  // A non-finite cost (±Infinity from runaway token counts, NaN from a garbage rate-table entry) is a
+  // COULDN'T-PRICE, not a price. Return null so the round is marked `unpriced` and the value never
+  // poisons `totalCost`, `result.metrics.costUsd`, or — via onLlmResult → the gate — `spentUsd`. The
+  // last is the dangerous one: `NaN >= cap` is false, which would DISABLE a budget cap, not just
+  // under-count it. Same silent-unenforceable class as a null model (§3.7).
+  return Number.isFinite(cost) ? cost : null;
 }
 
 // R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
@@ -367,9 +373,21 @@ class Loop {
       unpricedRounds: 0,
       // §3.6 CE-activity rollup — convenience counts derived in-place from the same events already
       // on the Stream (loop:trim, loop:summarize), not a second source. `compactions` counts
-      // destructive trim evictions (stash adds to this once F2 lands); `summaries` counts
-      // ctx.summarize calls. tokensTrimmed + the memory.* footprint are deferred (see PRD §3.10).
-      context: { compactions: 0, summaries: 0 },
+      // destructive trim evictions; `summaries` counts ctx.summarize calls; `tokensTrimmed` is an
+      // APPROXIMATE (~4 chars/token) count of tokens evicted from the canonical transcript — evicted
+      // spans have no exact provider count, so we estimate rather than emit a silent zero (§3.10).
+      context: { compactions: 0, summaries: 0, tokensTrimmed: 0 },
+      // §3.6 memory footprint — the ops bareagent INITIATES, reported via the loop-lent `ctx.recordMemoryOp`
+      // hook (channel A: the originating module announces; the loop counts + emits `loop:memory`). Bounded
+      // PER RUN by construction: the hook is re-attached each loop.run() and closes over THIS run's meter,
+      // and result.metrics is a copy taken at run end. `stashed`/`episodes` flow through the stash fold;
+      // The Memory wrapper is metered on BOTH sides, symmetrically and opt-in: `recalls` (Memory.search,
+      // the read) and `stored` (Memory.store, the generic durable write). The caller threads the run's ctx so
+      // the op counts against that run (a session-scoped LiteCtx → bounded to that session). `facts` is a
+      // DIFFERENT thing — the litectx episode→fact promotion — and stays OMITTED, not zeroed (§3.7 — a 0 would
+      // imply "tracked and didn't happen"): it has no writer until the remember-consolidation pass exists.
+      // (`stored` is the everyday wrapper write the original §3.6 list missed by conflating it with `facts`.)
+      memory: { stashed: 0, episodes: 0, recalls: 0, stored: 0 },
     };
     /** Accumulate one usage object into the cumulative token tiers. @param {Usage|null|undefined} u */
     const addUsage = (u) => {
@@ -389,8 +407,20 @@ class Loop {
       unpricedRounds: metrics.unpricedRounds,
       spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
       context: { ...metrics.context }, // §3.6 CE-activity rollup
+      memory: { ...metrics.memory }, // §3.6 memory footprint (stashed/episodes/recalls/stored; see init note)
       durationMs: Date.now() - meterStartedAt,
     });
+    // Approximate token count of a message array (~4 chars/token over the stringified message).
+    // Used ONLY for the observability rollup metrics.context.tokensTrimmed — NEVER for pricing or
+    // governance, which use exact provider counts. A deliberate estimate (§3.10): the trim event
+    // carries message COUNTS and evicted spans have no exact provider token count.
+    /** @param {any[]} arr @returns {number} */
+    const estimateTokens = (arr) => {
+      if (!Array.isArray(arr)) return 0;
+      let chars = 0;
+      for (const m of arr) { try { chars += JSON.stringify(m).length; } catch { /* unstringifiable — skip */ } }
+      return Math.ceil(chars / 4);
+    };
 
     // R-C6: lend a provider-bound summarizer to the assemble seam via `ctx.summarize`. litectx owns
     // the trigger/N/splice (its restorable COMPRESS path keeps summarized turns recoverable by id);
@@ -452,6 +482,22 @@ class Loop {
       } catch (err) {
         this._reportError('summarize-attach', err);
       }
+      // §3.6 memory footprint (channel A). Lend a recorder the originating module calls when it
+      // initiates a memory op (stash.js at a lossless park → 'stashed'; at an episode write → 'episodes').
+      // The loop owns the count + the Stream emit; the module stays Loop-agnostic (it just calls an
+      // optional ctx hook, exactly like ctx.summarize). Non-enumerable so it never leaks into the
+      // assemble(units, ctx) identity contract. Unknown kinds are ignored (forward-compatible).
+      const recordMemoryOp = (/** @type {string} */ kind) => {
+        if (Object.prototype.hasOwnProperty.call(metrics.memory, kind)) {
+          metrics.memory[kind]++;
+          loop._safeEmit({ type: 'loop:memory', data: { op: kind } });
+        }
+      };
+      try {
+        Object.defineProperty(ctx, 'recordMemoryOp', { value: recordMemoryOp, enumerable: false, configurable: true, writable: true });
+      } catch (err) {
+        this._reportError('recordMemoryOp-attach', err);
+      }
     }
 
     try {
@@ -487,11 +533,17 @@ class Loop {
       if (this.trim) {
         try {
           const before = msgs.length;
+          const beforeTokens = estimateTokens(msgs); // pre-trim estimate (msgs not yet spliced)
           const kept = await this.trim(msgs, ctx);
           if (Array.isArray(kept) && kept !== msgs) {
+            const trimmed = beforeTokens - estimateTokens(kept); // approx tokens evicted from the transcript
             msgs.length = 0;
             msgs.push(...kept);
-            if (msgs.length !== before) { metrics.context.compactions++; this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length } }); }
+            if (msgs.length !== before) {
+              metrics.context.compactions++;
+              if (trimmed > 0) metrics.context.tokensTrimmed += trimmed;
+              this._safeEmit({ type: 'loop:trim', data: { round, before, after: msgs.length, tokensTrimmed: trimmed > 0 ? trimmed : 0 } });
+            }
           }
         } catch (err) {
           if (err instanceof HaltError) throw err;

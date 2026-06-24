@@ -58,6 +58,17 @@ describe('estimateCost — four-tier pricing (D9/L7)', () => {
     assert.equal(estimateCost('claude-haiku-4-5', null), null);
   });
 
+  it('a NON-FINITE cost is unpriceable (null), never a "price" — guards the cap-poison class', () => {
+    // ±Infinity from a runaway token count must NOT become a finite-looking price. A non-finite cost
+    // forwarded to the gate poisons spentUsd, and `NaN >= cap` / `Infinity` arithmetic DISABLES the
+    // cap rather than under-counting — worse than the silent-0. estimateCost returns null instead.
+    assert.equal(estimateCost('claude-haiku-4-5', { inputTokens: Infinity, outputTokens: 0 }), null);
+    assert.equal(estimateCost('claude-haiku-4-5', { inputTokens: 0, outputTokens: -Infinity }), null);
+    // Finite (incl. 0) is still a real price — the guard doesn't over-trigger.
+    assert.equal(estimateCost('claude-haiku-4-5', { inputTokens: 0, outputTokens: 0 }), 0);
+    assert.ok(Number.isFinite(estimateCost('claude-haiku-4-5', { inputTokens: 1000, outputTokens: 1000 })));
+  });
+
   it('corrected rate table: opus-4-7 is $5/$25 per MTok, not the old $15/$75; opus-4-8/fable-5 present', () => {
     assert.deepEqual({ in: COST_PER_1K['claude-opus-4-7'].in, out: COST_PER_1K['claude-opus-4-7'].out }, { in: 0.005, out: 0.025 });
     assert.ok(COST_PER_1K['claude-opus-4-8'], 'opus-4-8 must be in the table');

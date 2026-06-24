@@ -30,20 +30,31 @@ class Memory {
 
   /**
    * @param {any} content
-   * @param {Record<string, any>} [metadata]
+   * @param {Record<string, any>} [metadata] - Stored alongside the content; persisted to the backend.
+   * @param {Record<string, any>} [opts] - Transient call options (NOT persisted). If `opts.ctx` carries a
+   *   Loop-lent `recordMemoryOp` hook, this write is counted against that run's `result.metrics.memory.stored`
+   *   (§3.6, opt-in — the write-side mirror of search's `recalls`). `ctx` rides here, never in `metadata`,
+   *   precisely because `metadata` is persisted. Memory stays Loop-agnostic: it only calls an optional hook.
    * @returns {any} id
    */
-  store(content, metadata = {}) {
+  store(content, metadata = {}, opts = {}) {
+    const ctx = opts && opts.ctx;
+    if (ctx && typeof ctx.recordMemoryOp === 'function') ctx.recordMemoryOp('stored');
     return this._store.store(content, metadata);
   }
 
   /**
    * @param {string} query
-   * @param {Record<string, any>} [options]
+   * @param {Record<string, any>} [options] - Store search options. If `options.ctx` carries a Loop-lent
+   *   `recordMemoryOp` hook, this recall is counted against that run's `result.metrics.memory.recalls`
+   *   (§3.6, opt-in — the hook is absent unless the caller threads the run's ctx). Memory stays
+   *   Loop-agnostic: it only calls an optional hook, and `ctx` is stripped, never forwarded to the store.
    * @returns {any}
    */
   search(query, options = {}) {
-    return this._store.search(query, options);
+    const { ctx, ...storeOptions } = options || {};
+    if (ctx && typeof ctx.recordMemoryOp === 'function') ctx.recordMemoryOp('recalls');
+    return this._store.search(query, storeOptions);
   }
 
   /**

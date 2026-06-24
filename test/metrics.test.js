@@ -28,9 +28,34 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(m.toolCalls, 0);
     assert.deepEqual(m.byTool, {});
     assert.equal(m.spawned, 0);
-    assert.deepEqual(m.context, { compactions: 0, summaries: 0 });
+    assert.deepEqual(m.context, { compactions: 0, summaries: 0, tokensTrimmed: 0 });
+    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0, stored: 0 }); // true zeros: no memory ops, not "untracked"
     assert.equal(typeof m.durationMs, 'number');
     assert.ok(m.durationMs >= 0);
+  });
+
+  // §3.6 memory footprint (channel A): the loop lends ctx.recordMemoryOp; the originating module
+  // (stash.js) calls it, the loop counts it into result.metrics.memory and emits loop:memory. Here a
+  // trim stands in for the stash fold, calling the lent hook exactly as stash.js does.
+  it('counts memory ops announced via the lent ctx.recordMemoryOp hook', async () => {
+    const provider = twoRoundProvider({ inputTokens: 1, outputTokens: 1 }, { inputTokens: 1, outputTokens: 1 });
+    const events = [];
+    const stream = { emit: (e) => events.push(e) };
+    // trim plays the part of a stash fold: announces a lossless park + an episode write through ctx.
+    const trim = async (msgs, ctx) => {
+      if (msgs.length > 1) { ctx.recordMemoryOp('stashed'); ctx.recordMemoryOp('episodes'); return msgs.slice(1); }
+      return msgs;
+    };
+    const ctx = {}; // the loop attaches recordMemoryOp non-enumerably (ctx is an object)
+    const result = await new Loop({ provider, trim, stream }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }], { ctx });
+    assert.ok(result.metrics.memory.stashed >= 1, 'stashed counted');
+    assert.ok(result.metrics.memory.episodes >= 1, 'episodes counted');
+    assert.ok(events.some(e => e.type === 'loop:memory' && e.data.op === 'stashed'), 'loop:memory emitted');
+    // recordMemoryOp is non-enumerable — it must not leak into the ctx identity contract.
+    assert.equal(Object.keys(ctx).includes('recordMemoryOp'), false);
+    // unknown kinds are ignored (forward-compatible), never crash or add a key.
+    ctx.recordMemoryOp('facts');
+    assert.equal('facts' in result.metrics.memory, false);
   });
 
   it('tokens are CUMULATIVE across rounds and across all four tiers (fixes the last-round bug)', async () => {
@@ -86,6 +111,20 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(result.cost, 0, 'result.cost stays 0 for back-compat; metrics is the honest signal');
   });
 
+  it('a non-finite-cost round is counted unpriced and never poisons metrics.costUsd', async () => {
+    // A KNOWN model but runaway usage → estimateCost would be ±Infinity → now null → unpriced.
+    // The danger this guards: a non-finite costUsd flowing to the gate makes `spentUsd` NaN/Inf and
+    // `NaN >= cap` false, disabling the cap. The round must read as unpriced, and the cumulative
+    // costUsd must stay clean (null here — nothing in the run was priceable), never NaN/Infinity.
+    const seen = [];
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: Infinity, outputTokens: 1 } }; } };
+    const result = await new Loop({ provider, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.unpricedRounds, 1);
+    assert.equal(result.metrics.costUsd, null, 'costUsd must be null, never NaN/Infinity');
+    assert.equal(seen[0].pricing, 'unpriced', 'a non-finite cost emits pricing:unpriced, not priced');
+    assert.equal(seen[0].costUsd, null, 'the emitted costUsd is null, not a non-finite number');
+  });
+
   it('onLlmResult carries an explicit pricing flag (priced vs unpriced)', async () => {
     const seen = [];
     const priced = { model: 'gpt-4o-mini', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
@@ -130,6 +169,9 @@ describe('result.metrics — the meter (Feature 3)', () => {
     const trim = async (msgs) => (msgs.length > 1 ? msgs.slice(1) : msgs);
     const result = await new Loop({ provider: provider2, trim }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }]);
     assert.ok(result.metrics.context.compactions >= 1, 'at least one eviction counted');
+    // tokensTrimmed is an APPROXIMATE (~4 chars/token) count of evicted transcript — non-zero once
+    // an eviction happens, since a message was removed (estimate, never an exact provider count).
+    assert.ok(result.metrics.context.tokensTrimmed > 0, 'evicted tokens estimated, not a silent zero');
   });
 
   it('context.summaries counts ctx.summarize calls made from the assemble seam', async () => {

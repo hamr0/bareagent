@@ -280,6 +280,41 @@ describe('wireGate', () => {
     assert.equal(result.tokens, 150);
   });
 
+  // §3.7 / #3: an UNPRICED round must forward costUsd:null + pricing:'unpriced' — NEVER coerce
+  // to 0. Coercing tells the gate the round was free, so budget.maxCostUsd silently no-ops. This
+  // is the meter↔gate contract the bareguard companion (§3.8 item 2) consumes.
+  it('onLlmResult forwards an unpriced round as null cost + pricing:unpriced (never 0)', async () => {
+    const gate = mockGate();
+    const { onLlmResult } = wireGate(gate);
+    await onLlmResult({
+      model: 'some-unknown-model',
+      provider: 'openai',
+      usage: { inputTokens: 200, outputTokens: 80, cacheReadTokens: 1000, cacheCreationTokens: 40 },
+      costUsd: null,
+      pricing: 'unpriced',
+      durationMs: 900,
+      ctx: { userId: 7 },
+    });
+    const [{ result }] = gate._recordCalls;
+    assert.equal(result.costUsd, null);   // NOT 0 — the silent-zero IS the bug
+    assert.equal(result.pricing, 'unpriced');
+    // token axis stays enforceable under unpriced — all four tiers (L7), not just input+output
+    assert.equal(result.tokens, 1320);    // 200 + 80 + 1000 + 40
+  });
+
+  // The meter's price verdict is forwarded VERBATIM, never synthesized: an explicit pricing arms
+  // the contract; an ABSENT pricing stays undefined so bareguard falls to its back-compat (?? 0 ⇒
+  // priced) path. This is the exact mirror of bareguard's budget-pricing round-trip — manufacturing
+  // 'unpriced' from a bare null here would arm cases the gate intentionally leaves unarmed.
+  it('onLlmResult forwards pricing verbatim and never synthesizes it', async () => {
+    const gate = mockGate();
+    const { onLlmResult } = wireGate(gate);
+    await onLlmResult({ model: 'gpt-4o-mini', provider: 'openai', usage: { inputTokens: 100, outputTokens: 50 }, costUsd: 0.00045, pricing: 'priced', durationMs: 100, ctx: {} });
+    await onLlmResult({ model: 'gpt-4o-mini', provider: 'openai', usage: { inputTokens: 100, outputTokens: 50 }, costUsd: 0.00045, durationMs: 100, ctx: {} }); // no pricing emitted
+    assert.equal(gate._recordCalls[0].result.pricing, 'priced');     // explicit → forwarded
+    assert.equal(gate._recordCalls[1].result.pricing, undefined);    // absent → NOT synthesized (bareguard defaults priced)
+  });
+
   // Legacy shims still work (with a console.warn one-shot deprecation notice).
   // Keep full coverage until removal in 1.0 so the shim can't silently regress
   // while adopters are still migrating off it.

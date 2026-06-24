@@ -257,3 +257,106 @@ describe('Real bareguard 0.2 Gate + Loop end-to-end', () => {
     fs.unlinkSync(auditPath);
   });
 });
+
+// The cross-repo meter→gate round-trip neither side could write alone until
+// bareguard 0.9.0 shipped the consume contract (eval-assist PRD §3.7/§3.8).
+// Chain under test: meter prices the round → emits {costUsd, pricing} → wireGate
+// onLlmResult → real gate.record (marks the round unpriced, accrues NO cost) →
+// next gate.check → halt rule `budget.unpriced` under failClosedOnUnpriced+cap →
+// adapter throws HaltError → Loop exits cleanly. Proves the silent-zero AND the
+// non-finite cap-poison are closed end-to-end, not just unit-mocked.
+describe('Meter→gate pricing round-trip (eval-assist §3.8, bareguard 0.9.0)', () => {
+  const dummyTool = { name: 'dummy', description: 'noop', parameters: { type: 'object', properties: {} }, execute: async () => 'ok' };
+
+  // No model anywhere → estimateCost returns null → the round is genuinely unpriceable.
+  function unpricedProvider() {
+    let round = 0;
+    return {
+      name: 'mock', // deliberately NO `model` → costUsd null → pricing 'unpriced'
+      async generate(_messages, tools) {
+        round++;
+        if (round === 1 && tools?.length) {
+          return { text: '', toolCalls: [{ id: 'c1', name: tools[0].name, arguments: {} }], usage: { inputTokens: 1000, outputTokens: 1000 } };
+        }
+        return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+  }
+
+  // KNOWN model but runaway usage → estimateCost would be ±Infinity → guarded to null →
+  // unpriced. The cap-poison case: a non-finite cost must fail-closed, not disable the cap.
+  function nonFiniteCostProvider() {
+    let round = 0;
+    return {
+      model: 'gpt-4o-mini',
+      name: 'mock',
+      async generate(_messages, tools) {
+        round++;
+        if (round === 1 && tools?.length) {
+          return { text: '', toolCalls: [{ id: 'c1', name: tools[0].name, arguments: {} }], usage: { inputTokens: Infinity, outputTokens: 1 } };
+        }
+        return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+  }
+
+  it('an UNPRICED round under a cap + failClosedOnUnpriced halts cleanly (rule budget.unpriced)', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({ budget: { maxCostUsd: 0.001, failClosedOnUnpriced: true }, audit: { path: auditPath } });
+    await gate.init();
+
+    const { policy, onLlmResult, onToolResult } = wireGate(gate);
+    const result = await new Loop({ provider: unpricedProvider(), policy, onLlmResult, onToolResult })
+      .run([{ role: 'user', content: 'go' }], [dummyTool]);
+
+    // Clean governance exit — caught, surfaced as halt:<rule>, never thrown.
+    assert.match(result.error || '', /^halt:budget\.unpriced$/, `expected unpriced halt, got ${result.error}`);
+    // The meter saw it as unpriceable, not free.
+    assert.ok(result.metrics.unpricedRounds >= 1, 'meter must count the unpriced round');
+    assert.equal(result.metrics.costUsd, null, 'unpriced cost must be null, never a silent 0');
+    // The gate logged an explicit `unpriced` audit phase — observable, not silently passing.
+    const lines = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(lines.some(l => l.phase === 'unpriced'), 'gate must emit an `unpriced` audit phase');
+    fs.unlinkSync(auditPath);
+  });
+
+  it('a NON-FINITE cost (Infinity tokens) fail-closes too — the cap-poison is closed end-to-end', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({ budget: { maxCostUsd: 0.001, failClosedOnUnpriced: true }, audit: { path: auditPath } });
+    await gate.init();
+
+    const { policy, onLlmResult, onToolResult } = wireGate(gate);
+    const result = await new Loop({ provider: nonFiniteCostProvider(), policy, onLlmResult, onToolResult })
+      .run([{ role: 'user', content: 'go' }], [dummyTool]);
+
+    // estimateCost guarded the Infinity to null → unpriced → fail-closed. If the guard regressed,
+    // costUsd would be NaN/Infinity, spentUsd would poison, `NaN >= cap` would be false, and the cap
+    // would DISABLE rather than halt — so this halting is the proof the guard holds end-to-end.
+    assert.match(result.error || '', /^halt:budget\.unpriced$/, `expected unpriced halt, got ${result.error}`);
+    assert.equal(result.metrics.costUsd, null, 'non-finite cost must read null, never NaN/Infinity');
+    assert.ok(result.metrics.unpricedRounds >= 1);
+    fs.unlinkSync(auditPath);
+  });
+
+  it('without failClosedOnUnpriced, an unpriced round does NOT halt — but is still observably unpriced', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    // Same tight cap, but the fail-closed opt-in is OFF (default warn).
+    const gate = new Gate({ budget: { maxCostUsd: 0.001 }, audit: { path: auditPath } });
+    await gate.init();
+
+    const { policy, onLlmResult, onToolResult } = wireGate(gate);
+    const result = await new Loop({ provider: unpricedProvider(), policy, onLlmResult, onToolResult })
+      .run([{ role: 'user', content: 'go' }], [dummyTool]);
+
+    // The flag is the SOLE trigger: no fail-closed halt here.
+    assert.doesNotMatch(result.error || '', /^halt:budget\.unpriced$/, 'must NOT fail-closed without the opt-in');
+    // ...but the round is still surfaced as unpriced (never silently accrued as free).
+    assert.ok(result.metrics.unpricedRounds >= 1, 'still counted unpriced');
+    const lines = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(lines.some(l => l.phase === 'unpriced'), 'gate still emits the `unpriced` audit phase (warn, not silent)');
+    fs.unlinkSync(auditPath);
+  });
+});
