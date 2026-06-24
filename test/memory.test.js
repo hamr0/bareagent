@@ -60,6 +60,27 @@ describe('Memory', () => {
     assert.deepEqual(ops, ['recalls']);               // unchanged
     assert.deepEqual(calls[1], { limit: 9 });
   });
+
+  // §3.6 stored (opt-in): the write-side mirror of recalls. store routes ctx.recordMemoryOp('stored')
+  // via a TRAILING opts arg (not metadata — metadata is persisted, ctx must not be). The store backend
+  // receives content + metadata unchanged; ctx never reaches it.
+  it('counts a write via store opts.ctx and never persists ctx into metadata', () => {
+    const writes = [];
+    const ops = [];
+    const fakeStore = { search: () => [], get: () => null, delete: () => {}, store: (c, m) => { writes.push([c, m]); return 7; } };
+    const mem = new Memory({ store: fakeStore });
+    const ctx = { recordMemoryOp: (kind) => ops.push(kind) };
+
+    const id = mem.store('a fact', { type: 'note' }, { ctx });
+    assert.equal(id, 7);                                  // return value passes through
+    assert.deepEqual(ops, ['stored']);                    // write announced
+    assert.deepEqual(writes[0], ['a fact', { type: 'note' }]); // ctx NOT leaked into the persisted args
+
+    // No opts → no count, no crash; back-compat store(content, metadata) unchanged.
+    mem.store('b fact', { type: 'note2' });
+    assert.deepEqual(ops, ['stored']);                    // unchanged
+    assert.deepEqual(writes[1], ['b fact', { type: 'note2' }]);
+  });
 });
 
 // --- JsonFileStore ---

@@ -29,7 +29,7 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.deepEqual(m.byTool, {});
     assert.equal(m.spawned, 0);
     assert.deepEqual(m.context, { compactions: 0, summaries: 0, tokensTrimmed: 0 });
-    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0 }); // true zeros: no memory ops, not "untracked"
+    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0, stored: 0 }); // true zeros: no memory ops, not "untracked"
     assert.equal(typeof m.durationMs, 'number');
     assert.ok(m.durationMs >= 0);
   });

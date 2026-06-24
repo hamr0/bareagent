@@ -55,12 +55,13 @@ export interface RunMetrics {
   /**
    * §3.6 memory footprint — the memory ops bareagent INITIATES this run, via the loop-lent
    * `ctx.recordMemoryOp` hook (bounded per run; result.metrics is a copy taken at run end). `stashed`:
-   * lossless parks to the stash table/in-process. `episodes`: stance writes on compact. `recalls`:
-   * Memory.search(query, { ctx }) calls routed through the run's ctx (opt-in — 0 unless the caller
-   * threads ctx). `facts` is intentionally ABSENT, not 0 — nothing writes facts until the consolidation
-   * pass exists (§3.10; a 0 would be a false "tracked and didn't happen" signal).
+   * lossless parks to the stash table/in-process. `episodes`: stance writes on compact. The Memory
+   * wrapper is metered symmetrically and opt-in (0 unless the caller threads the run's ctx): `recalls`
+   * = Memory.search reads, `stored` = Memory.store writes. `facts` is a DIFFERENT op (litectx
+   * episode→fact promotion) and is intentionally ABSENT, not 0 — it has no writer until the
+   * consolidation pass exists (§3.10; a 0 would be a false "tracked and didn't happen" signal).
    */
-  memory: { stashed: number; episodes: number; recalls: number };
+  memory: { stashed: number; episodes: number; recalls: number; stored: number };
   /** Wall-clock duration of the run in ms. */
   durationMs: number;
 }

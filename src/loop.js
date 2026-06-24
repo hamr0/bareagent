@@ -375,11 +375,13 @@ class Loop {
       // hook (channel A: the originating module announces; the loop counts + emits `loop:memory`). Bounded
       // PER RUN by construction: the hook is re-attached each loop.run() and closes over THIS run's meter,
       // and result.metrics is a copy taken at run end. `stashed`/`episodes` flow through the stash fold;
-      // `recalls` is opt-in — Memory.search(query, { ctx }) routes the same hook, so a recall counts against
-      // the run whose ctx the caller passed (pass a session-scoped LiteCtx → bounded to that session's run).
-      // `facts` stays OMITTED, not zeroed (§3.7 — a 0 would imply "tracked and didn't happen"): nothing
-      // writes facts until the remember-consolidation pass exists.
-      memory: { stashed: 0, episodes: 0, recalls: 0 },
+      // The Memory wrapper is metered on BOTH sides, symmetrically and opt-in: `recalls` (Memory.search,
+      // the read) and `stored` (Memory.store, the generic durable write). The caller threads the run's ctx so
+      // the op counts against that run (a session-scoped LiteCtx → bounded to that session). `facts` is a
+      // DIFFERENT thing — the litectx episode→fact promotion — and stays OMITTED, not zeroed (§3.7 — a 0 would
+      // imply "tracked and didn't happen"): it has no writer until the remember-consolidation pass exists.
+      // (`stored` is the everyday wrapper write the original §3.6 list missed by conflating it with `facts`.)
+      memory: { stashed: 0, episodes: 0, recalls: 0, stored: 0 },
     };
     /** Accumulate one usage object into the cumulative token tiers. @param {Usage|null|undefined} u */
     const addUsage = (u) => {
