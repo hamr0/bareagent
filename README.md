@@ -17,9 +17,9 @@
   <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
 </p>
 
-**Lightweight agent orchestration. One required dep ([bareguard](https://npmjs.com/package/bareguard) ^0.9.0).**
+**Lightweight agent orchestration. Zero required deps — optional [bareguard](https://npmjs.com/package/bareguard) peer for single-gate governance.**
 
-Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. Single-gate governance via bareguard: every tool call traverses one policy hook, one audit log, one budget cap.
+Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. The core imports nothing; when you want governance, wire bareguard and every tool call traverses one policy hook, one audit log, one budget cap.
 
 ## Quick start
 
@@ -99,7 +99,7 @@ Every piece works alone — take what you need, ignore the rest. Two axes: **Act
 
 **Cross-language:** Run as a subprocess; talk JSONL over stdin/stdout from Python, Go, Rust, Ruby, or Java. Wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** 1 required (`bareguard ^0.9.0`). Optional: `cron-parser`, `better-sqlite3`, `barebrowse`, `baremobile`, `wearehere`.
+**Deps:** none required — the core imports nothing. Optional peers: `bareguard ^0.9.0` (governance), `better-sqlite3` (SQLite store); optional: `cron-parser`, `barebrowse`, `baremobile`, `wearehere`.
 
 This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/02-features/usage-guide.md).
 
