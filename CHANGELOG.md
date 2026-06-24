@@ -4,6 +4,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-06-24
+
+### Changed
+
+- **`bareguard` is now an optional `peerDependency`, not a hard `dependency`.** The core imports nothing — `Loop`, `Planner`, `Memory`, `Evaluator`, `remember`, stores, and tools all run without bareguard ever loading. `wireGate(gate)` operates on a **caller-supplied** `Gate` (you construct it), and the only real `require('bareguard')` is a lazy one in `bin/cli.js`, reached solely when the CLI is run with a gate configured. So a plain `npm install bare-agent` now pulls **zero runtime deps**; install `bareguard` yourself when you want single-gate governance. README / CLAUDE / context updated ("zero required deps — optional bareguard peer"). **Note:** consumers who relied on bareguard being installed transitively must now declare it themselves. `package.json` (`dependencies` → `peerDependencies` + `peerDependenciesMeta.optional`; kept as a devDependency for this repo's own tests).
+
 ## [0.18.0] — 2026-06-24
 
 **eval-assist F5 — the `remember` consolidation pass**, plus a loop consistency fix reported by multis. `remember` closes the last open eval-assist line: it distills the spans `stash` harvests out of the live transcript into durable facts and writes them through the generic four-verb `Store` socket (backend-agnostic, no litectx coupling), giving `metrics.memory.facts` its honest writer. Also: a `HaltError` thrown from a tool's `execute` now exits the loop cleanly like every other seam.

@@ -1,13 +1,13 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.18.0 | Node.js >= 18 | one required dep (`bareguard ^0.9.0`) | Apache 2.0
+> v0.19.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
 ## What this is
 
-bareagent is a lightweight agent orchestration library (~2.4K lines of core, one required dep). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, provider fallback, single-gate governance via [bareguard](https://npmjs.com/package/bareguard), cross-platform shell tools, and an MCP bridge. All components are independent — use one, use all, or bring your own.
+bareagent is a lightweight agent orchestration library (small core, zero required runtime deps — `bareguard` is an optional peer for governance). It provides composable components for LLM tool-calling loops, goal planning, state tracking, scheduled actions, human approval gates, persistent memory, circuit breaking, provider fallback, single-gate governance via [bareguard](https://npmjs.com/package/bareguard), cross-platform shell tools, and an MCP bridge. All components are independent — use one, use all, or bring your own.
 
 ```
 npm install bare-agent
