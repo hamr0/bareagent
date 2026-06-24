@@ -111,6 +111,20 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(result.cost, 0, 'result.cost stays 0 for back-compat; metrics is the honest signal');
   });
 
+  it('a non-finite-cost round is counted unpriced and never poisons metrics.costUsd', async () => {
+    // A KNOWN model but runaway usage → estimateCost would be ±Infinity → now null → unpriced.
+    // The danger this guards: a non-finite costUsd flowing to the gate makes `spentUsd` NaN/Inf and
+    // `NaN >= cap` false, disabling the cap. The round must read as unpriced, and the cumulative
+    // costUsd must stay clean (null here — nothing in the run was priceable), never NaN/Infinity.
+    const seen = [];
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: Infinity, outputTokens: 1 } }; } };
+    const result = await new Loop({ provider, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.unpricedRounds, 1);
+    assert.equal(result.metrics.costUsd, null, 'costUsd must be null, never NaN/Infinity');
+    assert.equal(seen[0].pricing, 'unpriced', 'a non-finite cost emits pricing:unpriced, not priced');
+    assert.equal(seen[0].costUsd, null, 'the emitted costUsd is null, not a non-finite number');
+  });
+
   it('onLlmResult carries an explicit pricing flag (priced vs unpriced)', async () => {
     const seen = [];
     const priced = { model: 'gpt-4o-mini', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };

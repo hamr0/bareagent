@@ -132,12 +132,18 @@ function estimateCost(model, usage) {
   const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
   const readMult = rates.cacheReadMult ?? 0.1;    // Anthropic convention when unspecified
   const writeMult = rates.cacheWriteMult ?? 1.25;
-  return (
+  const cost = (
     (usage.inputTokens || 0) * rates.in +
     (usage.outputTokens || 0) * rates.out +
     (usage.cacheReadTokens || 0) * rates.in * readMult +
     (usage.cacheCreationTokens || 0) * rates.in * writeMult
   ) / 1000;
+  // A non-finite cost (±Infinity from runaway token counts, NaN from a garbage rate-table entry) is a
+  // COULDN'T-PRICE, not a price. Return null so the round is marked `unpriced` and the value never
+  // poisons `totalCost`, `result.metrics.costUsd`, or — via onLlmResult → the gate — `spentUsd`. The
+  // last is the dangerous one: `NaN >= cap` is false, which would DISABLE a budget cap, not just
+  // under-count it. Same silent-unenforceable class as a null model (§3.7).
+  return Number.isFinite(cost) ? cost : null;
 }
 
 // R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
