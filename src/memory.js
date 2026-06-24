@@ -39,11 +39,16 @@ class Memory {
 
   /**
    * @param {string} query
-   * @param {Record<string, any>} [options]
+   * @param {Record<string, any>} [options] - Store search options. If `options.ctx` carries a Loop-lent
+   *   `recordMemoryOp` hook, this recall is counted against that run's `result.metrics.memory.recalls`
+   *   (§3.6, opt-in — the hook is absent unless the caller threads the run's ctx). Memory stays
+   *   Loop-agnostic: it only calls an optional hook, and `ctx` is stripped, never forwarded to the store.
    * @returns {any}
    */
   search(query, options = {}) {
-    return this._store.search(query, options);
+    const { ctx, ...storeOptions } = options || {};
+    if (ctx && typeof ctx.recordMemoryOp === 'function') ctx.recordMemoryOp('recalls');
+    return this._store.search(query, storeOptions);
   }
 
   /**

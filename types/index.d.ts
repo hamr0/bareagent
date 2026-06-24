@@ -46,11 +46,21 @@ export interface RunMetrics {
   spawned: number;
   /**
    * CE-activity rollup, derived in-place from Stream events (loop:trim, loop:summarize) — a
-   * convenience view, not a second source. `compactions`: destructive trim evictions (stash joins
-   * this in F2). `summaries`: ctx.summarize calls. (tokensTrimmed + a memory.* footprint are deferred —
-   * see eval-assist PRD §3.10.)
+   * convenience view, not a second source. `compactions`: destructive trim evictions. `summaries`:
+   * ctx.summarize calls. `tokensTrimmed`: APPROXIMATE (~4 chars/token) tokens evicted from the
+   * canonical transcript — an estimate, since evicted spans have no exact provider count (§3.10).
+   * (The memory.* footprint stays deferred — its source crosses component independence — §3.10.)
    */
-  context: { compactions: number; summaries: number };
+  context: { compactions: number; summaries: number; tokensTrimmed: number };
+  /**
+   * §3.6 memory footprint — the memory ops bareagent INITIATES this run, via the loop-lent
+   * `ctx.recordMemoryOp` hook (bounded per run; result.metrics is a copy taken at run end). `stashed`:
+   * lossless parks to the stash table/in-process. `episodes`: stance writes on compact. `recalls`:
+   * Memory.search(query, { ctx }) calls routed through the run's ctx (opt-in — 0 unless the caller
+   * threads ctx). `facts` is intentionally ABSENT, not 0 — nothing writes facts until the consolidation
+   * pass exists (§3.10; a 0 would be a false "tracked and didn't happen" signal).
+   */
+  memory: { stashed: number; episodes: number; recalls: number };
   /** Wall-clock duration of the run in ms. */
   durationMs: number;
 }

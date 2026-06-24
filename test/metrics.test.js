@@ -28,9 +28,34 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(m.toolCalls, 0);
     assert.deepEqual(m.byTool, {});
     assert.equal(m.spawned, 0);
-    assert.deepEqual(m.context, { compactions: 0, summaries: 0 });
+    assert.deepEqual(m.context, { compactions: 0, summaries: 0, tokensTrimmed: 0 });
+    assert.deepEqual(m.memory, { stashed: 0, episodes: 0, recalls: 0 }); // true zeros: no memory ops, not "untracked"
     assert.equal(typeof m.durationMs, 'number');
     assert.ok(m.durationMs >= 0);
+  });
+
+  // §3.6 memory footprint (channel A): the loop lends ctx.recordMemoryOp; the originating module
+  // (stash.js) calls it, the loop counts it into result.metrics.memory and emits loop:memory. Here a
+  // trim stands in for the stash fold, calling the lent hook exactly as stash.js does.
+  it('counts memory ops announced via the lent ctx.recordMemoryOp hook', async () => {
+    const provider = twoRoundProvider({ inputTokens: 1, outputTokens: 1 }, { inputTokens: 1, outputTokens: 1 });
+    const events = [];
+    const stream = { emit: (e) => events.push(e) };
+    // trim plays the part of a stash fold: announces a lossless park + an episode write through ctx.
+    const trim = async (msgs, ctx) => {
+      if (msgs.length > 1) { ctx.recordMemoryOp('stashed'); ctx.recordMemoryOp('episodes'); return msgs.slice(1); }
+      return msgs;
+    };
+    const ctx = {}; // the loop attaches recordMemoryOp non-enumerably (ctx is an object)
+    const result = await new Loop({ provider, trim, stream }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }], { ctx });
+    assert.ok(result.metrics.memory.stashed >= 1, 'stashed counted');
+    assert.ok(result.metrics.memory.episodes >= 1, 'episodes counted');
+    assert.ok(events.some(e => e.type === 'loop:memory' && e.data.op === 'stashed'), 'loop:memory emitted');
+    // recordMemoryOp is non-enumerable — it must not leak into the ctx identity contract.
+    assert.equal(Object.keys(ctx).includes('recordMemoryOp'), false);
+    // unknown kinds are ignored (forward-compatible), never crash or add a key.
+    ctx.recordMemoryOp('facts');
+    assert.equal('facts' in result.metrics.memory, false);
   });
 
   it('tokens are CUMULATIVE across rounds and across all four tiers (fixes the last-round bug)', async () => {
@@ -130,6 +155,9 @@ describe('result.metrics — the meter (Feature 3)', () => {
     const trim = async (msgs) => (msgs.length > 1 ? msgs.slice(1) : msgs);
     const result = await new Loop({ provider: provider2, trim }).run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }]);
     assert.ok(result.metrics.context.compactions >= 1, 'at least one eviction counted');
+    // tokensTrimmed is an APPROXIMATE (~4 chars/token) count of evicted transcript — non-zero once
+    // an eviction happens, since a message was removed (estimate, never an exact provider count).
+    assert.ok(result.metrics.context.tokensTrimmed > 0, 'evicted tokens estimated, not a silent zero');
   });
 
   it('context.summaries counts ctx.summarize calls made from the assemble seam', async () => {

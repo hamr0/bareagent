@@ -187,6 +187,9 @@ function createStashSkill(options = {}) {
       local.set(id, json);
       parked.set(label, { backend: 'local', id });
     }
+    // §3.6 memory footprint: a lossless park is a `stashed` op bareagent initiated. Announce it to the
+    // loop-lent meter (channel A); absent (no ctx / not wired to a Loop) it's a harmless no-op.
+    if (ctx && typeof ctx.recordMemoryOp === 'function') ctx.recordMemoryOp('stashed');
   };
   const rehydrate = (/** @type {any} */ ctx, /** @type {string} */ label) => {
     const handle = parked.get(label);
@@ -242,8 +245,11 @@ function createStashSkill(options = {}) {
     }
     msgs.splice(from, to - from, ...noteMessages(note)); // replace the span with the note pair, in place
     if (reason && ctx && typeof ctx.remember === 'function') {
-      try { await ctx.remember(`${keyPrefix}episode:${label}`, reason, { kind: 'episode' }); }
-      catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] episode stance write failed for "${label}": ${err && err.message}`); }
+      try {
+        await ctx.remember(`${keyPrefix}episode:${label}`, reason, { kind: 'episode' });
+        // §3.6 memory footprint: an episode stance write bareagent initiated (channel A; no-op if unwired).
+        if (typeof ctx.recordMemoryOp === 'function') ctx.recordMemoryOp('episodes');
+      } catch (err) { if (err && err.name === 'HaltError') throw err; onNote(`[stash] episode stance write failed for "${label}": ${err && err.message}`); }
     }
     enforceBackstop(ctx);
     return true;

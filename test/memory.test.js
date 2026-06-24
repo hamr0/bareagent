@@ -40,6 +40,26 @@ describe('Memory', () => {
     assert.deepEqual(calls[2], ['get', 1]);
     assert.deepEqual(calls[3], ['delete', 1]);
   });
+
+  // §3.6 recalls (opt-in): search routes the Loop-lent ctx.recordMemoryOp('recalls') hook when the
+  // caller threads the run's ctx — counting the recall against that run. ctx is stripped before the
+  // store call (it's not a store option) and Memory stays Loop-agnostic (only calls an optional hook).
+  it('counts a recall via options.ctx and never forwards ctx to the store', () => {
+    const calls = [];
+    const ops = [];
+    const fakeStore = { store: () => 1, get: () => null, delete: () => {}, search: (q, o) => { calls.push(o); return []; } };
+    const mem = new Memory({ store: fakeStore });
+    const ctx = { recordMemoryOp: (kind) => ops.push(kind) };
+
+    mem.search('q', { limit: 3, ctx });
+    assert.deepEqual(ops, ['recalls']);               // recall announced
+    assert.deepEqual(calls[0], { limit: 3 });         // ctx stripped — store sees only its options
+
+    // No ctx → no count, no crash; store still gets its options unchanged.
+    mem.search('q2', { limit: 9 });
+    assert.deepEqual(ops, ['recalls']);               // unchanged
+    assert.deepEqual(calls[1], { limit: 9 });
+  });
 });
 
 // --- JsonFileStore ---
