@@ -943,3 +943,53 @@ describe('Loop', () => {
     });
   });
 });
+
+// multis M9 ask (halterror-swallowed-from-tool-execute): a HaltError thrown from a tool's `execute` must
+// exit the loop cleanly — like every other seam — NOT get wrapped into a ToolError and let the loop run on.
+// Mirrors the ask's POC table: thrown from the tool body, it should halt once, not run away to the round cap.
+describe('Loop — HaltError from a tool body (execute seam consistency)', () => {
+  const { HaltError } = require('../src/errors');
+
+  // A provider that NEVER stops calling the tool — so a swallowed halt would run away to HARD_ROUND_LIMIT.
+  function relentlessToolCaller() {
+    let calls = 0;
+    return {
+      get calls() { return calls; },
+      async generate() {
+        calls++;
+        return { text: '', toolCalls: [{ id: `c${calls}`, name: 'park', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+  }
+
+  it('halts cleanly (result.error=halt:<rule>), invoking the tool exactly once — no runaway', async () => {
+    const provider = relentlessToolCaller();
+    let invoked = 0;
+    const park = { name: 'park', description: 'parks a ceremony', execute: async () => { invoked++; throw new HaltError('parked', { rule: 'ceremony-parked' }); } };
+
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [park]);
+
+    assert.equal(invoked, 1, 'tool body ran once, then the HaltError halted the loop (not swallowed → re-called)');
+    assert.equal(result.text, '');
+    assert.match(result.error, /^halt:ceremony-parked$/);
+    assert.ok(provider.calls <= 1, `no runaway: provider called ${provider.calls}×, expected ≤1 (was 100 before the fix)`);
+  });
+
+  it('an ordinary tool error is STILL wrapped into a ToolError (boundary preserved, loop continues)', async () => {
+    // The fix must not over-reach: a plain Error from a tool is not a governance signal — it becomes a
+    // tool-result and the loop proceeds (then the provider returns a final answer).
+    let i = 0;
+    const provider = {
+      async generate() {
+        i++;
+        return i === 1
+          ? { text: '', toolCalls: [{ id: 'c1', name: 'boom', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } }
+          : { text: 'recovered', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const boom = { name: 'boom', description: 'fails', execute: async () => { throw new Error('kaboom'); } };
+    const result = await new Loop({ provider }).run([{ role: 'user', content: 'go' }], [boom]);
+    assert.equal(result.error, null, 'a plain tool error is not a halt — loop recovers');
+    assert.equal(result.text, 'recovered');
+  });
+});

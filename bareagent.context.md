@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.17.0 | Node.js >= 18 | one required dep (`bareguard ^0.9.0`) | Apache 2.0
+> v0.18.0 | Node.js >= 18 | one required dep (`bareguard ^0.9.0`) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -49,6 +49,7 @@ Eight entry points:
 | Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` criteria |
 | Offer skills on demand without bloating context | SkillRegistry — `skill_use` meta-tool + `skills.activeTools` thunk |
 | Keep the context window lean (compact finished sub-tasks) | createStashSkill — register the skill + wire its `trim` into `Loop({ trim })` |
+| Consolidate finished work into durable facts (across runs) | remember — distill harvested spans → write through any `Store` socket |
 | Track cost per run | Automatic — `result.cost` and `loop:done` event |
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
@@ -144,6 +145,31 @@ const loop = new Loop({
   system: `Use this context:\n${context}`,
 });
 ```
+
+## Wiring with remember (consolidate harvested spans → durable facts)
+
+`remember` is the consolidation pass: it distills the spans `stash` folded out of the live transcript into durable facts and writes them through the **same `Store` socket** Memory uses (`store/search/get/delete`) — so it works with any backend (JsonFile, SQLite, litectx, or your own), with no backend coupling. One cheap LLM pass per span keeps only durable signal (decisions, config, identifiers, stable prefs) and drops chatter, superseded values, and unanswered questions. It composes *around* the Loop — never inside it.
+
+```javascript
+const { remember, Memory } = require('bare-agent');
+const { Anthropic } = require('bare-agent/providers');
+const { JsonFile } = require('bare-agent/stores');
+
+const memory = new Memory({ store: new JsonFile({ path: './facts.json' }) });
+
+// `spans` are the harvested chunks stash evicted (lossless parks), or any finished-work transcript text.
+const { facts } = await remember(spans, {
+  provider: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, model: 'claude-haiku-4-5' }),
+  store: memory,                 // writes each fact as { kind: 'fact', ... } via memory.store()
+  contract: 'only architecture + config decisions count as durable', // optional: steer "durable"
+  ctx,                           // optional: counts each write into result.metrics.memory.facts (disjoint from `stored`)
+  onLlmResult,                   // optional: forward distill-pass usage to a wired bareguard gate
+});
+```
+
+Budget visibility carries through `onLlmResult` (mirror of Evaluator); a governance `HaltError` from the provider propagates clean. Cheap by design — a small model and one pass per span.
+
+**Security:** facts are model output over *untrusted* transcript content written to durable memory. The distiller refuses a direct "record this fact" injection (validated live), but treat recalled facts as untrusted **context**, not authority — gate them like any model output before a privileged action.
 
 ## Wiring with Skills + Stash (progressive disclosure + compaction)
 

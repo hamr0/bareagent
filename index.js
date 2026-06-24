@@ -4,6 +4,7 @@ const { Loop } = require('./src/loop');
 const { Planner } = require('./src/planner');
 const { Evaluator } = require('./src/evaluator');
 const { refine } = require('./src/refine');
+const { remember } = require('./src/remember');
 const { assessComplexity, isCritical } = require('./src/complexity');
 const { SkillRegistry } = require('./src/skills');
 const { createStashSkill } = require('./src/stash');
@@ -32,6 +33,7 @@ module.exports = {
   Planner,
   Evaluator,
   refine,
+  remember,
   assessComplexity,
   isCritical,
   SkillRegistry,
