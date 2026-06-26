@@ -583,6 +583,16 @@ trusting them — each a harness fix, none a real failure.
    default (parent-model synthesis) unchanged.
 5. **NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
    `runPlan`, for callers who want guaranteed parallelism (aurora code).
+   **Calibration gate ✅ PASS** (`poc/rlm-nb2-calibrate.mjs`, live `gpt-4o-mini`): the
+   tier→count map **2/4/6 is confirmed** — measured coverage knees `{medium:2, large:4,
+   xlarge:6}` == predicted `⌈S/B⌉` for all three corpora; the count knob is load-bearing
+   (N=1 under-covers ≤87%, error flattens at the floor exactly at the knee). Honest framing
+   the gate locked in: the knee LOCATION is topology (`⌈corpus/worker-budget⌉`), so 2/4/6 is
+   an **overridable default**, not a discovered constant (which is *why* `opts.count` is
+   overridable and Family-A stays the adaptive default). v1 of the spike FAILED on three
+   harness defects (raw-chunk workers = spike-1's losing arm → confuser over-count, no
+   overflow condition, sub-floor threshold) — debugged per "don't trust a degenerate number";
+   v2 made coverage the sole error source (pull workers + per-worker budget cap). **Build next.**
 6. **Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
    (RC-11/12).
 7. **Wire receipts** (RC-10) through existing Stream/metrics; wire litectx as
