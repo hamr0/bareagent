@@ -581,8 +581,17 @@ trusting them — each a harness fix, none a real failure.
    (§9 scenario 1 / RC-9). Validated by 8 offline tests (mutation-proved) + a live
    `--nb3` smoke (real fan-out → code-reduce summed `[2,1,3]` to truth `6`). Family-A
    default (parent-model synthesis) unchanged.
-5. **NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
-   `runPlan`, for callers who want guaranteed parallelism (aurora code).
+5. ~~**NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
+   `runPlan`, for callers who want guaranteed parallelism (aurora code).~~ **✅ DONE** —
+   `recurse(task, ctx, {count}|{mode:'fanout'})` → the new `Planner.plan(goal, {count})` seam
+   (exactly N independent `dependsOn:[]` steps) → `runPlan` (waves, concurrency cap) → the NB-3
+   reducer (`'concat'` default) → verify. Count = `opts.count` (overrides) else the tier map
+   medium/complex/critical → **2/4/6** (`simple`→1). Each slice is a fresh-window `recurse()`
+   child (may itself self-decompose under Family A, same `maxDepth`); forced fan-out not
+   re-applied to children. RC-9 holds: a dead/incomplete slice → `{incomplete, missingSlices}`,
+   never a survivor-sum; a governance `HaltError` (planner/child/reduce/verify) → clean
+   incomplete. +6 mutation-checked tests (30 total) + live `--fanout` smoke (`gpt-4o-mini`:
+   forced 3 slices round-tripped Planner→runPlan→merge→verify).
    **Calibration gate ✅ PASS** (`poc/rlm-nb2-calibrate.mjs`, live `gpt-4o-mini`): the
    tier→count map **2/4/6 is confirmed** — measured coverage knees `{medium:2, large:4,
    xlarge:6}` == predicted `⌈S/B⌉` for all three corpora; the count knob is load-bearing
@@ -592,7 +601,11 @@ trusting them — each a harness fix, none a real failure.
    overridable and Family-A stays the adaptive default). v1 of the spike FAILED on three
    harness defects (raw-chunk workers = spike-1's losing arm → confuser over-count, no
    overflow condition, sub-floor threshold) — debugged per "don't trust a degenerate number";
-   v2 made coverage the sole error source (pull workers + per-worker budget cap). **Build next.**
+   v2 made coverage the sole error source (pull workers + per-worker budget cap).
+   **Boundary the live smoke surfaced:** a forced fan-out over an in-context DATA corpus
+   starves its workers (Planner emits slice *descriptions*; without litectx handle tools a
+   worker has no data to read) → data-partition fan-out lands with `opts.tools` at **step 7**;
+   Family-B today is for **self-contained semantic** slices.
 6. **Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
    (RC-11/12).
 7. **Wire receipts** (RC-10) through existing Stream/metrics; wire litectx as

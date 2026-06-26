@@ -18,14 +18,20 @@
 //   ANTHROPIC_API_KEY=$(pass amr/claude_api) node poc/rlm-recurse-smoke.mjs
 
 import { AnthropicProvider } from '../src/provider-anthropic.js';
+import { OpenAIProvider } from '../src/provider-openai.js';
 import { recurse } from '../src/recurse.js';
 
-const MODEL = process.env.MODEL || 'claude-haiku-4-5';
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('Set ANTHROPIC_API_KEY (e.g. ANTHROPIC_API_KEY=$(pass amr/claude_api)).');
+// PROVIDER=anthropic (default) | openai — run on whichever key has balance.
+const PROVIDER = (process.env.PROVIDER || 'anthropic').toLowerCase();
+const keyVar = PROVIDER === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+if (!process.env[keyVar]) {
+  console.error(`Set ${keyVar} (e.g. ${keyVar}=$(pass amr/${PROVIDER === 'openai' ? 'openai' : 'claude'}_api) PROVIDER=${PROVIDER}).`);
   process.exit(2);
 }
-const provider = new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY, model: MODEL });
+const provider = PROVIDER === 'openai'
+  ? new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY, model: process.env.MODEL || 'gpt-4o-mini' })
+  : new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY, model: process.env.MODEL || 'claude-haiku-4-5' });
+const MODEL = provider.model;
 
 // A genuinely decomposable, complex-tier task (so the spawn tool is offered) with three INDEPENDENT parts —
 // the natural shape for the model to delegate. Not over-instructed: Family A is model-driven; the NB-5 prompt
@@ -113,7 +119,59 @@ async function nb3Scenario() {
   process.exit(fail === 0 ? 0 : 1);
 }
 
+// ── Family B scenario (--fanout): FORCED fan-out through the SHIPPED recurse() Family-B path (NB-2) ───────
+// The offline tests drive a scripted provider; this is the gap they cannot cover: a REAL Planner call FORCED
+// to EXACTLY N independent slices (the NB-2 count seam) → runPlan waves → reduce → verify, on the wire — the
+// surface no spike exercised. The task is a SELF-CONTAINED SEMANTIC fan-out (each slice answerable from the
+// model's own knowledge), NOT an in-context data partition — partitioning a held corpus needs the litectx
+// pull-default HANDLE tools (opts.tools), which are build step 7. (A data-count fanout pre-step-7 starves its
+// workers of the data: the Planner emits slice DESCRIPTIONS, and without handles a worker has nothing to read.)
+async function fanoutScenario() {
+  console.log(`# RLM recurse() Family-B FORCED fan-out LIVE (NB-2)  (provider=${PROVIDER} model=${MODEL})\n`);
+  const task =
+    'Produce a combined "first-day developer setup" guide covering three independent areas — (1) Git basics, ' +
+    '(2) editor/IDE setup, and (3) shell/terminal basics — by drafting each area separately, then merging ' +
+    'them into one ordered, de-duplicated checklist. Each area is self-contained general knowledge.';
+  const CONTRACT = 'ONE ordered, de-duplicated setup checklist that visibly covers all three areas: Git, editor/IDE, and shell/terminal.';
+  console.log(`task: ${task}\n`);
+
+  const t0 = Date.now();
+  // count:3 — force exactly three parallel slices. NB-2 Planner seam → runPlan → 'merge' reduce → verify.
+  const out = await recurse(task, { provider, onLlmResult }, { count: 3, synthesize: 'merge', contract: CONTRACT });
+  const ms = Date.now() - t0;
+
+  console.log('## Receipts tree (RC-10)');
+  printTree(out.receipts);
+  const spawnedCount = (out.receipts.spawned || []).length;
+
+  console.log('\n## Verdict (verify slot)');
+  if (out.verdict) console.log(`status=${out.verdict.status}  pass=${out.verdict.pass}  score=${out.verdict.score}`);
+  else console.log('(no verdict)');
+
+  console.log('\n## Result (merged answer)');
+  console.log(out.incomplete ? `[INCOMPLETE] best=\n${String(out.best || '').slice(0, 500)}` : String(out.result || '').slice(0, 500));
+  console.log(`\nllm calls=${usageTotals.calls}  in=${usageTotals.input}  out=${usageTotals.output}  wall=${ms}ms`);
+
+  const text = String(out.result || '').toLowerCase();
+  const coversAll = /git/.test(text) && /(editor|ide)/.test(text) && /(shell|terminal)/.test(text);
+  const checks = [];
+  const ok = (cond, msg) => { checks.push({ cond: !!cond, msg }); };
+  ok(spawnedCount === 3, `A. forced fan-out produced EXACTLY 3 slices (Planner count seam → runPlan); got ${spawnedCount}`);
+  ok(!out.incomplete && typeof out.result === 'string' && out.result.length > 60, 'B. the reduce merged the slices into a non-empty answer');
+  ok(coversAll, 'C. the merged answer covers all three independent slices (Git, editor/IDE, shell) — fan-out really happened');
+  ok(out.verdict && typeof out.verdict.status === 'string', 'D. the verify slot ran against the contract and returned a Verdict');
+
+  console.log('\n## GATE (Family B / NB-2)');
+  let fail = 0;
+  for (const c of checks) { console.log(`  ${c.cond ? 'OK  ' : 'FAIL'} ${c.msg}`); if (!c.cond) fail++; }
+  console.log(`\n${fail === 0
+    ? 'FANOUT SMOKE PASS ✅ — shipped recurse() forced-fan-out routed Planner→runPlan→reduce→verify on the real wire (NB-2).'
+    : `FANOUT SMOKE FAIL ❌ (${fail})`}`);
+  process.exit(fail === 0 ? 0 : 1);
+}
+
 async function main() {
+  if (process.argv.includes('--fanout')) return fanoutScenario();
   if (process.argv.includes('--nb3')) return nb3Scenario();
   console.log(`# RLM recurse() LIVE smoke  (model=${MODEL})\n`);
   console.log(`task: ${TASK}\n`);

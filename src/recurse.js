@@ -24,10 +24,20 @@
 
 const { Loop } = require('./loop');
 const { Evaluator } = require('./evaluator');
+const { Planner } = require('./planner');
+const { runPlan } = require('./run-plan');
 const { assessComplexity, isCritical } = require('./complexity');
 const { HaltError } = require('./errors');
 const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
 const { synthesize } = require('./recurse-synthesize');
+
+// NB-2 forced-fan-out tier→count map (Family B). CALIBRATED live (poc/rlm-nb2-calibrate.mjs, gpt-4o-mini):
+// the measured coverage knees {2,4,6} == predicted ⌈corpus/worker-budget⌉ for medium/complex/critical. These
+// are OVERRIDABLE DEFAULTS, not discovered constants — the right count is task-specific (which is why
+// `opts.count` overrides this and Family A is the adaptive default). `simple` → 1 (a single forced worker).
+const TIER_COUNT = { simple: 1, medium: 2, complex: 4, critical: 6 };
+// Cap on workers run at once within a fan-out wave (in-process; bareguard caps the family rate too). Overridable.
+const DEFAULT_FANOUT_CONCURRENCY = 4;
 
 /**
  * @typedef {object} RecurseCtx
@@ -55,14 +65,22 @@ const { synthesize } = require('./recurse-synthesize');
  *   not the loose task, and verification always runs.
  * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate]
  *   Override the verifier (fills `recurse()`'s verify slot, §7.1). Default = an `Evaluator` rubric pass.
- * @property {((args: {task: string, text: string, results: any[], children: object[], ctx: RecurseCtx}) => any) | 'concat' | 'merge'} [synthesize]
+ * @property {((args: {task: string, text: string|null, results: any[], children: object[], ctx: RecurseCtx}) => any) | 'concat' | 'merge'} [synthesize]
  *   Override synthesis/reduce (NB-3). A FUNCTION is a deterministic code-reduce over the child `results` — the
  *   §9.1 aggregation path (LLM arithmetic over partials carried ~10–15% error). A STRATEGY string runs the
  *   built-in reducer: `'concat'` (lossless no-LLM join) or `'merge'` (an isolated Loop-driven subjective
  *   merge); a string is ignored when no child ran. Default (unset) = the worker's own final text (Family A:
  *   the parent model already combined the children's results in its closing turn).
- * @property {number} [count] - (Opt-in, build step 5 / NB-2) forced fan-out count. Not yet implemented.
- * @property {'fanout'} [mode] - (Opt-in, build step 5 / NB-2) forced fan-out mode. Not yet implemented.
+ * @property {number} [count] - (Opt-in, NB-2 / Family B) FORCED fan-out: decompose into exactly this many
+ *   independent parallel workers via `Planner`→`runPlan`, then reduce. A positive integer here is the count;
+ *   it OVERRIDES the tier→count map. Setting it (or `mode:'fanout'`) takes the deterministic-parallelism path
+ *   instead of the model-driven Family-A default. For known-parallel tasks where the caller wants guaranteed
+ *   fan-out, not the model's adaptive choice.
+ * @property {'fanout'} [mode] - (Opt-in, NB-2 / Family B) request forced fan-out WITHOUT a fixed count — the
+ *   count is then derived from `assessComplexity`'s tier via the calibrated map (medium/complex/critical →
+ *   2/4/6; simple → 1). `opts.count` takes precedence when both are given.
+ * @property {number} [concurrency] - (Family B) max workers run at once per wave (default 4). The wave
+ *   structure is `runPlan`'s; bareguard still bounds the family rate independently.
  */
 
 /**
@@ -102,7 +120,7 @@ const { synthesize } = require('./recurse-synthesize');
  * @param {RecurseOptions} [opts] - The policy knobs.
  * @returns {Promise<RecurseResult>} `{ result, verdict, receipts }` on convergence; `{ incomplete, best,
  *   receipts }` on guard exhaustion. NEVER a fabricated success (RC-9).
- * @throws {Error} no provider supplied, or `opts.count`/`mode:'fanout'` requested (Family B is build step 5).
+ * @throws {Error} no provider supplied (on neither `ctx.provider` nor `opts.provider`).
  */
 async function recurse(task, ctx = {}, opts = {}) {
   if (typeof task !== 'string' || task.length === 0) {
@@ -111,12 +129,6 @@ async function recurse(task, ctx = {}, opts = {}) {
   const provider = ctx.provider || opts.provider;
   if (!provider) {
     throw new Error('[recurse] requires a provider on ctx.provider (or opts.provider)');
-  }
-
-  // Family B forced fan-out (NB-2) is build step 5 — fail loud, not a silent fallthrough to Family A (the
-  // caller asked for guaranteed parallelism and would not get it).
-  if (opts.mode === 'fanout' || opts.count != null) {
-    throw new Error('[recurse] forced fan-out (opts.count / mode:"fanout", Family B / NB-2) is build step 5 — not yet implemented; the default Family-A path needs no count');
   }
 
   const depth = Number.isInteger(ctx.depth) ? /** @type {number} */ (ctx.depth) : 0;
@@ -142,6 +154,14 @@ async function recurse(task, ctx = {}, opts = {}) {
     tokens: null,
     model: null,
   };
+
+  // Family B (NB-2) — FORCED fan-out, opt-in. The caller asked for guaranteed deterministic parallelism, so
+  // this path does NOT offer the model the spawn tool; a deterministic count → Planner → runPlan waves →
+  // NB-3 reduce → verify. assessComplexity is still only a hint here (it sets the count when no explicit
+  // `opts.count`); `critical` still forces verify. Branches before the Family-A spawn-tool setup below.
+  if (opts.mode === 'fanout' || opts.count != null) {
+    return recurseFanout(task, ctx, opts, { provider, depth, maxDepth, assessment, critical, node });
+  }
 
   // Offer the spawn A-tool only below the cap AND only when decomposition is plausibly useful (`simple`
   // routes to single-shot). At `depth >= maxDepth` the tool is withheld — the NB-4 tool half of the scrub,
@@ -252,6 +272,143 @@ async function recurse(task, ctx = {}, opts = {}) {
     }
     throw err;
   }
+}
+
+/**
+ * Family B (NB-2) — the forced-fan-out path. Deterministic count → `Planner` (the NB-2 `count` seam forces
+ * exactly N independent parallel steps) → `runPlan` (wave parallelism, concurrency cap) → NB-3 reduce →
+ * verify. Each step runs as a fresh-window `recurse()` child (so copy-on-return / honest-incomplete / the
+ * capability-scrub all come for free, and a child MAY itself decompose under Family A); forced fan-out is NOT
+ * re-applied to children (their `count`/`mode` are stripped). Reduce default is `'concat'` (lossless) since
+ * there is no parent closing turn to combine the slices the way Family A's does. RC-9 holds: any dead/halted/
+ * incomplete slice → `{incomplete, missingSlices}`, never a survivor-sum. A governance HaltError (planner,
+ * a child, the reduce, or verify) is a clean `incomplete` exit, never a thrown run.
+ * @param {string} task
+ * @param {RecurseCtx} ctx
+ * @param {RecurseOptions} opts
+ * @param {{provider: Provider, depth: number, maxDepth: number, assessment: {level: string, score: number}, critical: boolean, node: RecurseNode}} state
+ * @returns {Promise<RecurseResult>}
+ */
+async function recurseFanout(task, ctx, opts, state) {
+  const { provider, depth, maxDepth, assessment, critical, node } = state;
+  node.model = provider.model || null; // the orchestration is code; per-worker tokens live in node.spawned[]
+
+  // Count: an explicit positive-integer `opts.count` wins; otherwise the calibrated tier→count map. Floor at 1
+  // (a 0/NaN/negative `count` is meaningless for "guaranteed parallelism" — fall back to the tier default).
+  const explicit = Number.isInteger(opts.count) && /** @type {number} */ (opts.count) > 0 ? opts.count : null;
+  const count = explicit != null ? /** @type {number} */ (explicit) : (TIER_COUNT[assessment.level] || 1);
+  const concurrency = Number.isInteger(opts.concurrency) && /** @type {number} */ (opts.concurrency) > 0
+    ? opts.concurrency : DEFAULT_FANOUT_CONCURRENCY;
+
+  const childResults = [];
+  const contract = typeof opts.contract === 'string' ? opts.contract : null;
+
+  try {
+    // 1) Decompose into exactly `count` independent parallel steps (the NB-2 Planner seam). A non-Halt planner
+    //    failure (e.g. unparseable plan) is an honest incomplete — we cannot fan out, so we do not pretend to.
+    const planner = new Planner({ provider });
+    let steps;
+    try {
+      steps = await planner.plan(task, { count });
+    } catch (err) {
+      if (err instanceof HaltError) throw err;
+      node.incomplete = true;
+      return { incomplete: true, best: null, missingSlices: [task], receipts: node };
+    }
+
+    // 2) Fan out: each step is a fresh-window recurse() child. Forced fan-out is NOT re-applied to children —
+    //    they run Family A (or single-shot) so the parallelism is exactly one level wide per `count`. maxDepth
+    //    is preserved so a genuinely oversized slice may still self-decompose under the same ceiling.
+    const childOpts = { ...opts, count: undefined, mode: undefined };
+    const results = await runPlan(
+      steps,
+      (step) => recurse(step.action, { ...ctx, depth: depth + 1 }, childOpts),
+      { concurrency },
+    );
+
+    // 3) Collect copy-on-return values + lineage, in plan order. A failed step (executeFn threw) or a child
+    //    that came back incomplete/halted is a MISSING slice — recorded, never survivor-summed (RC-9).
+    /** @type {string[]} */
+    const missingSlices = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const slice = steps[i] ? steps[i].action : `slice ${i}`;
+      if (r.status !== 'done' || !r.result) {
+        node.spawned.push(makeDeadNode(slice, depth + 1));
+        childResults.push('');
+        missingSlices.push(slice);
+        continue;
+      }
+      const child = /** @type {RecurseResult} */ (r.result);
+      node.spawned.push(child.receipts);
+      const value = child.incomplete
+        ? (child.best == null ? '' : child.best)
+        : (child.result == null ? '' : child.result);
+      childResults.push(value);
+      if (child.incomplete) missingSlices.push(slice);
+    }
+
+    // 4) NB-3 reduce over the slice results. Unlike Family A there is no parent closing turn, so we ALWAYS
+    //    reduce: a `synthesize` FUNCTION is the deterministic code-reduce (§9.1); a string runs the built-in
+    //    reducer; unset defaults to lossless `'concat'`. (`childResults` always has `count` entries.)
+    let result;
+    if (typeof opts.synthesize === 'function') {
+      result = await opts.synthesize({ task, text: null, results: childResults, children: node.spawned, ctx });
+    } else {
+      const strategy = typeof opts.synthesize === 'string' ? opts.synthesize : 'concat';
+      result = await synthesize(task, childResults, {
+        strategy: /** @type {any} */ (strategy),
+        provider,
+        contract,
+        onLlmResult: ctx.onLlmResult,
+        policy: ctx.policy,
+        text: null,
+        children: node.spawned,
+        ctx,
+      });
+    }
+
+    // 5) Honest completeness (RC-9): any missing slice → incomplete, with the partial reduce as `best`.
+    if (missingSlices.length > 0) {
+      node.incomplete = true;
+      return { incomplete: true, best: result, missingSlices, receipts: node };
+    }
+
+    // 6) Verify (RC-7): forced for critical, or when a contract/override is supplied.
+    const wantVerify = critical || contract != null || typeof opts.evaluate === 'function';
+    if (wantVerify) {
+      const verdict = await verify(task, result, ctx, opts);
+      node.verdict = verdict;
+      return { result, verdict, receipts: node };
+    }
+    return { result, verdict: null, receipts: node };
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      // best-effort partial: whatever slices we did collect, losslessly joined (no LLM — the gate already tripped)
+      const best = childResults.length ? childResults.filter(v => v !== '').join('\n\n') : null;
+      return { incomplete: true, best: best || null, receipts: node };
+    }
+    throw err;
+  }
+}
+
+/**
+ * A receipts node for a slice that never produced a result (the worker threw / runPlan marked it failed) — so
+ * the audit tree still shows the lineage and the dead branch, rather than a silent gap.
+ * @param {string} task
+ * @param {number} depth
+ * @returns {RecurseNode}
+ */
+function makeDeadNode(task, depth) {
+  const a = assessComplexity(task);
+  return {
+    task, depth,
+    complexity: { level: a.level, score: a.score },
+    critical: isCritical(task),
+    spawned: [], verdict: null, incomplete: true, halted: false, tokens: null, model: null,
+  };
 }
 
 /**

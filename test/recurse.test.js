@@ -79,10 +79,91 @@ describe('recurse — wiring & guards', () => {
     await assert.rejects(() => recurse('', { provider }), /non-empty string/);
   });
 
-  it('Family B forced fan-out is opt-in and not yet built — fails loud, never silently runs Family A', async () => {
-    const { provider } = scriptedProvider(() => ({ text: 'x' }));
-    await assert.rejects(() => recurse(COMPLEX_TASK, { provider }, { count: 4 }), /build step 5/);
-    await assert.rejects(() => recurse(COMPLEX_TASK, { provider }, { mode: 'fanout' }), /build step 5/);
+});
+
+// Family B (NB-2) forced fan-out: a deterministic count → Planner (count seam) → runPlan waves → NB-3 reduce
+// → verify. The scripted provider serves the planner, the slice workers, the reducer, AND the verifier, routed
+// by message content. A planner call is the one whose SYSTEM prompt is the planning-agent prompt; it parses the
+// forced count from the injected OVERRIDE and emits exactly that many independent slices.
+const isPlanner = (messages) => systemOf(messages).includes('planning agent');
+function fanoutHandler({ failSliceIndex = -1 } = {}) {
+  return (messages) => {
+    if (isPlanner(messages)) {
+      const m = systemOf(messages).match(/EXACTLY (\d+)/);
+      const n = m ? Number(m[1]) : 3;
+      const steps = Array.from({ length: n }, (_, i) => ({
+        id: `s${i}`,
+        // 'count' → simple tier → each slice is a single-shot leaf (no nested planner / no spawn tool)
+        action: i === failSliceIndex ? `SLICE ${i}: FAILSLICE count alpha` : `SLICE ${i}: count the alpha records`,
+        dependsOn: [],
+      }));
+      return { text: JSON.stringify(steps) };
+    }
+    if (isVerify(messages)) return { text: SATISFIED };
+    const user = lastUser(messages);
+    if (user.includes('FAILSLICE')) throw new HaltError('slice halted by governance', { rule: 'test-cap' });
+    return { text: `RESULT(${user.slice(0, 20)})` };
+  };
+}
+
+describe('recurse — Family B forced fan-out (NB-2)', () => {
+  it('opts.count → Planner forced to EXACTLY that many slices → concat reduce joins all results', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 3 });
+    // the planner was told to make EXACTLY 3 independent slices (the NB-2 seam)
+    const planner = sp.calls.find(c => c.messages.some(m => m.role === 'system' && /planning agent/.test(m.content)));
+    assert.ok(/EXACTLY 3 independent/.test(systemOf(planner.messages)), 'planner must receive the forced count=3 directive');
+    // 3 slices ran and the lossless concat carries every slice's result (no survivor-drop)
+    assert.equal(out.incomplete, undefined);
+    for (let i = 0; i < 3; i++) assert.ok(String(out.result).includes(`SLICE ${i}`), `result must include slice ${i}`);
+    assert.equal(out.receipts.spawned.length, 3, 'receipts show 3 child slices (RC-10 lineage)');
+    // mutation check: Family B is deterministic — it must NEVER offer the model a spawn_child tool
+    assert.ok(sp.calls.every(c => !c.tools.includes('spawn_child')), 'forced fan-out must not offer spawn_child');
+  });
+
+  it('mode:"fanout" (no count) → count derived from the calibrated tier map (complex → 4)', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { mode: 'fanout' });
+    const planner = sp.calls.find(c => isPlanner(c.messages));
+    assert.ok(/EXACTLY 4 independent/.test(systemOf(planner.messages)), 'complex tier must force count=4');
+    assert.equal(out.receipts.spawned.length, 4);
+  });
+
+  it('opts.count OVERRIDES the tier map (count=2 on a complex task → 2, not 4) — RC-3 deterministic', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const a = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2 });
+    const b = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2 });
+    assert.equal(a.receipts.spawned.length, 2);
+    assert.equal(b.receipts.spawned.length, 2, 'same input+count ⇒ same slice count (deterministic)');
+  });
+
+  it('opts.synthesize FUNCTION is the deterministic code-reduce over child results (§9.1)', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const reduce = ({ results }) => `CODE_REDUCE:${results.length}`;
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 4, synthesize: reduce });
+    assert.equal(out.result, 'CODE_REDUCE:4', 'the code-reduce fn sees all 4 slice results');
+  });
+
+  it('RC-9: an incomplete slice → {incomplete, missingSlices}, NEVER a silent survivor-sum', async () => {
+    const sp = scriptedProvider(fanoutHandler({ failSliceIndex: 1 }));
+    // a code-reduce that would HAPPILY survivor-sum the surviving slices if recurse let it
+    const reduce = ({ results }) => `SUM:${results.filter(Boolean).length}`;
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 3, synthesize: reduce });
+    assert.equal(out.incomplete, true, 'one dead slice ⇒ the whole node is incomplete');
+    assert.equal(out.result, undefined, 'an incomplete fan-out must NOT return a clean result (no faked pass)');
+    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.some(s => /SLICE 1/.test(s)),
+      'the dead slice is named in missingSlices (the anti-undercount signal)');
+    assert.ok(out.best != null, 'the partial reduce is still surfaced as best (RC-9)');
+  });
+
+  it('a governance HaltError from the planner is a clean incomplete exit, not a thrown run', async () => {
+    const sp = scriptedProvider((messages) => {
+      if (isPlanner(messages)) throw new HaltError('planner halted', { rule: 'budget' });
+      return { text: 'x' };
+    });
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 4 });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'the node records the governance halt');
   });
 });
 

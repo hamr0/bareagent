@@ -47,23 +47,32 @@ class Planner {
   /**
    * Generate a step DAG from a goal.
    * @param {string} goal - The user's goal to decompose.
-   * @param {{info?: string}} [context={}] - Optional context with info field.
+   * @param {{info?: string, count?: number}} [context={}] - Optional context. `info` is prior
+   *   context to factor in. `count` (RLM NB-2 seam): when a positive integer, forces the plan to
+   *   exactly that many INDEPENDENT, parallelizable steps (all `dependsOn: []`) instead of the
+   *   model's free 2–7 — lets `recurse()` impose the deterministic tier→count for forced fan-out.
    * @returns {Promise<Step[]>}
    * @throws {Error} `[Planner] could not parse plan` — when LLM output is not parseable JSON.
    * @throws {Error} `[Planner] expected JSON array` — when parsed result is not an array.
    * @throws {Error} `[Planner] step missing id or action` — when a step lacks required fields.
    */
   async plan(goal, context = {}) {
+    // NB-2: a forced fan-out count (positive integer only — a 0/NaN/negative falls back to free planning).
+    const count = Number.isInteger(context.count) && /** @type {number} */ (context.count) > 0
+      ? /** @type {number} */ (context.count) : null;
     if (this._cacheTTL > 0) {
-      const cacheKey = JSON.stringify({ goal, info: context.info || '' });
+      const cacheKey = JSON.stringify({ goal, info: context.info || '', count });
       const cached = this._cache.get(cacheKey);
       if (cached && Date.now() < cached.expiresAt) {
         return cached.result;
       }
     }
 
+    const system = count
+      ? `${this.prompt}\n\nOVERRIDE: ignore the "2-7 steps" guidance. Decompose into EXACTLY ${count} independent, parallelizable steps, each with "dependsOn": []. Split the goal into ${count} disjoint slices of comparable size that together cover it with no overlap.`
+      : this.prompt;
     const messages = [
-      { role: 'system', content: this.prompt },
+      { role: 'system', content: system },
     ];
     if (context.info) {
       messages.push({ role: 'user', content: `Context: ${context.info}` });
@@ -78,7 +87,7 @@ class Planner {
     const steps = this._parse(result.text);
 
     if (this._cacheTTL > 0) {
-      const cacheKey = JSON.stringify({ goal, info: context.info || '' });
+      const cacheKey = JSON.stringify({ goal, info: context.info || '', count });
       this._cache.set(cacheKey, { result: steps, expiresAt: Date.now() + this._cacheTTL });
     }
 
