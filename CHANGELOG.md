@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **RLM design docs — `docs/00-context/RLM_EXPLAINED.md` (research) + `docs/01-product/RLM_PRD.md` (requirements).** Design for the planned `recurse()` primitive (Recursive Language Models): a **single-import, decompose→fan-out→verify→synthesize** loop composed *around* existing primitives (`Loop`, `Planner`, `runPlan`, `Evaluator`, `spawn`, bareguard) — **thin glue, not a new engine**. Locked decisions: borrow `/prose`'s discipline (contract / isolation / copy-on-return / receipts) but **add the bounded self-recursion `/prose` forbids**; **Family-A-default control** (model-driven decomposition via a depth-bounded `spawn` tool; deterministic forced fan-out is opt-in); **open `maxDepth=3`** escalation-gated on *measurable* slice-overflow and capped by bareguard; **`assessComplexity` always runs as a hint** with a **non-overridable `critical→verify` safety floor**; **litectx pull-default** context (handles as tools, not pre-chewed slices); an optional **`rlm.md` authoring front-door**; and audit via the existing bareguard/`Stream` substrate. **Docs only — no code; pre-POC** (the design gates on POC spikes before any build).
+
 ## [0.19.0] — 2026-06-24
 
 ### Changed
