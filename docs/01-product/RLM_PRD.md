@@ -2,8 +2,10 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **Draft — POC-validated** (§9 spikes 1 & 2 green;
-> evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`). Date: 2026-06-26.
+> requirements doc). Status: **In build — POC-validated, step 3 shipped** (§9 spikes 1 & 2
+> green; the default Family-A path `recurse()` built + tested — §10 step 3 ✅). Evidence
+> `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`, `src/recurse.js`,
+> `test/recurse.test.js`. Date: 2026-06-26.
 
 ---
 
@@ -551,11 +553,15 @@ trusting them — each a harness fix, none a real failure.
 2. ~~**A-tool POC** (§9, spike 2 / §4.5) — in-proc-vs-fork on a real overflow task~~
    **✅ DONE (§9.1): PASS** — in-process default; bounded recursion covers overflow,
    reports incomplete honestly, halts.
-3. **NB-4 + NB-1 + NB-5** — the default **Family-A** path: a `Loop` offered the
-   `spawn` A-tool (NB-4) + handles + the decomposition-policy prompt (NB-5), wrapped by
-   the `recurse()` shell (NB-1: route `simple`→single-shot, `critical`→adversarial
-   verify, `Evaluator` verify, honest non-convergence RC-1/9). Bounded by budget/depth;
-   flat-first, nests only on measurable overflow.
+3. ~~**NB-4 + NB-1 + NB-5** — the default **Family-A** path~~ **✅ DONE** — `src/recurse.js`
+   (NB-1 glue + NB-4 in-process `spawn_child` A-tool / depth-aware capability-scrub) +
+   `src/recurse-prompts.js` (NB-5 decomposition policy + scrub suffix), exported from
+   `bare-agent`. Routes `simple`→single-shot, `critical`→forced adversarial verify;
+   `Evaluator` fills the verify slot; honest `{incomplete, best}` on guard exhaustion or a
+   dead worker; copy-on-return held by construction; `maxDepth=1`⇒flat. Validated by 17
+   mutation-checked offline integration tests (`test/recurse.test.js`, RC-1/2/5/6/7/9/11/12);
+   the live pull-vs-flat re-measure is step 7. Family-B (`opts.count`/`mode`) fails loud
+   until step 5; `opts.synthesize` is the NB-3 seam.
 4. **NB-3**: synthesis/reduce step (default = Evaluator-driven; strategy per POC).
 5. **NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
    `runPlan`, for callers who want guaranteed parallelism (aurora code).
