@@ -206,4 +206,60 @@ describe('Planner', () => {
 
     assert.equal(capturedMessages[0].content, 'Custom planning prompt');
   });
+
+  // NB-2 count seam (RLM Family-B): a positive integer count forces EXACTLY N independent steps.
+  it('context.count injects the "EXACTLY N independent" override into the system prompt', async () => {
+    let capturedSystem;
+    const provider = {
+      async generate(messages) {
+        capturedSystem = messages[0].content;
+        return { text: '[{ "id": "s1", "action": "X", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const planner = new Planner({ provider });
+    await planner.plan('Goal', { count: 4 });
+    assert.match(capturedSystem, /EXACTLY 4 independent/, 'count must force exactly N independent steps');
+    // mutation check: without a count the override must be absent (free 2–7 planning)
+    await planner.plan('Goal');
+    assert.doesNotMatch(capturedSystem, /EXACTLY/, 'no count ⇒ no forced-count override');
+  });
+
+  it('a non-positive / non-integer count is ignored (falls back to free planning)', async () => {
+    let capturedSystem;
+    const provider = {
+      async generate(messages) { capturedSystem = messages[0].content; return { text: '[{ "id": "s1", "action": "X", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } }; },
+    };
+    const planner = new Planner({ provider });
+    for (const bad of [0, -2, 2.5, NaN]) {
+      await planner.plan('Goal', { count: bad });
+      assert.doesNotMatch(capturedSystem, /EXACTLY/, `count=${bad} must not force a count`);
+    }
+  });
+
+  // Budget seam (RLM Family-B meter gap): the plan call forwards usage to onLlmResult — but NOT on a cache hit.
+  it('onLlmResult forwards the planning usage with kind:"plan" on a real call', async () => {
+    const events = [];
+    const provider = {
+      async generate() { return { text: '[{ "id": "s1", "action": "X", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 11, outputTokens: 7 }, model: 'stub-plan' }; },
+    };
+    const planner = new Planner({ provider, onLlmResult: (e) => events.push(e) });
+    await planner.plan('Goal');
+    assert.equal(events.length, 1, 'one plan call ⇒ one forwarded event');
+    assert.equal(events[0].kind, 'plan');
+    assert.equal(events[0].usage.inputTokens, 11);
+    assert.equal(events[0].model, 'stub-plan');
+  });
+
+  it('onLlmResult does NOT fire on a cache hit (no LLM call happened — no double-count)', async () => {
+    let calls = 0;
+    const events = [];
+    const provider = {
+      async generate() { calls++; return { text: '[{ "id": "s1", "action": "X", "dependsOn": [] }]', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } }; },
+    };
+    const planner = new Planner({ provider, cacheTTL: 5000, onLlmResult: (e) => events.push(e) });
+    await planner.plan('Goal');           // real call → forwards
+    await planner.plan('Goal');           // cache hit → must NOT forward
+    assert.equal(calls, 1, 'second call served from cache');
+    assert.equal(events.length, 1, 'cache hit must not forward a phantom usage event');
+  });
 });

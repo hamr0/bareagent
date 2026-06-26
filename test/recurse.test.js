@@ -165,6 +165,52 @@ describe('recurse — Family B forced fan-out (NB-2)', () => {
     assert.equal(out.incomplete, true);
     assert.equal(out.receipts.halted, true, 'the node records the governance halt');
   });
+
+  it('the decomposition call is METERED — its usage forwards to ctx.onLlmResult as kind:"plan"', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const events = [];
+    await recurse(COMPLEX_TASK, { provider: sp.provider, onLlmResult: (e) => events.push(e) }, { count: 2 });
+    // the plan call must be visible to the gate (the Family-B meter gap, now closed)
+    assert.ok(events.some(e => e.kind === 'plan'), 'the Planner decomposition call must forward usage (kind:plan)');
+    // mutation check: it is a REAL forwarded usage, not an empty placeholder
+    const plan = events.find(e => e.kind === 'plan');
+    assert.ok(plan.usage && typeof plan.usage.inputTokens === 'number', 'plan event carries real usage');
+  });
+
+  it('pre-wave gate checkpoint: ctx.policy is consulted with "recurse_fanout" BEFORE any worker runs', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const seen = [];
+    const policy = (tool) => { seen.push(tool); return true; };
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 3 });
+    assert.ok(seen.includes('recurse_fanout'), 'the fan-out width must be offered to the gate pre-wave');
+    assert.equal(out.receipts.spawned.length, 3, 'an allow verdict lets the wave run');
+  });
+
+  it('pre-wave HaltError halts BEFORE the worker burst — clean incomplete, zero slices spawned (RC-9)', async () => {
+    let workerRan = false;
+    const sp = scriptedProvider((messages) => {
+      if (isPlanner(messages)) return { text: JSON.stringify([0, 1, 2].map(i => ({ id: `s${i}`, action: `SLICE ${i}: count`, dependsOn: [] }))) };
+      if (isVerify(messages)) return { text: SATISFIED };
+      workerRan = true; // a slice worker actually executed — must NOT happen if the pre-wave halt fired
+      return { text: 'RESULT' };
+    });
+    // a gate that halts on the pre-wave fan-out commitment (the ≥80%/budget pause surfaced as a halt)
+    const policy = (tool) => { if (tool === 'recurse_fanout') throw new HaltError('budget near cap', { rule: 'budget' }); return true; };
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 3 });
+    assert.equal(out.incomplete, true, 'a pre-wave halt is a clean incomplete');
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.receipts.spawned.length, 0, 'NO slices spawned — the burst was bounded to zero');
+    assert.equal(workerRan, false, 'no worker executed after the pre-wave halt');
+  });
+
+  it('a plain policy DENY on "recurse_fanout" is advisory — it does NOT break the fan-out (allowlist safety)', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    // an allowlist-style policy that denies unknown tools must not accidentally kill the wave
+    const policy = (tool) => (tool === 'recurse_fanout' ? 'denied: unknown tool' : true);
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 2 });
+    assert.equal(out.incomplete, undefined, 'a non-halt deny must not block the wave');
+    assert.equal(out.receipts.spawned.length, 2, 'the wave still ran (only HaltError is load-bearing)');
+  });
 });
 
 describe('recurse — router (assessComplexity as a hint, not a gate)', () => {

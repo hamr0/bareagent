@@ -424,6 +424,25 @@ humanChannel): bareagent shapes intent, bareguard enforces the cap. **No second
 guard layer.** This refines the earlier draft's §6, which read as if `recurse()`
 enforced all five inline.
 
+**Decision — the cost-commitment checkpoint is post-decompose / pre-wave (LOCKED).**
+A fan-out is a cost commitment made *before* the cost is known: forced `count=N` (or
+a model batch-spawn) commits N×(unknown per-worker cost) at once, and N concurrent
+workers can collectively overshoot the cap *between* the gate's post-round meters
+(the burst problem). The resolution exploits that **the decomposition is the cheap
+call that turns the unknown into a known width**: (1) decompose first (one metered
+plan call), (2) consult the gate on the now-known width *before* launching the
+worker wave. Built (Family B): `recurseFanout` forwards the `Planner` call's usage to
+`onLlmResult` (the decomposition is no longer invisible to the budget — it *was* the
+RLM meter gap) and then calls `ctx.policy('recurse_fanout', { count, depth }, ctx)`
+pre-wave. **bareagent's half is the meter + the checkpoint *point*; bareguard's half
+is the *decision*** — a `HaltError` (budget cap, or a near-threshold ≥~80% HITL pause
+surfaced as a halt) propagates to a clean `incomplete` *before any worker spends*,
+which is what bounds the burst to zero. A plain policy *deny* on the internal
+`recurse_fanout` descriptor is **advisory only** (it must not break an allowlist
+policy that doesn't know the descriptor — the load-bearing budget signal is the
+`HaltError`, on bareguard's existing contract). The same point is where a Family-A
+batch-spawn should be gated when that path adds an explicit pre-wave check (step 7).
+
 ## 7. Verification model
 
 - **Ladder** (`RLM_EXPLAINED.md` §6): deterministic checks first (`Evaluator`
@@ -652,6 +671,18 @@ deferred — only the calibration details below are.
   *read-everything* task (OOLONG-Pairs-like) becomes a live need. **Distinct** from the
   depth-overflow trigger below: this is *width* (more slices at one level); overflow is
   *depth* (one slice still too big → recurse).
+  **Decision — `opts.count` semantics when both dials exist (LOCKED for step 7):**
+  `opts.count` (and the tier map) is the **fixed/semantic FLOOR of intent** — the
+  count the caller/route asks for, decided from goal text. The **data-driven dial
+  measures the fetched slice and may RAISE the count above that floor** (never below),
+  **capped by the guards**. So the two stack deterministically: floor = what you asked
+  for; the data decides if *more* is needed; the guards decide the ceiling. The
+  algorithm for the raise is already POC-validated — the NB-2 calibration showed the
+  needed width is `⌈measured_size / worker_budget⌉` (§9.1) — so step 7 adds only the
+  litectx *measurement + rescale* seam, not a new bet. **Open for step 7:** the
+  data-driven path is a *partition* of litectx handles, NOT a second `Planner` semantic
+  decomposition (today's `recurseFanout` is the semantic/floor path) — wire it as a
+  distinct partition path under the same `opts.count` floor, so the two don't conflate.
 - **litectx push vs pull** — ~~which wins on real tasks is open~~ **RESOLVED (§9.1,
   spike 1): pull-default wins; push *and* raw lost to flat.** Caveat: the spike's
   retriever was lexically exact, so pull's *margin* is directional, not the production

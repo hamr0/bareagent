@@ -15,6 +15,10 @@
  * @property {Provider} provider - LLM provider (must implement generate()).
  * @property {string} [prompt] - Custom planning prompt override.
  * @property {number} [cacheTTL] - Cache time-to-live in ms. 0 disables caching.
+ * @property {(payload: {usage: any, model: string|null, kind: 'plan'}) => any} [onLlmResult] - Budget hook
+ *   (mirror of Evaluator's). Forwards the planning call's `usage` to the gate so decomposition spend is
+ *   visible — without it the plan call is invisible to bareguard's budget (the RLM Family-B meter gap). A
+ *   cache hit does NOT forward (no LLM call happened).
  */
 
 const PLAN_PROMPT = `You are a planning agent. Break the user's goal into concrete steps.
@@ -42,6 +46,7 @@ class Planner {
     this.prompt = options.prompt || PLAN_PROMPT;
     this._cacheTTL = options.cacheTTL || 0;
     this._cache = new Map();
+    this.onLlmResult = options.onLlmResult || null;
   }
 
   /**
@@ -83,6 +88,12 @@ class Planner {
     const result = await this.provider.generate(messages, [], {
       temperature: 0,
     });
+
+    // Budget visibility: forward the planning call's usage to the gate (mirror of Evaluator). Only on a real
+    // LLM call — a cache hit returned earlier without reaching here, so it never double-counts.
+    if (this.onLlmResult) {
+      await this.onLlmResult({ usage: result.usage || null, model: result.model || this.provider.model || null, kind: 'plan' });
+    }
 
     const steps = this._parse(result.text);
 

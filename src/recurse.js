@@ -306,7 +306,9 @@ async function recurseFanout(task, ctx, opts, state) {
   try {
     // 1) Decompose into exactly `count` independent parallel steps (the NB-2 Planner seam). A non-Halt planner
     //    failure (e.g. unparseable plan) is an honest incomplete — we cannot fan out, so we do not pretend to.
-    const planner = new Planner({ provider });
+    //    The plan call forwards its usage to the gate (`onLlmResult`) so decomposition spend is metered, not
+    //    invisible — and it is the CHEAP call that RESOLVES the unknown fan-out cost into a known width.
+    const planner = new Planner({ provider, onLlmResult: /** @type {any} */ (ctx.onLlmResult) || undefined });
     let steps;
     try {
       steps = await planner.plan(task, { count });
@@ -314,6 +316,22 @@ async function recurseFanout(task, ctx, opts, state) {
       if (err instanceof HaltError) throw err;
       node.incomplete = true;
       return { incomplete: true, best: null, missingSlices: [task], receipts: node };
+    }
+
+    // 1b) Pre-wave gate checkpoint (the cost-commitment point). Decomposition just turned an UNKNOWN cost into
+    //    a KNOWN width — so before committing the worker wave, give the gate a chance to act on it. A governance
+    //    HaltError (e.g. bareguard's budget cap, or a near-threshold HITL pause surfaced as a halt) propagates
+    //    to the outer catch → clean incomplete, BEFORE any worker spends — this is what bounds the concurrent
+    //    burst (N workers can't each overshoot between post-round meters if the wave never launches). A plain
+    //    deny is advisory only: it must NOT break an allowlist policy that doesn't know this internal
+    //    descriptor — the load-bearing budget signal is the HaltError, on bareguard's existing contract.
+    if (typeof ctx.policy === 'function') {
+      try {
+        await ctx.policy('recurse_fanout', { count: steps.length, depth }, { ...ctx, depth });
+      } catch (err) {
+        if (err instanceof HaltError) throw err;
+        // non-halt policy error/deny → advisory; proceed (per-worker policy still gates each child below)
+      }
     }
 
     // 2) Fan out: each step is a fresh-window recurse() child. Forced fan-out is NOT re-applied to children —
