@@ -12,6 +12,7 @@ const assert = require('node:assert/strict');
 const { recurse } = require('../src/recurse');
 const { HaltError } = require('../src/errors');
 const { DECOMPOSITION_POLICY } = require('../src/recurse-prompts');
+const { synthesize, concatReduce, MERGE_PROMPT } = require('../src/recurse-synthesize');
 
 // Tasks crafted to hit known assessComplexity tiers (see src/complexity.js):
 const SIMPLE_TASK = 'list the open files';                                   // simple verbs → 'simple'
@@ -259,5 +260,78 @@ describe('recurse — deterministic shell (RC-1) & pull handles (RC-5)', () => {
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { tools: [recall] });
     assert.equal(pulled, true, 'the worker pulled a slice via the handle tool');
     assert.equal(out.result, 'final: 42');
+  });
+});
+
+// A worker that fans out N children in one round (each assigned a value by index), then the parent emits a
+// throwaway model-text (which any reducer override must replace). Each child is a `simple`-tier subtask, so
+// it answers directly with its value — no further nesting.
+function aggHandler(values) {
+  return (messages, tools) => {
+    if (isVerify(messages)) return { text: SATISFIED };
+    if (systemOf(messages).includes('synthesis engine')) return { text: 'MERGED_ANSWER' }; // the 'merge' Loop
+    const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
+    const gotChild = messages.some(m => m.role === 'tool');
+    if (hasSpawn && !gotChild) {
+      return { toolCalls: values.map((_v, i) => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
+    }
+    if (gotChild) return { text: 'PARENT_MODEL_TEXT' };
+    const m = lastUser(messages).match(/count slice (\d+)/);
+    return { text: m ? String(values[Number(m[1])]) : '0' };
+  };
+}
+
+describe('recurse — NB-3 synthesis / reduce (build step 4)', () => {
+  it('a code-reduce fn receives the child result VALUES and aggregates them deterministically (§9.1)', async () => {
+    const sp = scriptedProvider(aggHandler([10, 20, 12]));
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      synthesize: ({ results }) => results.reduce((a, r) => a + Number(r), 0),
+    });
+    // mutation check: step-3's seam handed receipts only — this would be NaN/0 if results weren't collected
+    assert.equal(out.result, 42, 'deterministic code-reduce summed the three child results');
+    assert.equal(out.receipts.spawned.length, 3);
+  });
+
+  it("strategy 'concat' losslessly joins the child results with no LLM merge call", async () => {
+    const sp = scriptedProvider(aggHandler(['alpha-fact', 'beta-fact']));
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { synthesize: 'concat' });
+    assert.match(out.result, /alpha-fact/);
+    assert.match(out.result, /beta-fact/);
+    assert.ok(!sp.calls.some(c => systemOf(c.messages).includes('synthesis engine')), 'concat must not spin up a merge Loop');
+  });
+
+  it("strategy 'merge' runs an ISOLATED synthesis Loop over the child results (separate context)", async () => {
+    const sp = scriptedProvider(aggHandler(['finding-X', 'finding-Y']));
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { synthesize: 'merge' });
+    assert.equal(out.result, 'MERGED_ANSWER');
+    const mergeCall = sp.calls.find(c => systemOf(c.messages).includes('synthesis engine'));
+    assert.ok(mergeCall, 'a merge Loop ran');
+    // isolation: the merge context is NOT the worker's decomposition transcript, and it sees the partials
+    assert.equal(systemOf(mergeCall.messages), MERGE_PROMPT);
+    assert.ok(!systemOf(mergeCall.messages).includes('DECOMPOSE'), 'merge must not inherit the worker system prompt');
+    assert.match(lastUser(mergeCall.messages), /finding-X[\s\S]*finding-Y/, 'merge sees both child partials');
+  });
+
+  it("a string strategy with NO child spawned falls back to the model's own answer (nothing to reduce)", async () => {
+    const sp = scriptedProvider(() => ({ text: 'direct answer' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { synthesize: 'merge' });
+    assert.equal(out.result, 'direct answer');
+  });
+
+  it('a HaltError during synthesis exits cleanly as { incomplete, best } (RC-6)', async () => {
+    const sp = scriptedProvider(aggHandler([1, 2]));
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      synthesize: () => { throw new HaltError('budget exhausted mid-reduce', { rule: 'budget' }); },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.ok('best' in out);
+  });
+
+  it('the synthesize() reducer is unit-correct: concat joins, an unknown strategy throws', async () => {
+    assert.match(concatReduce(['a', 'b']), /### Part 1[\s\S]*a[\s\S]*### Part 2[\s\S]*b/);
+    assert.equal(await synthesize('t', ['a', 'b'], { reduce: ({ results }) => results.join('+') }), 'a+b');
+    await assert.rejects(() => synthesize('t', ['a'], { strategy: 'bogus' }), /unknown strategy/);
+    await assert.rejects(() => synthesize('t', ['a'], { strategy: 'merge' }), /requires a provider/);
   });
 });

@@ -2,10 +2,11 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — POC-validated, step 3 shipped** (§9 spikes 1 & 2
-> green; the default Family-A path `recurse()` built + tested — §10 step 3 ✅). Evidence
-> `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`, `src/recurse.js`,
-> `test/recurse.test.js`. Date: 2026-06-26.
+> requirements doc). Status: **In build — POC-validated, steps 3 & 4 shipped** (§9 spikes
+> 1 & 2 green; the Family-A path `recurse()` + the NB-3 reducer built, tested, and
+> live-smoked — §10 steps 3 & 4 ✅). Evidence `poc/rlm-spike1-gate.mjs`,
+> `poc/rlm-spike2-recursion.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`,
+> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-26.
 
 ---
 
@@ -562,7 +563,14 @@ trusting them — each a harness fix, none a real failure.
    mutation-checked offline integration tests (`test/recurse.test.js`, RC-1/2/5/6/7/9/11/12);
    the live pull-vs-flat re-measure is step 7. Family-B (`opts.count`/`mode`) fails loud
    until step 5; `opts.synthesize` is the NB-3 seam.
-4. **NB-3**: synthesis/reduce step (default = Evaluator-driven; strategy per POC).
+4. ~~**NB-3**: synthesis/reduce step~~ **✅ DONE** — `src/recurse-synthesize.js`
+   (`synthesize` with `concat`/`merge` strategies + a `reduce` fn). §9.1 wired:
+   aggregation = deterministic **code-reduce** (the function form over child
+   `results`), `merge` (isolated Loop) reserved for subjective synthesis, `concat`
+   the lossless default. Fixed the step-3 gap (the seam saw receipts, not results);
+   reduce fires only on a node that spawned (leaf keeps its own answer). Validated by
+   6 offline tests + a live `--nb3` smoke (real fan-out → code-reduce summed `[2,1,3]`
+   to truth `6`). Family-A default (parent-model synthesis) unchanged.
 5. **NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
    `runPlan`, for callers who want guaranteed parallelism (aurora code).
 6. **Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
@@ -595,12 +603,13 @@ deferred — only the calibration details below are.
   number (the real-code bracket was too easy to discriminate) — re-measure on fuzzy
   retrieval when litectx is wired (step 7).
 - **Synthesis strategy** (NB-3) — ~~Evaluator-driven merge vs naive concat vs
-  structured merge~~ **RESOLVED for aggregation (§9.1): code-reduce.** LLM arithmetic
-  over found partials still carried ~10–15% error at *full* retrieval (spikes 1 & 2),
-  so numeric/aggregation reduces are **deterministic code**; the Evaluator-driven
-  merge is reserved for genuinely subjective synthesis. Completeness is enforced
-  through `runPlan` (a dead worker surfaces as `failed`, never a silent survivor-sum;
-  §9.1 negative probe → RC-9).
+  structured merge~~ **RESOLVED + BUILT (§10 step 4, `src/recurse-synthesize.js`):**
+  aggregation = **deterministic code-reduce** (the function form over child `results`;
+  LLM arithmetic carried ~10–15% error at *full* retrieval, spikes 1 & 2 — and the live
+  `--nb3` smoke confirmed code-reduce hits truth exactly), `merge` (isolated Loop)
+  reserved for genuinely subjective synthesis, `concat` the lossless default.
+  Completeness is enforced through `runPlan` (a dead worker surfaces as `failed`, never
+  a silent survivor-sum; §9.1 negative probe → RC-9).
 - **Worker overflow trigger** — escalation is in-scope (open default, §1) and fires
   on a **measurable** check (fetched-slice tokens > worker window budget), **not** a
   model self-declaration. **VALIDATED (§9.1, spike 2):** a size-based trigger

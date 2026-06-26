@@ -57,7 +57,64 @@ function printTree(node, indent = '') {
   for (const c of node.spawned || []) printTree(c, indent + '   ');
 }
 
+// ── NB-3 scenario (--nb3): code-reduce over a REAL fan-out (RLM_PRD §9.1, build step 4) ──────────────────
+// The §9.1 thesis, end-to-end on the wire: a real model fans out a COUNTING task per slice, and the SUM is
+// done in deterministic CODE (opts.synthesize fn), NOT by the model. We plant known ERROR counts so truth is
+// code-computed. Gate: (A) the model decomposed, (B) the answer is the exact integer code-sum of the child
+// counts (proves the reduce routed through code, not the model's closing-turn arithmetic), (C) report truth.
+const NB3_LOGS = [
+  { name: 'auth', lines: ['INFO login ok', 'ERROR bad token', 'INFO logout', 'ERROR expired session'] }, // 2
+  { name: 'billing', lines: ['INFO charge ok', 'INFO refund', 'ERROR gateway timeout'] },                 // 1
+  { name: 'search', lines: ['ERROR index missing', 'WARN slow query', 'ERROR shard down', 'ERROR oom'] },  // 3
+];
+const NB3_TRUTH = NB3_LOGS.reduce((a, l) => a + l.lines.filter(x => x.includes('ERROR')).length, 0); // 6
+const parseNum = (s) => { const m = String(s).match(/-?\d+/); return m ? Number(m[0]) : NaN; };
+
+async function nb3Scenario() {
+  console.log(`# RLM recurse() NB-3 LIVE — code-reduce over a real fan-out  (model=${MODEL})\n`);
+  const task =
+    'Count the total number of lines containing the word ERROR across these three logs. Count each log ' +
+    'independently with spawn_child, then report the total.\n\n' +
+    NB3_LOGS.map(l => `LOG ${l.name}:\n${l.lines.join('\n')}`).join('\n\n');
+  console.log(`planted truth (code-computed ERROR lines) = ${NB3_TRUTH}\n`);
+
+  // §9.1: trust CODE for the sum, never the LLM. The reducer sums the children's per-log counts.
+  const reduce = ({ results }) => {
+    const nums = results.map(parseNum);
+    console.log(`child counts (each a leaf LLM count) = [${nums.join(', ')}]`);
+    return nums.reduce((a, n) => a + (Number.isFinite(n) ? n : 0), 0);
+  };
+
+  const t0 = Date.now();
+  const out = await recurse(task, { provider, onLlmResult }, { maxDepth: 1, synthesize: reduce });
+  const ms = Date.now() - t0;
+
+  console.log('\n## Receipts tree (RC-10)');
+  printTree(out.receipts);
+  const spawnedCount = (out.receipts.spawned || []).length;
+  console.log(`\n## Result (code-reduced total) = ${out.incomplete ? '[INCOMPLETE]' : out.result}   truth=${NB3_TRUTH}`);
+  console.log(`llm calls=${usageTotals.calls}  in=${usageTotals.input}  out=${usageTotals.output}  wall=${ms}ms`);
+
+  const checks = [];
+  const ok = (cond, msg) => { checks.push({ cond: !!cond, msg }); };
+  ok(spawnedCount >= 1, `A. the model decomposed the counting task (spawned=${spawnedCount} ≥ 1)`);
+  ok(typeof out.result === 'number', 'B. the answer came from the CODE reduce (a number), not the model closing turn');
+  ok(out.result === NB3_TRUTH, `C. code-reduced total equals truth (${out.result} === ${NB3_TRUTH}) — leaves counted correctly`);
+
+  console.log('\n## GATE (NB-3)');
+  let fail = 0;
+  for (const c of checks) { console.log(`  ${c.cond ? 'OK  ' : 'FAIL'} ${c.msg}`); if (!c.cond) fail++; }
+  if (checks[2] && !checks[2].cond && checks[0].cond && checks[1].cond) {
+    console.log('  (note: A+B green means NB-3 wiring is sound; a C miss is leaf-count precision — Spike-1 domain, not the reducer.)');
+  }
+  console.log(`\n${fail === 0
+    ? 'NB-3 SMOKE PASS ✅ — recurse() routed a real fan-out through a deterministic code-reduce on the wire (§9.1).'
+    : `NB-3 SMOKE FAIL ❌ (${fail})`}`);
+  process.exit(fail === 0 ? 0 : 1);
+}
+
 async function main() {
+  if (process.argv.includes('--nb3')) return nb3Scenario();
   console.log(`# RLM recurse() LIVE smoke  (model=${MODEL})\n`);
   console.log(`task: ${TASK}\n`);
 

@@ -27,6 +27,7 @@ const { Evaluator } = require('./evaluator');
 const { assessComplexity, isCritical } = require('./complexity');
 const { HaltError } = require('./errors');
 const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
+const { synthesize } = require('./recurse-synthesize');
 
 /**
  * @typedef {object} RecurseCtx
@@ -54,9 +55,12 @@ const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
  *   not the loose task, and verification always runs.
  * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate]
  *   Override the verifier (fills `recurse()`'s verify slot, §7.1). Default = an `Evaluator` rubric pass.
- * @property {(args: {task: string, text: string, children: object[], ctx: RecurseCtx}) => any} [synthesize]
- *   Override synthesis/reduce (the NB-3 code-reduce seam). Default = the worker's own final text (Family A:
- *   the parent model already combined the children's results in its final turn).
+ * @property {((args: {task: string, text: string, results: any[], children: object[], ctx: RecurseCtx}) => any) | 'concat' | 'merge'} [synthesize]
+ *   Override synthesis/reduce (NB-3). A FUNCTION is a deterministic code-reduce over the child `results` — the
+ *   §9.1 aggregation path (LLM arithmetic over partials carried ~10–15% error). A STRATEGY string runs the
+ *   built-in reducer: `'concat'` (lossless no-LLM join) or `'merge'` (an isolated Loop-driven subjective
+ *   merge); a string is ignored when no child ran. Default (unset) = the worker's own final text (Family A:
+ *   the parent model already combined the children's results in its closing turn).
  * @property {number} [count] - (Opt-in, build step 5 / NB-2) forced fan-out count. Not yet implemented.
  * @property {'fanout'} [mode] - (Opt-in, build step 5 / NB-2) forced fan-out mode. Not yet implemented.
  */
@@ -147,8 +151,12 @@ async function recurse(task, ctx = {}, opts = {}) {
   const system = DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
 
   const handleTools = Array.isArray(opts.tools) ? opts.tools : [];
+  // NB-3: collect each child's declared RESULT value (copy-on-return: the value, never its transcript) so the
+  // reducer can aggregate them. Step-3's seam handed the receipts only, so a code-reduce could not see what to
+  // combine — this closes that gap and is what Family B (step 5) will reduce over `runPlan` results[].
+  const childResults = [];
   const tools = canSpawn
-    ? [...handleTools, buildSpawnTool(ctx, opts, depth, maxDepth, node)]
+    ? [...handleTools, buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults)]
     : handleTools;
 
   const loop = new Loop({
@@ -183,34 +191,52 @@ async function recurse(task, ctx = {}, opts = {}) {
     return { incomplete: true, best: out.text || null, receipts: node };
   }
 
-  // Synthesis / reduce. Default (Family A) = the worker's own final text — the parent model already combined
-  // the children's returned results in its closing turn. `opts.synthesize` is the NB-3 code-reduce seam
-  // (build step 4) for numeric/aggregation tasks where LLM arithmetic is the weak link (§9.1).
+  // Synthesis / reduce (NB-3, build step 4) + verify (RC-7), under one HaltError guard: a governance cap that
+  // trips mid-synthesis or mid-verify is a clean exit returning the partial `best` (RC-6), never a thrown run.
   let result = out.text;
-  if (typeof opts.synthesize === 'function') {
-    result = await opts.synthesize({ task, text: out.text, children: node.spawned, ctx });
-  }
+  try {
+    // Default (Family A) = the worker's own final text — the parent model already combined the children's
+    // returned results in its closing turn. `opts.synthesize` OVERRIDES that (§9.1): a FUNCTION is a
+    // deterministic code-reduce over the child `results` (the aggregation path — LLM arithmetic is the weak
+    // link); a STRATEGY string ('concat'|'merge') runs the built-in reducer. Either form is a REDUCE over
+    // children, so it only fires when this node actually spawned some — a leaf (incl. a single-shot worker, or
+    // a deep child with no grandchildren) has nothing to reduce, so its own direct answer stands. This is also
+    // why threading `synthesize` down the tree is correct: each level reduces ITS children, leaves don't.
+    if (childResults.length > 0 && opts.synthesize != null) {
+      if (typeof opts.synthesize === 'function') {
+        result = await opts.synthesize({ task, text: out.text, results: childResults, children: node.spawned, ctx });
+      } else if (typeof opts.synthesize === 'string') {
+        result = await synthesize(task, childResults, {
+          strategy: /** @type {any} */ (opts.synthesize),
+          provider,
+          contract: typeof opts.contract === 'string' ? opts.contract : null,
+          onLlmResult: ctx.onLlmResult,
+          policy: ctx.policy,
+          text: out.text,
+          children: node.spawned,
+          ctx,
+        });
+      }
+    }
 
-  // Verify (RC-7): a SEPARATE-context judge, never the generator grading itself. Runs when a contract is
-  // given, the caller supplied a verifier, OR the task is critical (the forced-verify safety rail). A
-  // governance HaltError mid-verify is a clean exit → return the partial best (RC-6), not a thrown run.
-  const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
-  if (wantVerify) {
-    try {
+    // Verify: a SEPARATE-context judge, never the generator grading itself. Runs when a contract is given, the
+    // caller supplied a verifier, OR the task is critical (the forced-verify safety rail).
+    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
+    if (wantVerify) {
       const verdict = await verify(task, result, ctx, opts);
       node.verdict = verdict;
       return { result, verdict, receipts: node };
-    } catch (err) {
-      if (err instanceof HaltError) {
-        node.halted = true;
-        node.incomplete = true;
-        return { incomplete: true, best: result, receipts: node };
-      }
-      throw err;
     }
-  }
 
-  return { result, verdict: null, receipts: node };
+    return { result, verdict: null, receipts: node };
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      return { incomplete: true, best: result, receipts: node };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -226,9 +252,10 @@ async function recurse(task, ctx = {}, opts = {}) {
  * @param {number} depth - The PARENT's depth; the child runs at `depth + 1`.
  * @param {number} maxDepth
  * @param {RecurseNode} node - The parent's receipts node; children append to `node.spawned`.
+ * @param {any[]} childResults - Sink for each child's declared RESULT value (NB-3 reduce input).
  * @returns {ToolDef}
  */
-function buildSpawnTool(ctx, opts, depth, maxDepth, node) {
+function buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults) {
   return {
     name: 'spawn_child',
     description:
@@ -252,9 +279,11 @@ function buildSpawnTool(ctx, opts, depth, maxDepth, node) {
       const child = await recurse(subtask, { ...ctx, depth: depth + 1 }, opts);
       node.spawned.push(child.receipts); // audit lineage (RC-10) — NOT the parent transcript
       // Only the declared result crosses the boundary (RC-2). An incomplete child is reported honestly, not
-      // silently dropped or faked.
-      if (child.incomplete) return `[incomplete] ${child.best == null ? '' : String(child.best)}`.trim();
-      return child.result == null ? '' : String(child.result);
+      // silently dropped or faked. The same declared value is collected for the NB-3 reducer.
+      const value = child.incomplete ? (child.best == null ? '' : child.best) : (child.result == null ? '' : child.result);
+      childResults.push(value);
+      if (child.incomplete) return `[incomplete] ${String(value)}`.trim();
+      return String(value);
     },
   };
 }

@@ -63,6 +63,16 @@ just tokens; agents manipulate via grep/sed/cat for precision.*
 `impact()` (blast-radius), `assemble()` (budget-fit), `scoped()` (tenant fence).
 RLM is the *consumer pattern*; litectx is *the substrate it queries.*
 
+**Precision — external *context*, not external inference.** RLM is often called "a
+type of external inference," and the spirit is right (it's an *inference-time
+scaffold*, §10F — bolted on at test time, base model used as-is). But the forward
+pass / reasoning still happens **inside** `M`. What's pushed outside is the **data**
+(P as a handle), the **deterministic computation** (grep/wc/code), and the
+**recursion** (sub-calls in fresh windows). So the accurate phrasing is: RLM makes
+**context and computation external, and orchestrates many small internal inferences
+over that external state through handles** — litectx supplies the *external* part,
+a bareagent loop supplies the *inference* part.
+
 ---
 
 ## 2. Simplest example — the flow, no jargon
