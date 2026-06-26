@@ -85,8 +85,11 @@ const { synthesize } = require('./recurse-synthesize');
  * @typedef {object} RecurseResult
  * @property {any} [result] - The synthesized answer (on convergence).
  * @property {Verdict|null} [verdict] - The verifier's gap report (null when verification did not run).
- * @property {boolean} [incomplete] - true on guard exhaustion / a dead worker (RC-9) — never a faked pass.
+ * @property {boolean} [incomplete] - true on guard exhaustion / a dead worker / an incomplete child (RC-9) —
+ *   never a faked pass.
  * @property {any} [best] - The best partial answer when `incomplete` (RC-9).
+ * @property {string[]} [missingSlices] - When `incomplete` because a child failed: the sub-task(s) that came
+ *   back incomplete (§9 scenario 1) — the anti-survivor-sum signal, not a quiet undercount.
  * @property {RecurseNode} receipts - The audit node for this call (RC-10).
  */
 
@@ -217,6 +220,18 @@ async function recurse(task, ctx = {}, opts = {}) {
           ctx,
         });
       }
+    }
+
+    // Honest completeness (RC-9 / §9 negative scenario 1): if ANY child came back incomplete, THIS node is
+    // incomplete — never a silent survivor-sum over partial data (the §9.1 undercount: 99 vs 151, no signal).
+    // Mirrors spike-2's `incomplete: parts.some(p => p.incomplete)`, which the shipped glue had dropped. The
+    // reduce still runs first, so `best` carries the partial answer; we just refuse to call it a clean success.
+    // Propagates up the tree: a dead grandchild → incomplete child → incomplete parent. (A dead *worker at this
+    // level* is already handled above via `out.error`; this covers a dead *child* surfacing through the reduce.)
+    const missingSlices = node.spawned.filter(c => c.incomplete).map(c => c.task);
+    if (missingSlices.length > 0) {
+      node.incomplete = true;
+      return { incomplete: true, best: result, missingSlices, receipts: node };
     }
 
     // Verify: a SEPARATE-context judge, never the generator grading itself. Runs when a contract is given, the

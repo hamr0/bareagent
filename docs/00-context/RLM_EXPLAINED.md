@@ -658,6 +658,68 @@ with the depth cap lifted.
 
 ---
 
+## 13. The engine distilled — 6 parts, and what the *classic* inference engine teaches
+
+Strip the jargon and an RLM-style engine is **6 parts** (everything above, compressed):
+
+1. **The loop** — a `while` that fires turns until done (`for i in MAX_ITERS`).
+2. **The setpoint** — a fixed Markdown spec of "what good looks like," injected every
+   turn (`SYSTEM_MD`).
+3. **The window-builder** — each turn assemble setpoint + goal + a *small* slice of
+   history + fresh handles (`assemble`).
+4. **The one call out** — send the window, get back one action (`LLM(window)`).
+5. **The dispatcher** — run what the model asked (a tool, a sub-call, or "done")
+   (`dispatch`).
+6. **The verifier** — a *separate* context that compares output to the setpoint and
+   feeds back the **gap** (`verify`).
+
+Plus the three constraints that keep it standing: **guards** (it terminates),
+**handles not tokens** (it scales), **a separate verifier** (it doesn't lie about
+done). The whole thing in one breath: *build a window → ask once → run it → check vs
+spec → loop with the gap → stop on match or guard.* That's the thermostat (§3). The
+honest minimum is all six plus guards; drop the verifier and you have a Ralph loop
+that spins or fakes done (§7).
+
+### "Isn't this the same shape as RLM?" — yes, by construction.
+
+It is — this list is drawn straight from §3/§8. The generic LLM loop engine **is** the
+RLM-family engine; there's no second thing hiding. But there's an *older* meaning of
+"inference engine" worth comparing: the **expert-system rule engine** (CLIPS / Drools
+/ Prolog) — knowledge base + rules + a *recognize-act cycle*. It's a genuinely
+**different shape**, and the comparison surfaces real borrowables.
+
+| classic inference engine | RLM engine | status |
+|---|---|---|
+| knowledge base / rule base, separate from the engine | the Markdown setpoint, separate from the loop | **already have** |
+| recognize-act cycle: match → resolve → act | assemble → LLM picks → dispatch | **same cycle** (lineage worth knowing) |
+| explanation facility (trace the rule chain) | receipts / gap report / `contextgraph` (§10D) | **already have** |
+| conflict resolution (which rule fires first) | the §6 ladder (deterministic before judgment) | **already have** |
+| **truth maintenance (TMS): retract a fact → retract its consequences** | history is **append-only** — no retraction | **borrowable (new)** |
+| **fixpoint: stop when no new fact derives** | stops on verifier-pass OR max-iters | **borrowable (new)** |
+
+**The two genuinely new ideas to consider for `recurse()`:**
+
+1. **Truth maintenance.** When the verifier rejects turn N, RLM today just appends a
+   "gap" and loops — but the rejected work still sits in history, and any later turn
+   built *on top of* it inherits the rot. A rule engine tags each fact with what it
+   depended on and, on retraction, kills the dependents too. Candidate for
+   `recurse()`: cheap dependency tags on `history.push` + a retract-on-reject pass, so
+   one wrong early turn doesn't silently poison later ones. *(Hypothesis — A/B it;
+   append-only may be fine for short loops.)*
+
+2. **Fixpoint termination.** A forward-chaining engine stops when a cycle derives
+   **nothing new** (delta = 0). RLM relies on the verifier passing or the iteration cap
+   firing — so a loop that's *spinning* (same gap, no progress) still burns every iter.
+   Borrow: add one more `check_stop` clause that stops early when a turn makes **no new
+   progress against the gap** — cheaper and more honest than the hard cap, and it
+   catches the "thermostat with no sensor spins" failure (§3) before the budget drains.
+
+The rest of the classic engine RLM already has under different names — which is the
+real takeaway: **the RLM loop is the recognize-act cycle with an LLM as the matcher**,
+so decades of rule-engine design transfer.
+
+---
+
 ## Sources
 
 - **[Recursive Language Models — Zhang, Kraska, Khattab, MIT CSAIL](https://arxiv.org/abs/2512.24601)** — the canonical paper: REPL/symbolic-handle formalism, Algorithm 1 vs 2, Table 1 results, the depth=0 finding · [code](https://github.com/alexzhang13/rlm)

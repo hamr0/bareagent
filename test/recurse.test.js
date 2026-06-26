@@ -212,6 +212,47 @@ describe('recurse — honest non-convergence (RC-6 / RC-9)', () => {
     assert.equal(out.incomplete, true);
     assert.equal(out.result, undefined);
   });
+
+  it('§9 scenario 1 / RC-9: a dead CHILD propagates incomplete through the reduce — NEVER a silent survivor-sum', async () => {
+    // Two children: slice 0 returns a real count (10); slice 1's worker dies (its provider throws every call).
+    // A naive survivor-sum would return 10 with NO signal — the §9.1 undercount (99 vs 151). The honest path
+    // must flag incomplete + name the missing slice.
+    const handler = (messages, tools) => {
+      const user = lastUser(messages);
+      if (user.includes('slice 1')) throw new Error('worker 1 died'); // the dead child
+      if (isVerify(messages)) return { text: SATISFIED };
+      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
+      const gotChild = messages.some(m => m.role === 'tool');
+      if (hasSpawn && !gotChild) return { toolCalls: [0, 1].map(i => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
+      if (gotChild) return { text: 'PARENT_MODEL_TEXT' };
+      return { text: user.includes('slice 0') ? '10' : '0' };
+    };
+    const sp = scriptedProvider(handler);
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      synthesize: ({ results }) => results.reduce((a, r) => a + Number(r || 0), 0), // would survivor-sum to 10
+    });
+    // mutation check: drop the propagation and `out.result` would be 10 (a quiet undercount) with no signal
+    assert.equal(out.incomplete, true, 'a dead child must flag incomplete, not a survivor-sum');
+    assert.equal(out.result, undefined, 'no clean result is emitted over partial data');
+    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.some(s => s.includes('slice 1')), 'the missing slice is named');
+    assert.equal(out.best, 10, 'the partial reduce is still available as best');
+  });
+
+  it('§9 scenario 1: an incomplete child propagates even on the model-synthesis (default) path', async () => {
+    const handler = (messages, tools) => {
+      const user = lastUser(messages);
+      if (user.includes('slice 1')) throw new Error('worker 1 died');
+      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
+      const gotChild = messages.some(m => m.role === 'tool');
+      if (hasSpawn && !gotChild) return { toolCalls: [0, 1].map(i => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
+      if (gotChild) return { text: 'model combined what it got' };
+      return { text: 'ok' };
+    };
+    const sp = scriptedProvider(handler);
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }); // no synthesize override — model default
+    assert.equal(out.incomplete, true, 'even model-synthesis must not claim success when a child died');
+    assert.ok(out.missingSlices.some(s => s.includes('slice 1')));
+  });
 });
 
 describe('recurse — verify slot & synthesis seams (RC-7 / NB-3)', () => {

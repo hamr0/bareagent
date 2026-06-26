@@ -487,14 +487,22 @@ Per AGENT_RULES POC-first / prove-don't-assert, split empirical vs correctness:
 - **Negative scenarios — each a first-class integration test (fails-before, passes-after):**
   1. **Dead/garbage worker** → result is `{incomplete, missingSlices}`, **never** a
      silent survivor-sum (§9.1 negative probe; RC-9). Mutation: drop a worker's result
-     and assert the reduce flags incomplete, not a quiet undercount.
+     and assert the reduce flags incomplete, not a quiet undercount. **✅ BUILT + TESTED
+     (steps 3–4):** a dead worker at the level (`out.error`) AND a dead *child*
+     propagating through the reduce both flag `{incomplete, missingSlices}`; both
+     mutation-proved (neuter the propagation → the test fails).
   2. **Overflow at `maxDepth`** (slice still > budget at the cap) → `{incomplete}`, not
      a truncate-and-answer (§9.1 spike 2). `maxDepth=1` forbids nesting (RC-11/12).
+     **DEFERRED to step 7:** the *measurable* size-overflow trigger needs litectx
+     handles; the no-nesting half (`maxDepth=1`) is tested now, and the depth-cap
+     prompt already nudges the deepest worker toward an honest "incomplete."
   3. **Guard trip** (depth/budget/wall/calls) → clean `HaltError` exit, partial `best`
-     returned, no second guard layer (RC-6).
+     returned, no second guard layer (RC-6). **✅ TESTED (steps 3–4):** policy halt
+     during generation + `HaltError` mid-synthesis/verify.
   4. **Capability-unmatched sub-goal** → reported/counted, not silently dropped (RC-4).
+     **DEFERRED to step 7:** capability matching is wired with the litectx pull-tools.
   5. **Copy-on-return leak** (parent transcript into child, or child scratch into
-     synthesis) → assertion fails (RC-2).
+     synthesis) → assertion fails (RC-2). **✅ TESTED + mutation-proved (step 3).**
   Resilience for (1) rides existing primitives — `runPlan` status propagation +
   `Retry` + `CircuitBreaker` (§4.4); the glue's job is to **honor** their signals, not
   re-implement them.
@@ -568,9 +576,11 @@ trusting them — each a harness fix, none a real failure.
    aggregation = deterministic **code-reduce** (the function form over child
    `results`), `merge` (isolated Loop) reserved for subjective synthesis, `concat`
    the lossless default. Fixed the step-3 gap (the seam saw receipts, not results);
-   reduce fires only on a node that spawned (leaf keeps its own answer). Validated by
-   6 offline tests + a live `--nb3` smoke (real fan-out → code-reduce summed `[2,1,3]`
-   to truth `6`). Family-A default (parent-model synthesis) unchanged.
+   reduce fires only on a node that spawned (leaf keeps its own answer); **a dead child
+   propagates `{incomplete, missingSlices}` through the reduce — no silent survivor-sum**
+   (§9 scenario 1 / RC-9). Validated by 8 offline tests (mutation-proved) + a live
+   `--nb3` smoke (real fan-out → code-reduce summed `[2,1,3]` to truth `6`). Family-A
+   default (parent-model synthesis) unchanged.
 5. **NB-2** *(opt-in)*: the deterministic-count **forced fan-out mode** over `Planner`/
    `runPlan`, for callers who want guaranteed parallelism (aurora code).
 6. **Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
