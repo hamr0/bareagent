@@ -2,7 +2,8 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **Draft / pre-POC.** Date: 2026-06-26.
+> requirements doc). Status: **Draft — POC-validated** (§9 spikes 1 & 2 green;
+> evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`). Date: 2026-06-26.
 
 ---
 
@@ -273,7 +274,16 @@ guarantee class (*predictability + inspectability, not determinism*,
 **Recommendation:** (a) for the in-loop A-tool (the recursion case); keep (b) for
 heavyweight specialist delegation (already exists, unchanged). **POC both depth-2
 paths on a real overflow task before committing** — this is the riskiest mechanism,
-so the spike aims here (AGENT_RULES). Until the POC, treat as open.
+so the spike aims here (AGENT_RULES).
+
+**RESOLVED in POC (§9.1, spike 2): (a) in-process is the default.** Measured per-node
+overhead on a depth-2 (K=4 → 21-node) tree: process-fork costs **≥ ~90 ms/node**
+(~1.9 s/tree) of *bare* OS startup — *before* the config-file write + `bin/cli.js`
+boot + provider + bareguard init each child also pays — vs **~0 ms** for an
+in-process self-call. So **in-process self-call is the in-loop default; process-fork
+`spawnChild` is reserved for heavyweight specialist delegation** (real OS isolation,
+auto-threaded `BAREGUARD_SPAWN_DEPTH`). In-proc depth + audit lineage are threaded
+explicitly into the `policy` check (RC-10).
 
 ### 4.6 Implementation shape — one import, compose, narrow seams
 
@@ -361,7 +371,7 @@ a `.prose.md` program; we don't need that meta-trick — a plain prompt suffices
 | **RC-2** | `spawn` runs children with **copy-on-return**: a **fresh context window** in (child sees only its sub-task + handed inputs, never the parent transcript) and **only the declared result out** (never the child's scratch/transcript). | **spawnChild** (exists) / **NB-4** (in-proc variant) | Mutation test: leak the parent transcript into a child → assertion fails; leak a child's transcript into the parent/synthesis → assertion fails. Children run concurrently (observed overlap), results collected in order. |
 | **RC-3** *(opt-in mode)* | In **forced fan-out mode**, the count is deterministic (classifier, not model). **Default Family A has no forced count** — the model spawns adaptively under budget, which is *why* the higher-bound failure doesn't arise. | **NB-2** (net-new, opt-in) | Fan-out mode: fixed input+tier ⇒ identical count across runs. Default mode: no upfront count is requested; spawn is budget-bounded (a test asserts no "how many subgoals" prompt on the default path). |
 | **RC-4** | **Capability-matched dispatch**: each sub-goal routed to a worker whose declared capability matches the slice. | **SkillRegistry** (exists) + glue | A sub-goal with no matching worker is reported (counted), not silently dropped. |
-| **RC-5** | **Context-as-handle, PULL-default**: each worker is *offered* litectx `recall`/`get` as **tools** and queries on demand (don't choke it); a slice MAY be pre-seeded (PUSH) per `opts.seed` when deterministic scoping wins (the aurora code case); **never the whole corpus** either way. | **litectx** (exists, consumed as tools) + glue | A test asserts no full-file/full-repo payload crosses into a worker. Pull path: the worker can fetch a slice via the tool. Push path: pre-seed bounded by the fetch budget. Push-vs-pull is **measured**, not assumed (§9 spike 1). |
+| **RC-5** | **Context-as-handle, PULL-default**: each worker is *offered* litectx `recall`/`get` as **tools** and queries on demand (don't choke it); a slice MAY be pre-seeded (PUSH) per `opts.seed` when deterministic scoping wins (the aurora code case); **never the whole corpus** either way. | **litectx** (exists, consumed as tools) + glue | A test asserts no full-file/full-repo payload crosses into a worker. Pull path: the worker can fetch a slice via the tool. Push path: pre-seed bounded by the fetch budget. **POC result (§9.1, spike 1): pull wins** — at 11×-window scale pull averaged ~8% error vs flat ~16%, while **push *and* raw both LOST to flat (~23–25%)** by over-including confusers. So **pull is the default; push is opt-in, not a free win** (your "don't choke the LLM" prior beat aurora's "push the slice" prior). |
 | **RC-6** | **Termination guards** (depth/budget/wall-clock/calls) enforced. | **bareguard** (exists, via `wireGate`/`policy`) | Each cap has a test that trips it; the loop exits cleanly via `HaltError` when any trips. `recurse()` adds **no** second guard layer. |
 | **RC-7** | **Separate-context verifier** returns a structured gap report **with evidence**, never a bare boolean; generator never grades itself. | **Evaluator** (exists) | `Verdict` includes `status`, `pass`, `critique`/`gap`, `suggestions`; runs in a distinct context. Mutation: route verification back to the generator context → test flags it. |
 | **RC-8** | **Deterministic-first ladder**: checks (compiles/tests/lint/forbidden-import) before any model judgment. | **Evaluator** `predicate`→`rubric` (exists) | For the py→js exemplar, "no deps" / "no `.py` left" decided by `predicate` (no tokens); the rubric model is consulted only for the subjective clause. |
@@ -471,12 +481,76 @@ Per AGENT_RULES POC-first / prove-don't-assert, split empirical vs correctness:
   integration tests (neuter each guarantee → a test must fail). Most ride existing
   primitives that already carry their own tests; the new integration tests cover the
   **glue** (NB-1) and the new logic (NB-2, NB-4).
+- **Negative scenarios — each a first-class integration test (fails-before, passes-after):**
+  1. **Dead/garbage worker** → result is `{incomplete, missingSlices}`, **never** a
+     silent survivor-sum (§9.1 negative probe; RC-9). Mutation: drop a worker's result
+     and assert the reduce flags incomplete, not a quiet undercount.
+  2. **Overflow at `maxDepth`** (slice still > budget at the cap) → `{incomplete}`, not
+     a truncate-and-answer (§9.1 spike 2). `maxDepth=1` forbids nesting (RC-11/12).
+  3. **Guard trip** (depth/budget/wall/calls) → clean `HaltError` exit, partial `best`
+     returned, no second guard layer (RC-6).
+  4. **Capability-unmatched sub-goal** → reported/counted, not silently dropped (RC-4).
+  5. **Copy-on-return leak** (parent transcript into child, or child scratch into
+     synthesis) → assertion fails (RC-2).
+  Resilience for (1) rides existing primitives — `runPlan` status propagation +
+  `Retry` + `CircuitBreaker` (§4.4); the glue's job is to **honor** their signals, not
+  re-implement them.
+
+### 9.1 POC results — measured 2026-06-26 (prove, don't assert)
+
+Both spikes run live on the real Anthropic wire (Haiku, the realistic worker tier).
+Each harness ships an offline `--selftest` confound audit and is built to FAIL.
+Evidence: `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`. Metric = relative
+error `|got−truth|/truth` over a predicate-blind synthetic corpus with code-computed
+ground truth (exact-match conflates retrieval with arithmetic — it hid the signal).
+
+**Spike 1 — the gate (fan-out + handles vs flat): PASS, with a sharper finding.**
+- **Dilution is real:** flat-context error grew ~3× with corpus size (5% → 16%),
+  systematically *under*-counting at scale — the predicted failure. ✅
+- **The win is *pull*, not splitting:** `fanout-pull` (worker queries a search/handle
+  tool on demand) was the only arm to beat flat at scale (~8% vs 16%; 0% on the
+  retrieval-pure count task). **Naive `raw`/`push` splits LOST to flat (~23–25%)** by
+  over-including confusers — so the steer is *pull-default, push opt-in* (RC-5), not
+  "fan-out is automatically better."
+- **Negative path (dropped worker):** a worker returning nothing usable makes a naive
+  survivor-sum silently *under*-count (reproduced: 99 vs 151, −34%, no signal). The
+  honest path reports `{incomplete, missingSlices}`. In the real build this is **not a
+  gap** — `runPlan` + `Retry` + `CircuitBreaker` already track/propagate worker
+  failure (§4.4); the glue must route through them and honor completeness (RC-1/RC-9),
+  not hand-roll the reduce.
+- **Caveats:** the stand-in retriever was lexically exact, so pull's *magnitude* is
+  optimistic (directional, not the production number); the real-code bracket passed on
+  both flat and pull (too easy to discriminate). LLM arithmetic is a separate weakness
+  → aggregate in code (NB-3).
+
+**Spike 2 — the recursion/overflow mechanism (§4.5): PASS.**
+- On a corpus **11× a worker's window budget**, bounded in-process recursion (split +
+  self-call, K=4) reached **100% coverage at depth-2**; too-shallow caps (depth 0–1)
+  returned **honest `incomplete`** rather than a truncated guess; and it **halts**
+  (stops at the depth where slices fit, never runs away). ✅
+- **Overflow trigger validated as size-based** (`tok(slice) > budget`), not a model
+  self-declaration — the property that keeps open-default depth safe (§1).
+- **§4.5 mechanism resolved:** in-process self-call ~0 ms/node vs process-fork
+  ≥ ~90 ms/node bare startup (~1.9 s for a 21-node tree) before per-child config/CLI/
+  provider/bareguard init → **in-process default** (see §4.5).
+- The residual ~10% aggregate error at full coverage is the **same confuser over-count
+  as Spike 1's raw leaves** (not a recursion fault); the integrated build uses
+  pull/search leaves (→ ~0%) inside the recursive structure — the two spikes compose.
+
+**Net build delta confirmed:** **NB-4** = in-process `recurse` + size-based overflow
+trigger + honest-`incomplete` + **code-reduce** + **pull/search leaves**, composed
+through `runPlan`/`Retry`/`Evaluator` (no new guard layer). Harness discipline note:
+three *test* defects (ID-grabbing parse, too-tight token cap, a mis-scoped gate
+conflating leaf precision with the mechanism) were caught by reading the numbers, not
+trusting them — each a harness fix, none a real failure.
 
 ## 10. Build sequence (dependency-ordered, delta-only)
 
-1. **A/B POC** (§9, spike 1) on real data — **gate. Stop here if it fails.**
-2. **A-tool POC** (§9, spike 2 / §4.5) — resolve the in-proc-vs-fork decision on a real
-   overflow task.
+1. ~~**A/B POC** (§9, spike 1) on real data — **gate**~~ **✅ DONE (§9.1): PASS** —
+   pull-default beats flat; raw/push lose; dilution confirmed. Gate cleared.
+2. ~~**A-tool POC** (§9, spike 2 / §4.5) — in-proc-vs-fork on a real overflow task~~
+   **✅ DONE (§9.1): PASS** — in-process default; bounded recursion covers overflow,
+   reports incomplete honestly, halts.
 3. **NB-4 + NB-1 + NB-5** — the default **Family-A** path: a `Loop` offered the
    `spawn` A-tool (NB-4) + handles + the decomposition-policy prompt (NB-5), wrapped by
    the `recurse()` shell (NB-1: route `simple`→single-shot, `critical`→adversarial
@@ -503,21 +577,30 @@ including **bounded self-recursion** (`maxDepth>1`, the A-tool). Depth-N is *not
 deferred — only the calibration details below are.
 
 **Deferrals — each names its un-defer condition** ("later" is insufficient):
-- **A-tool spawn mechanism** (§4.5) — in-process `Loop` vs process-fork. *Un-defer:*
-  the §9 spike-2 POC (step 2). **This is the only open *design* decision.**
+- **A-tool spawn mechanism** (§4.5) — ~~in-process `Loop` vs process-fork~~ **RESOLVED
+  (§9.1, spike 2): in-process default**, process-fork for heavyweight delegation.
 - **Decomposition count calibration** *(opt-in fan-out mode only)* — approach locked
   (deterministic tier→count, medium/complex/critical→**2/4/6**, §4.3 NB-2); exact
   numbers/target-vs-ceiling open. *Un-defer:* the A/B POC. **Default Family A needs no
   count** (the model spawns adaptively under budget).
-- **litectx push vs pull** — the *design* is locked (pull-default, push-opt-in, RC-5);
-  which wins on real tasks is open. *Un-defer:* §9 spike 1 measures all three arms.
-- **Synthesis strategy** (NB-3) — Evaluator-driven merge vs naive concat vs
-  structured merge. *Un-defer:* a benched task shows concat loses information.
+- **litectx push vs pull** — ~~which wins on real tasks is open~~ **RESOLVED (§9.1,
+  spike 1): pull-default wins; push *and* raw lost to flat.** Caveat: the spike's
+  retriever was lexically exact, so pull's *margin* is directional, not the production
+  number (the real-code bracket was too easy to discriminate) — re-measure on fuzzy
+  retrieval when litectx is wired (step 7).
+- **Synthesis strategy** (NB-3) — ~~Evaluator-driven merge vs naive concat vs
+  structured merge~~ **RESOLVED for aggregation (§9.1): code-reduce.** LLM arithmetic
+  over found partials still carried ~10–15% error at *full* retrieval (spikes 1 & 2),
+  so numeric/aggregation reduces are **deterministic code**; the Evaluator-driven
+  merge is reserved for genuinely subjective synthesis. Completeness is enforced
+  through `runPlan` (a dead worker surfaces as `failed`, never a silent survivor-sum;
+  §9.1 negative probe → RC-9).
 - **Worker overflow trigger** — escalation is in-scope (open default, §1) and fires
   on a **measurable** check (fetched-slice tokens > worker window budget), **not** a
-  model self-declaration — this is what keeps open-default safe (only genuinely
-  too-big subgoals recurse, matching the paper's info-dense caveat). *Calibrate:* the
-  exact threshold/headroom, via the §9 spike-2 POC.
+  model self-declaration. **VALIDATED (§9.1, spike 2):** a size-based trigger
+  (`tok(slice) > budget`) drove correct depth-selection — too-shallow → honest
+  *incomplete*, deep-enough → 100% coverage, and it halts. *Calibrate:* the exact
+  threshold/headroom remains a knob.
 - **History compaction policy** — when `fit(history)` must summarize vs
   externalize-and-re-fetch. *Un-defer:* a run measurably overflows on gap-report-only
   history (expected rare; the Loop's `trim`/`assemble` seams already exist if so).
