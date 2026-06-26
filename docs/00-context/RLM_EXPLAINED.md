@@ -533,8 +533,10 @@ handle" is the paper's *symbolic handle*; "swallow as tokens" is what it avoids.
 - **Headline results (Table 1; four long-context tasks; GPT-5 / Qwen3-Coder-480B).**
   RLM(GPT-5) beats GPT-5 by a **median 26% vs compaction, 130% vs CodeAct-with-
   sub-calls, 13% vs Claude Code**, at **comparable cost**, scaling past **10M tokens**.
-  On the information-dense **OOLONG-Pairs**, base models score **≤0.1% F1** while
-  RLM(depth=1) reaches **58% (GPT-5) / 23% (Qwen3)**. Post-trained **RLM-Qwen3-8B**
+  On the standard **OOLONG**, RLM(depth=1) lifts GPT-5 **44.0 → 56.0 (+28.4%)** and
+  Qwen3-Coder **36.0 → 48.0 (+33.3%)**. On the information-dense **OOLONG-Pairs**,
+  base models score **≤0.1% F1** while RLM(depth=1) reaches **58% (GPT-5) / 23%
+  (Qwen3)**. Post-trained **RLM-Qwen3-8B**
   beats base by a **median 28%** on just **1,000 samples from unrelated domains**.
 
 - **The depth finding — the most relevant to us (Observation 2).** **RLM(depth=0)** —

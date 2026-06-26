@@ -2,11 +2,12 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — POC-validated, steps 3 & 4 shipped** (§9 spikes
-> 1 & 2 green; the Family-A path `recurse()` + the NB-3 reducer built, tested, and
-> live-smoked — §10 steps 3 & 4 ✅). Evidence `poc/rlm-spike1-gate.mjs`,
-> `poc/rlm-spike2-recursion.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`,
-> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-26.
+> requirements doc). Status: **In build — POC-validated, steps 3, 4 & 5 shipped** (§9 spikes
+> 1 & 2 green; the Family-A path `recurse()` + the NB-3 reducer + the **NB-2 Family-B forced
+> fan-out** built, tested, and live-smoked — §10 steps 3, 4 & 5 ✅; the NB-2 count map calibrated
+> live). Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`,
+> `poc/rlm-nb2-calibrate.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
+> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-27.
 
 ---
 
@@ -188,6 +189,15 @@ deterministic shell; **Family B forced fan-out is opt-in.**
 - **No parallelism lost.** Family A's batch spawns run concurrently through the same
   `runPlan` executor; Family B just *guarantees* the batch up front. The self-call is
   the cycle `/prose` forbids (§4.4), bounded by bareguard + a base case.
+- **Where the count comes from — two dials, stacked, not one.** `assessComplexity`
+  reads only the goal *text*, so it sets the **coarse route** (single-shot / which
+  family) and a **fixed starting count** (2/4/6) up front — and it **stays at the front
+  door, unchanged**. It *cannot* set the **data-driven count**: that needs the actual
+  data, fetched via litectx (step 7). So the *as-needed* count is a **second, downstream
+  dial** — once a node fetches its slice, a measurement (deterministic, B) or the model
+  (A) MAY raise the count to *as-many-as-the-data-needs*, **capped by the guards**.
+  Complexity decides *whether/which*; the data decides *how many* when the answer
+  exceeds the fixed handful. The two stack; neither replaces the other.
 
 ### 4.3 The build delta — exactly what is net-new, and why
 
@@ -198,7 +208,7 @@ Everything else in this PRD is satisfied by a primitive that already ships
 | # | Net-new piece | Why it doesn't already exist / why it's needed |
 |---|---|---|
 | **NB-1** | **`recurse()` entry point + glue** (`src/recurse.js`) | The assembly: route via `assessComplexity` (`simple`→single-shot, `critical`→force adversarial verify) → run the default **Family-A** worker `Loop` (offered the `spawn` A-tool + handles, NB-4) → `synthesize` (NB-3) → verify via `Evaluator`; holds the copy-on-return invariant + honest non-convergence. The opt-in Family-B branch routes to `Planner`/`runPlan` instead. ~glue, tested at the integration level (AGENT_RULES: "don't unit-test glue"). |
-| **NB-2** *(opt-in)* | **Deterministic decomposition count** — the **Family-B fan-out mode** | Default control is Family A (model decides adaptively under budget — which is *why* the *"always takes the higher bound"* failure doesn't arise: no forced upfront count, §5/§11). NB-2 is **not** the core path; it's for callers who opt into forced fan-out (`opts.count`/`mode:'fanout'`) on a known-parallel task. It derives the count from `assessComplexity`'s tier → `Planner` (the §4.6 seam). Aurora-grounded map: medium/complex/critical → **2/4/6**. Calibrated in POC. |
+| **NB-2** *(opt-in)* | **Deterministic decomposition count** — the **Family-B fan-out mode** | Default control is Family A (model decides adaptively under budget — which is *why* the *"always takes the higher bound"* failure doesn't arise: no forced upfront count, §5/§11). NB-2 is **not** the core path; it's for callers who opt into forced fan-out (`opts.count`/`mode:'fanout'`) on a known-parallel task. It derives the count from `assessComplexity`'s tier → `Planner` (the §4.6 seam). Count = the **fixed** Aurora-grounded map medium/complex/critical → **2/4/6** (calibrated live, **kept as-is** — the default for normal tasks). **Added option (in scope, deferred to step 7 — needs litectx): an *auto / as-needed* count.** When the real data is bigger than the fixed handful covers, the slice count scales to *as many as the data needs* — chosen by a **measurement** (deterministic, the Family-B way) or by the **model** (the Family-A way), **always capped by the guards** (budget/depth/calls). This is the paper's data-driven chunking (§10F); it does **not** replace 2/4/6, it **stacks above** it. |
 | **NB-3** | **Synthesis ("reduce") step** | `runPlan` returns `results[]`; nothing combines them into one answer. NB-3 is the reducer. **Default = the `Evaluator` driving a synthesis pass** (it already runs a separate-context Loop); strategy (concat vs structured merge) is a calibration detail (§11). |
 | **NB-4** | **Depth-aware capability-scrub prompt + the `spawn` A-tool surface** | bareguard caps *depth* (`BAREGUARD_SPAWN_DEPTH`/`maxDepth`), but the **prompt/tool-shaping** half of guard #5 — "deeper workers get fewer tools + a conservative 'prefer direct action' prompt" — is bareagent's. This is the depth-bounded self-call (§4.4); plus the `spawn` mechanism decision (§4.5). |
 | **NB-5** | **Decomposition-policy prompt + few-shot** | The RLM paper (Fig 4) shows in-context decomposition examples *directly* lift accuracy and the first-split-correct rate — so for **full RLM** this is in-scope, not a nicety. A text asset (a system-prompt blurb + 1–2 worked splits), zero runtime. |
@@ -335,9 +345,11 @@ not rebuilding**:
 | Decomposition policy + few-shot (Fig 4) | **NB-5** | system-prompt asset |
 | Copy-on-return isolation | **NB-1 invariant** | worker returns result only (RC-2) |
 | Decompose → fan-out → reduce | **consume + NB-3** | `Planner`→`runPlan`→synthesis |
+| Data-driven slice count (chop a big input into as-many-as-needed) | **NB-2 + litectx (step 7)** | **deferred** — fixed 2/4/6 ships now; the auto-count needs litectx (§11) |
 
-No RLM primitive is dropped; the only net-new code is **NB-1…NB-5** core (+ NB-6
-optional, §4.8) — see §4.3.
+No RLM primitive is dropped **save the data-driven slice count** (deferred to step 7,
+§11 — the fixed 2/4/6 fan-out ships now); the only net-new code is **NB-1…NB-5** core
+(+ NB-6 optional, §4.8) — see §4.3.
 
 ### 4.8 Optional authoring front-door — `writePlan` / `rlm.md` (NB-6)
 
@@ -569,8 +581,8 @@ trusting them — each a harness fix, none a real failure.
    `Evaluator` fills the verify slot; honest `{incomplete, best}` on guard exhaustion or a
    dead worker; copy-on-return held by construction; `maxDepth=1`⇒flat. Validated by 17
    mutation-checked offline integration tests (`test/recurse.test.js`, RC-1/2/5/6/7/9/11/12);
-   the live pull-vs-flat re-measure is step 7. Family-B (`opts.count`/`mode`) fails loud
-   until step 5; `opts.synthesize` is the NB-3 seam.
+   the live pull-vs-flat re-measure is step 7. Family-B (`opts.count`/`mode`) was build step 5
+   (now ✅, below); `opts.synthesize` is the NB-3 seam.
 4. ~~**NB-3**: synthesis/reduce step~~ **✅ DONE** — `src/recurse-synthesize.js`
    (`synthesize` with `concat`/`merge` strategies + a `reduce` fn). §9.1 wired:
    aggregation = deterministic **code-reduce** (the function form over child
@@ -630,6 +642,16 @@ deferred — only the calibration details below are.
   (deterministic tier→count, medium/complex/critical→**2/4/6**, §4.3 NB-2); exact
   numbers/target-vs-ceiling open. *Un-defer:* the A/B POC. **Default Family A needs no
   count** (the model spawns adaptively under budget).
+- **Auto / as-needed decomposition count (data-driven *width*)** — *in scope, deferred
+  to step 7.* The fixed 2/4/6 ships now; the **data-driven count** (chop a big input
+  into as-many-slices-as-needed — the paper's chunking, §10F) needs litectx so code can
+  measure/slice the *real* data. It sits **downstream of `assessComplexity`** (which
+  reads only goal text and can't see the data) and is **capped by the guards**. Both
+  families gain it: a **measurement** picks the count (B, deterministic) or the **model**
+  picks it (A). *Un-defer:* step 7 (litectx wiring) — or sooner if a giant-input
+  *read-everything* task (OOLONG-Pairs-like) becomes a live need. **Distinct** from the
+  depth-overflow trigger below: this is *width* (more slices at one level); overflow is
+  *depth* (one slice still too big → recurse).
 - **litectx push vs pull** — ~~which wins on real tasks is open~~ **RESOLVED (§9.1,
   spike 1): pull-default wins; push *and* raw lost to flat.** Caveat: the spike's
   retriever was lexically exact, so pull's *margin* is directional, not the production
