@@ -39,8 +39,9 @@ const DECOMPOSITION_POLICY = [
 
 /**
  * NB-4 / RC-12 — the depth-aware capability-scrub suffix. Deeper workers get a more conservative prompt:
- * "prefer direct action, only delegate if truly necessary." Combined with `scrubSpawn` (the tool half of the
- * scrub) in recurse.js, this realizes guard #5's prompt+tool-shaping half (the part bareguard's blind
+ * "prefer direct action, only delegate if truly necessary." Combined with the inline `canSpawn` check (the
+ * tool half of the scrub: `depth < maxDepth` withholds `spawn_child` at the cap) in recurse.js, this realizes
+ * guard #5's prompt+tool-shaping half (the part bareguard's blind
  * `policy` cap cannot express). At depth 0 there is no suffix (the top-level worker decomposes freely);
  * from depth 1 on, each level nudges harder toward answering directly so recursion contracts toward its base
  * case rather than fanning out without bound.

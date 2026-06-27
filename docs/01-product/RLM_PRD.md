@@ -2,10 +2,10 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — POC-validated, steps 3, 4 & 5 shipped** (§9 spikes
+> requirements doc). Status: **In build — POC-validated, steps 3–6 shipped** (§9 spikes
 > 1 & 2 green; the Family-A path `recurse()` + the NB-3 reducer + the **NB-2 Family-B forced
 > fan-out** built, tested, and live-smoked — §10 steps 3, 4 & 5 ✅; the NB-2 count map calibrated
-> live). Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`,
+> live; step 6 capability-scrub verify-close ✅). Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`,
 > `poc/rlm-nb2-calibrate.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
 > `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-27.
 
@@ -637,8 +637,19 @@ trusting them — each a harness fix, none a real failure.
    starves its workers (Planner emits slice *descriptions*; without litectx handle tools a
    worker has no data to read) → data-partition fan-out lands with `opts.tools` at **step 7**;
    Family-B today is for **self-contained semantic** slices.
-6. **Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
-   (RC-11/12).
+6. ~~**Depth-aware capability-scrub** at depth + confirm `maxDepth=1` forbids nesting
+   (RC-11/12).~~ **✅ DONE (verify-close)** — the scrub MECHANISM shipped in step 3 (NB-4:
+   deeper workers get fewer tools + a conservative prompt); step 6 closed the verification
+   gaps. `capabilityScrub` now has direct unit coverage of all three depth branches with the
+   cap-inclusive boundary as the mutation point (`depth==maxDepth` ⇒ the *deepest* suffix, not
+   the milder one — a `>` instead of `>=` is caught). New integration tests prove the scrub is
+   genuinely DEPTH-aware across a real 0→1→2 nesting (none → "prefer direct action" → "deepest
+   level / cannot delegate / honest-incomplete") and that the tool set contracts monotonically
+   child ⊆ parent with `spawn_child` dropped EXACTLY at the cap (RC-11: `maxDepth=1` ⇒ flat, no
+   nesting; the prompt half fires too — a capped worker is both denied the tool AND told to
+   stop). +5 mutation-checked tests (40 total in `test/recurse.test.js`); both new guarantees
+   mutation-proved (scrub boundary `>=`→`>` and `canSpawn` `<`→`<=` each turn tests red). Also
+   fixed a stale JSDoc ref (`scrubSpawn` → the inline `canSpawn` check, the actual tool half).
 7. **Wire receipts** (RC-10) through existing Stream/metrics; wire litectx as
    **pull-default tools** per worker + opt-in push-seed (RC-5) and capability matching
    (RC-4).

@@ -11,7 +11,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { recurse } = require('../src/recurse');
 const { HaltError } = require('../src/errors');
-const { DECOMPOSITION_POLICY } = require('../src/recurse-prompts');
+const { DECOMPOSITION_POLICY, capabilityScrub } = require('../src/recurse-prompts');
 const { synthesize, concatReduce, MERGE_PROMPT } = require('../src/recurse-synthesize');
 
 // Tasks crafted to hit known assessComplexity tiers (see src/complexity.js):
@@ -331,6 +331,89 @@ describe('recurse — topology knob & capability-scrub (RC-11 / RC-12 / NB-4)', 
     const parentTools = new Set(parentCall.tools);
     assert.ok(childCall.tools.every(t => parentTools.has(t)), 'child tool set must be a subset of the parent\'s');
     assert.ok(childCall.tools.includes('recall'), 'the pull/handle tool is still offered to the child');
+  });
+
+  it('RC-11/RC-12: at the cap (depth >= maxDepth) the child gets the DEEPEST-LEVEL prompt — withhold the tool AND tell it to stop (honest incomplete)', async () => {
+    // RC-11 above proves the tool is absent at the cap; this proves the PROMPT half fires too — a worker with
+    // no spawn tool must also be TOLD it cannot delegate, and to return an honest incomplete rather than guess.
+    const sp = scriptedProvider(decomposingHandler({ subtask: 'capped subtask body' }));
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 1 }); // depth-1 child sits AT the cap
+    const childCall = sp.calls.find(c => lastUser(c.messages).includes('capped subtask body'));
+    assert.ok(childCall, 'the depth-1 (capped) child ran');
+    const sys = systemOf(childCall.messages);
+    assert.match(sys, /deepest level/, 'the capped child is told it is the deepest level');
+    assert.match(sys, /CANNOT delegate/, 'the capped child is told it cannot delegate further');
+    assert.match(sys, /incomplete/, 'the capped child is told an honest incomplete is correct');
+    // mutation check: it must get the DEEPEST message, not the milder intermediate one
+    assert.ok(!/PREFER DIRECT ACTION/.test(sys), 'a capped child must NOT get the milder intermediate scrub');
+  });
+
+  it('RC-12 depth-aware: across 0→1→2 the scrub strengthens and the tool set is monotone (spawn dropped exactly at the cap)', async () => {
+    // A 3-level nesting (maxDepth=2): depth0 spawns → depth1 spawns → depth2 sits at the cap and answers direct.
+    // Proves the scrub is DEPTH-aware (none → "prefer direct" → "deepest") and the tool set contracts monotonically
+    // child ⊆ parent, with spawn_child present only BELOW the cap. The DEPTHn subtasks are deliberately COMPLEX-tier
+    // (so a below-cap child would WANT to spawn — assessComplexity gates `canSpawn`); only the cap stops depth-2.
+    const D1 = 'DEPTH1 design and implement the pipeline across the entire system';
+    const D2 = 'DEPTH2 design and implement the pipeline across the entire system';
+    const handleTool = { name: 'recall', description: 'pull a slice', parameters: { type: 'object', properties: {} }, execute: async () => 'slice' };
+    const handler = (messages, tools) => {
+      if (isVerify(messages)) return { text: SATISFIED };
+      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
+      const gotChild = messages.some(m => m.role === 'tool');
+      const user = lastUser(messages);
+      if (gotChild) return { text: `SYNTH[${messages.filter(m => m.role === 'tool').map(m => m.content).join('|')}]` };
+      if (hasSpawn) {
+        const next = user.includes('DEPTH1') ? D2 : D1;
+        return { toolCalls: [{ id: 'c1', name: 'spawn_child', arguments: { subtask: next } }] };
+      }
+      return { text: `LEAF(${user.slice(0, 18)})` };
+    };
+    const sp = scriptedProvider(handler);
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 2, tools: [handleTool] });
+
+    const d0 = sp.calls.find(c => lastUser(c.messages).includes('notification pipeline') && c.tools.includes('spawn_child'));
+    const d1 = sp.calls.find(c => lastUser(c.messages).includes('DEPTH1') && c.tools.includes('spawn_child'));
+    const d2 = sp.calls.find(c => lastUser(c.messages).includes('DEPTH2'));
+    assert.ok(d0 && d1 && d2, 'all three depth levels ran (0→1→2 nesting)');
+
+    // prompt scrub strengthens with depth
+    assert.ok(!/PREFER DIRECT ACTION/.test(systemOf(d0.messages)) && !/deepest level/.test(systemOf(d0.messages)), 'depth-0 is unscrubbed');
+    assert.match(systemOf(d1.messages), /PREFER DIRECT ACTION/);
+    assert.ok(!/deepest level/.test(systemOf(d1.messages)), 'depth-1 (below cap) is NOT the deepest message');
+    assert.match(systemOf(d2.messages), /deepest level/);
+
+    // tool set is monotone: spawn present at 0 & 1, dropped exactly at the cap (depth 2); handle tool survives all
+    assert.ok(d0.tools.includes('spawn_child') && d1.tools.includes('spawn_child'), 'spawn offered below the cap');
+    assert.ok(!d2.tools.includes('spawn_child'), 'spawn dropped exactly at the cap (depth 2)');
+    const sub = (a, b) => a.every(t => new Set(b).has(t));
+    assert.ok(sub(d1.tools, d0.tools) && sub(d2.tools, d1.tools), 'tools contract monotonically child ⊆ parent');
+    assert.ok(d0.tools.includes('recall') && d1.tools.includes('recall') && d2.tools.includes('recall'), 'the handle tool survives every level');
+  });
+});
+
+describe('capabilityScrub — depth-aware suffix unit (NB-4 / RC-12)', () => {
+  it('depth 0 (and below) → no scrub: the top worker decomposes freely', () => {
+    assert.equal(capabilityScrub(0, 3), '');
+    assert.equal(capabilityScrub(-1, 3), '');
+  });
+
+  it('0 < depth < maxDepth → the milder "prefer direct action" suffix, naming the depth', () => {
+    const s = capabilityScrub(1, 3);
+    assert.match(s, /PREFER DIRECT ACTION/);
+    assert.match(s, /DEPTH 1 of 3/);
+    assert.ok(!/deepest level/.test(s), 'a below-cap worker is NOT told it is the deepest');
+  });
+
+  it('depth >= maxDepth → the deepest-level suffix (boundary fires AT depth == maxDepth)', () => {
+    // The boundary itself is the mutation point: a `>` instead of `>=` would drop depth==maxDepth to the milder
+    // branch — so asserting the EQUAL case gets the deepest message is what proves the cap-inclusive boundary.
+    const at = capabilityScrub(2, 2);
+    assert.match(at, /deepest level/);
+    assert.match(at, /CANNOT delegate/);
+    assert.match(at, /incomplete/, 'the deepest worker is told an honest incomplete is correct');
+    assert.ok(!/PREFER DIRECT ACTION/.test(at), 'the deepest worker does not also get the milder suffix');
+    // beyond the cap stays the deepest message (defensive — depth should never exceed maxDepth, but the branch holds)
+    assert.match(capabilityScrub(5, 2), /deepest level/);
   });
 });
 
