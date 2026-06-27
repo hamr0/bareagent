@@ -40,6 +40,20 @@ const TIER_COUNT = { simple: 1, medium: 2, complex: 4, critical: 6 };
 const DEFAULT_FANOUT_CONCURRENCY = 4;
 
 /**
+ * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
+ * the WHOLE task's final answer; a child grading its own slice against the whole definition-of-done is wasted
+ * (the verdict is never read by the parent) AND misapplied (a slice isn't expected to satisfy the whole DoD).
+ * Also strips the forced-fan-out knobs (`count`/`mode`) so a child runs Family A, not another forced wave.
+ * The `critical → force-verify` SAFETY FLOOR is unaffected — it keys on the task text via `isCritical`, not the
+ * contract, so a critical child still self-verifies. Handle tools, `synthesize`, and `maxDepth` carry down.
+ * @param {RecurseOptions} opts
+ * @returns {RecurseOptions}
+ */
+function forChild(opts) {
+  return { ...opts, count: undefined, mode: undefined, contract: undefined, evaluate: undefined };
+}
+
+/**
  * @typedef {object} RecurseCtx
  * The per-run runtime blob — the wiring, threaded down the whole recursion tree (and forwarded to the worker
  * Loop's `policy`/governance via `options.ctx`). Distinct from `opts` (the policy knobs).
@@ -114,6 +128,15 @@ const DEFAULT_FANOUT_CONCURRENCY = 4;
 /**
  * Decompose a task into fresh-context workers, verify against a setpoint, and synthesize one result —
  * assembled from existing primitives, not reimplemented (G1/G6).
+ *
+ * ⚠️ RESOURCE BOUNDS ARE bareguard's, not recurse()'s (§6, "no second guard layer"). `recurse()` adds NO
+ * intrinsic total-work cap: `opts.maxDepth` (default 3) bounds DEPTH but not fan-out WIDTH, and a worker may
+ * spawn many children per round — so the total node count compounds multiplicatively across depth × width.
+ * Without a gate the ONLY backstop is each Loop's `HARD_ROUND_LIMIT` (100), which does NOT compose into a tree
+ * bound. **WIRE bareguard** (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces
+ * depth/budget/call caps and the pre-wave fan-out checkpoint. For a hard local cap without bareguard, set
+ * `opts.maxDepth: 1` (flat fan-out, no nesting). (The measurable-overflow depth gate that justifies the open
+ * `maxDepth=3` default is build step 7; until then depth-3 leans on model judgment + the gate.)
  *
  * @param {string} task - The goal.
  * @param {RecurseCtx} [ctx] - The runtime wiring (provider, policy, depth, …). Threaded down the tree.
@@ -290,7 +313,7 @@ async function recurse(task, ctx = {}, opts = {}) {
  * @returns {Promise<RecurseResult>}
  */
 async function recurseFanout(task, ctx, opts, state) {
-  const { provider, depth, maxDepth, assessment, critical, node } = state;
+  const { provider, depth, assessment, critical, node } = state; // maxDepth rides in opts → children
   node.model = provider.model || null; // the orchestration is code; per-worker tokens live in node.spawned[]
 
   // Count: an explicit positive-integer `opts.count` wins; otherwise the calibrated tier→count map. Floor at 1
@@ -334,10 +357,10 @@ async function recurseFanout(task, ctx, opts, state) {
       }
     }
 
-    // 2) Fan out: each step is a fresh-window recurse() child. Forced fan-out is NOT re-applied to children —
-    //    they run Family A (or single-shot) so the parallelism is exactly one level wide per `count`. maxDepth
-    //    is preserved so a genuinely oversized slice may still self-decompose under the same ceiling.
-    const childOpts = { ...opts, count: undefined, mode: undefined };
+    // 2) Fan out: each step is a fresh-window recurse() child. Forced fan-out is NOT re-applied to children, and
+    //    the top-level contract/verifier is the TOP's job — `forChild` strips both (the slices run Family A, or
+    //    single-shot; `maxDepth` is preserved so a genuinely oversized slice may still self-decompose).
+    const childOpts = forChild(opts);
     const results = await runPlan(
       steps,
       (step) => recurse(step.action, { ...ctx, depth: depth + 1 }, childOpts),
@@ -466,7 +489,8 @@ function buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults) {
     execute: async (args) => {
       const subtask = typeof args?.subtask === 'string' ? args.subtask : '';
       if (!subtask) return '[error] spawn_child requires a non-empty subtask string';
-      const child = await recurse(subtask, { ...ctx, depth: depth + 1 }, opts);
+      // A delegated child grades only ITS slice; the parent's contract/verifier is the top's job (see forChild).
+      const child = await recurse(subtask, { ...ctx, depth: depth + 1 }, forChild(opts));
       node.spawned.push(child.receipts); // audit lineage (RC-10) — NOT the parent transcript
       // Only the declared result crosses the boundary (RC-2). An incomplete child is reported honestly, not
       // silently dropped or faked. The same declared value is collected for the NB-3 reducer.

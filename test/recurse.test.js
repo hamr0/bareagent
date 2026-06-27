@@ -211,6 +211,19 @@ describe('recurse — Family B forced fan-out (NB-2)', () => {
     assert.equal(out.incomplete, undefined, 'a non-halt deny must not block the wave');
     assert.equal(out.receipts.spawned.length, 2, 'the wave still ran (only HaltError is load-bearing)');
   });
+
+  it('W1: children do NOT verify against the parent contract — only the TOP node grades the merged answer', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2, contract: 'the WHOLE task must be complete' });
+    assert.ok(out.verdict, 'the top node verifies the merged result against the contract');
+    for (const child of out.receipts.spawned) {
+      assert.equal(child.verdict, null, 'a slice must NOT be graded against the whole-task definition-of-done');
+    }
+    // mutation check: EXACTLY ONE verify happened (the top), not one-per-slice — neuter forChild's
+    // contract-strip and this becomes 3 (2 slices + top), failing.
+    const verifyCalls = sp.calls.filter(c => isVerify(c.messages)).length;
+    assert.equal(verifyCalls, 1, 'exactly one grader call (top only), not one wasted call per slice');
+  });
 });
 
 describe('recurse — router (assessComplexity as a hint, not a gate)', () => {
