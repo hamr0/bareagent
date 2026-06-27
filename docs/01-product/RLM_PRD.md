@@ -2,11 +2,14 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — POC-validated, steps 3–6 shipped** (§9 spikes
-> 1 & 2 green; the Family-A path `recurse()` + the NB-3 reducer + the **NB-2 Family-B forced
-> fan-out** built, tested, and live-smoked — §10 steps 3, 4 & 5 ✅; the NB-2 count map calibrated
-> live; step 6 capability-scrub verify-close ✅). Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`,
-> `poc/rlm-nb2-calibrate.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
+> requirements doc). Status: **In build — steps 3–6 shipped; step-7 PRE-BUILD POC done + design
+> re-aligned** (§9 spikes 1 & 2 green; Family-A `recurse()` + NB-3 reducer + NB-2 Family-B fan-out
+> built/tested/live-smoked — §10 steps 3, 4, 5 ✅; step 6 capability-scrub verify-close ✅; **step-7
+> fuzzy-retrieval POC ✅ — §9.2: naive search DROPPED, chop-it-up + code-reduce is the no-footnote
+> default, RC-5 re-aligned to deterministic-handle + code-reduce, cross-checked against the RLM paper**).
+> **Step 7 is now WIRING, not discovery — do not re-run the pull/flat/search experiments (§9.2).**
+> Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`, `poc/rlm-nb2-calibrate.mjs`,
+> `poc/rlm-step7-fuzzy-retrieval.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
 > `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-27.
 
 ---
@@ -386,7 +389,7 @@ a `.prose.md` program; we don't need that meta-trick — a plain prompt suffices
 | **RC-2** | `spawn` runs children with **copy-on-return**: a **fresh context window** in (child sees only its sub-task + handed inputs, never the parent transcript) and **only the declared result out** (never the child's scratch/transcript). | **spawnChild** (exists) / **NB-4** (in-proc variant) | Mutation test: leak the parent transcript into a child → assertion fails; leak a child's transcript into the parent/synthesis → assertion fails. Children run concurrently (observed overlap), results collected in order. |
 | **RC-3** *(opt-in mode)* | In **forced fan-out mode**, the count is deterministic (classifier, not model). **Default Family A has no forced count** — the model spawns adaptively under budget, which is *why* the higher-bound failure doesn't arise. | **NB-2** (net-new, opt-in) | Fan-out mode: fixed input+tier ⇒ identical count across runs. Default mode: no upfront count is requested; spawn is budget-bounded (a test asserts no "how many subgoals" prompt on the default path). |
 | **RC-4** | **Capability-matched dispatch**: each sub-goal routed to a worker whose declared capability matches the slice. | **SkillRegistry** (exists) + glue | A sub-goal with no matching worker is reported (counted), not silently dropped. |
-| **RC-5** | **Context-as-handle, PULL-default**: each worker is *offered* litectx `recall`/`get` as **tools** and queries on demand (don't choke it); a slice MAY be pre-seeded (PUSH) per `opts.seed` when deterministic scoping wins (the aurora code case); **never the whole corpus** either way. | **litectx** (exists, consumed as tools) + glue | A test asserts no full-file/full-repo payload crosses into a worker. Pull path: the worker can fetch a slice via the tool. Push path: pre-seed bounded by the fetch budget. **POC result (§9.1, spike 1): pull wins** — at 11×-window scale pull averaged ~8% error vs flat ~16%, while **push *and* raw both LOST to flat (~23–25%)** by over-including confusers. So **pull is the default; push is opt-in, not a free win** (your "don't choke the LLM" prior beat aurora's "push the slice" prior). |
+| **RC-5** | **Context-as-handle, DETERMINISTIC-first, CODE-REDUCE aggregation** *(re-aligned 2026-06-27, §9.2 — supersedes the original "pull-default")*. A worker gets context as a **handle**, never the whole corpus. **Correctness rides a DETERMINISTIC handle** (exact FTS / code filter); **fuzzy embedding recall only FINDS candidates, never decides the answer** ("recall helps finding, not executing"). **Aggregation is always CODE**, never a model `Finish`/count (the paper's Algorithm-1 flaw #2). **Default delivery = process bounded slices + code-reduce** (the depth-0 pattern, harness-owned for SLMs); **search/pull is an opt-in cost/speed mode** behind a cheaply-checkable verify net. | **litectx** (exists, consumed as tools) + glue | A test asserts no full-corpus payload crosses into a worker; the aggregation is code-side (mutation: route the count through the model → the catastrophe tail returns). **POC: §9.1 spike-1** — *exact* handle → pull competitive (~8% vs flat ~16%). **§9.2 step-7** — *fuzzy* recall → high-variance (verdict flipped across runs, 10% catastrophe); **naive search DROPPED**; **chop-it-up + code-reduce = 0 catastrophe, error halved** (the no-footnote default). The deterministic-handle case is spike-1's exact arm — not re-run. |
 | **RC-6** | **Termination guards** (depth/budget/wall-clock/calls) enforced. | **bareguard** (exists, via `wireGate`/`policy`) | Each cap has a test that trips it; the loop exits cleanly via `HaltError` when any trips. `recurse()` adds **no** second guard layer. |
 | **RC-7** | **Separate-context verifier** returns a structured gap report **with evidence**, never a bare boolean; generator never grades itself. | **Evaluator** (exists) | `Verdict` includes `status`, `pass`, `critique`/`gap`, `suggestions`; runs in a distinct context. Mutation: route verification back to the generator context → test flags it. |
 | **RC-8** | **Deterministic-first ladder**: checks (compiles/tests/lint/forbidden-import) before any model judgment. | **Evaluator** `predicate`→`rubric` (exists) | For the py→js exemplar, "no deps" / "no `.py` left" decided by `predicate` (no tokens); the rubric model is consulted only for the subjective clause. |
@@ -586,6 +589,46 @@ three *test* defects (ID-grabbing parse, too-tight token cap, a mis-scoped gate
 conflating leaf precision with the mechanism) were caught by reading the numbers, not
 trusting them — each a harness fix, none a real failure.
 
+### 9.2 Step-7 pre-build POC ledger — fuzzy retrieval, the naive-search drop, the code-reduce proof (measured 2026-06-27)
+
+**Why this section exists:** to record EVERY step-7 experiment — including the ones that failed, the artifacts we chased, and the primitives we DROPPED — so they are never re-run. If a future session is about to A/B "pull vs flat" or "is naive search worth it," read this first: it's already done. Evidence: `poc/rlm-step7-fuzzy-retrieval.mjs` (live, **gpt-4o-mini as the SLM proxy** — RLM's real target is SLMs / local / less-capable coding models, so a small cheap model is the *faithful* tier, not a weakness). Corpus = seeded-RNG, confuser-rich, 3-axis records (`"<entity>'s <place> branch <action> <N> <object>."`); the **same corpus feeds every arm**; ground truth is code-computed; metric = relative count error + **catastrophe rate** (error > 50%).
+
+**The question step 7 had to answer** (the §9.1 caveat, grounded in `RLM_EXPLAINED.md` §10F): spike-1's pull-win used a **lexically-exact** retriever (~100% precision). Does pull-default survive a REAL fuzzy retriever (litectx `recall` = hybrid FTS+embedding, which surfaces near-miss confusers an exact retriever never would)?
+
+**Layer A — the real retriever, no LLM (deterministic, reproducible).** litectx `recall(query,{kind,n})` is hybrid: FTS gates candidates, embeddings re-rank (`qvec = embeddings && ftsMatch ? … : null`); the embedder is local (384-dim, ~275 ms warmup, no API key). Measured vs ground truth at ~8× corpus/window: **recall = 1.0 but precision ≈ 0.24 at one window** (every target surfaces, buried in ~76 % confusers); precision falls to ~0.05 at recall@ALL. Exact-lexical baseline = 1.0 / 1.0. → The real fuzzy retriever **finds everything but is low-precision**; the confuser variable is genuinely wired in.
+
+**Layer B — end-to-end count, LLM-in-loop. THE HEADLINE FINDING IS INSTABILITY.** Across three live runs of the same arms, the verdict **flipped every time** (LLM nondeterminism at n=few seeds): run 1 pull 3.7 % < flat 31.5 % (pull wins); run 2 pull **198 %** > flat 14.8 % (pull catastrophic — one seed counted 41 vs truth 6); run 3 (10 runs/arm) pull median 5.6 % but **max 125 %, 10 % catastrophe** vs flat **0 % catastrophe**. **Blow-up mechanism (instrumented):** under low precision the worker *widens n* (to 100–200) chasing recall, collapsing toward "raw" (the whole noisy pile), then **over-counts confusers** as matches. It returns a confident wrong integer — **not a crash**. RC-9's honest-incomplete does **not** catch it (the worker is "done," just wrong); only a verifier can, and only if the contract is cheaply checkable.
+
+**DROPPED PRIMITIVE — naive search (`recall → count the blob`): DO NOT REBUILD.** High-variance (confident over-count on a noisy slice), **no token savings** (it over-widens n to ≈ the whole corpus, defeating the point), and "a couple seconds faster" never justifies a confidently-wrong answer in a primitive that *claims to solve* a task. The RLM honesty bar (RC-9, "never a faked pass") forbids shipping a default that confidently misfires.
+
+**Guardrail attempt — cap n + list-IDs-then-code-count: HELPED, INSUFFICIENT ALONE.** Nailed the typical case (median 0 %) and was the cheapest, but traded over-counting for **under-counting** (capped n / over-strict filter → missed targets; 10 % catastrophe, max 67 %). Tuning the cap shifts the tail, doesn't remove it — the residual weak-model *filtering* noise stays. So a guardrail is necessary-not-sufficient.
+
+**Token/caching artifact (caught + fixed — do not re-measure naively).** The first token tallies (raw ≈ 6k « flat ≈ 30k) were WRONG, for two compounding reasons: (1) the POC meter summed only `input+output` and **dropped `cacheRead`**; (2) **OpenAI auto-caches prompts ≥ 1024 tokens**, so raw (one ~2400-token dump, repeated across trials/runs within the cache window) was served from cache and counted as ~0, while flat's ~370-token chunks are *below* the cache threshold and counted in full. Probe confirmed: an identical raw call's `input` went 2390 → 86 with `cacheRead` 0 → 2304. **FIX:** sum all four token tiers + a per-call nonce to bust caching. Honest per-run cost (corrected): **read-all ≈ chop-it-up** (both read the whole corpus); **only a *capped* search is genuinely cheaper** (reads ~25 %).
+
+**THE PROOF — code-reduce removes the footnote (10 runs/arm, honest 4-tier meter):**
+
+| arm | mean | median | max | catastrophe | tokens | time |
+|---|---|---|---|---|---|---|
+| chop, **model counts** (old) | 16.5 % | 15 % | 44 % | 0 % | 31k | 4.6 s |
+| **chop + CODE-reduce** | **7.4 %** | 6 % | **25 %** | **0 %** | 42k | 5.7 s |
+| capped-search + code-reduce | 9.4 % | **0 %** | 50 % | 0 %\* | **11k** | **2.7 s** |
+
+- **chop-it-up + code-reduce EARNS the no-footnote claim:** 0 catastrophe, error **halved** (16.5 → 7.4 %), worst case 44 → 25 %. Moving the count *out of the model* (workers return matching IDs, code tallies) is the load-bearing reliability lever.
+- **capped-search + code-reduce** is 4× cheaper / 2× faster with a perfect median — but keeps a fatter tail (max 50 %). It's a **cost/speed** win, **not** a reliability win.
+- "No footnote" = **no catastrophe** (never confident garbage), NOT perfect: a weak model still lands ~7 % off on a hard count (bounded per-item misjudgment), shrinkable only by a stronger model or a verify pass.
+
+**Paper alignment (`RLM_EXPLAINED.md` §10F) — one bullseye, one stray:**
+- ✅ **code-reduce IS the paper's Algorithm-1 flaw #2** ("don't route output through a model `Finish` action capped at the window — let CODE build the result"). We re-derived it empirically; this is the spine, not a deviation.
+- ✅ **chop-default + recursion-opt-in matches Observation 2** (the depth-0 handle is the main lever; recursion is task-dependent, not the default).
+- ⚠️ **THE STRAY:** we tested "pull" as **fuzzy embedding recall**. The paper's handle is **deterministic grep/code** (exact, high-precision) — i.e. our exact-lexical / spike-1 arm (precision 1.0, where pull *won*). So "search is unreliable" is true of **fuzzy recall only**, not of the paper's handle. **The deterministic-handle case is NOT separately re-run — that would duplicate spike-1's exact-lexical arm, already PASS.** The correction is baked into the design below.
+
+**SETTLED step-7 design (locked 2026-06-27 — no further spikes; flips RC-5's original "pull-default"):**
+1. **Default = process bounded slices + CODE-REDUCE** (the paper's depth-0 + flaw-#2). Harness-owns the chunking/aggregation because SLMs/local models can't reliably *drive* the REPL the paper assumes a frontier model writes — a deliberate weak-model adaptation, same effect (process all slices, aggregate in code).
+2. **The handle is DETERMINISTIC for correctness** (exact FTS / code filter); fuzzy embedding recall only **finds candidates**, never decides the answer ("recall helps FINDING, not EXECUTING" — §10A/§11). This dissolves the precision problem instead of demoting the feature.
+3. **Search/pull = opt-in cost/speed mode** (4× cheaper, 2× faster), only behind a **cheaply-checkable contract** (a real verify catch-net) or where the caller accepts the tail.
+4. **Naive search dropped; raw/dump dropped** (drowns — §9.1).
+5. **Aggregate in code, always. Recursion opt-in, task-dependent.**
+
 ## 10. Build sequence (dependency-ordered, delta-only)
 
 1. ~~**A/B POC** (§9, spike 1) on real data — **gate**~~ **✅ DONE (§9.1): PASS** —
@@ -650,9 +693,21 @@ trusting them — each a harness fix, none a real failure.
    stop). +5 mutation-checked tests (40 total in `test/recurse.test.js`); both new guarantees
    mutation-proved (scrub boundary `>=`→`>` and `canSpawn` `<`→`<=` each turn tests red). Also
    fixed a stale JSDoc ref (`scrubSpawn` → the inline `canSpawn` check, the actual tool half).
-7. **Wire receipts** (RC-10) through existing Stream/metrics; wire litectx as
-   **pull-default tools** per worker + opt-in push-seed (RC-5) and capability matching
-   (RC-4).
+7. **Wire litectx + receipts — to the §9.2 RE-ALIGNED design (NOT the original pull-default).**
+   The step-7 pre-build POC (§9.2) is DONE and settled the shape; this step is now *wiring*, not
+   discovery — **do not re-run the pull-vs-flat or naive-search experiments.** Build:
+   - **Default context path = process bounded slices + CODE-REDUCE** (workers return matching
+     items/IDs; code aggregates — the paper's flaw-#2 reliability lever; the only arm that earned
+     0% catastrophe). This generalizes the existing NB-3 `synthesize` from "aggregation nicety" to
+     "the default reliability mechanism."
+   - **litectx handle = DETERMINISTIC for correctness** (exact FTS / `get` / code-side filter);
+     **fuzzy `recall` embedding only FINDS candidates**, never decides the answer (RC-5 re-aligned).
+   - **`opts.tools` (pull/search) = opt-in cost/speed mode** (4× cheaper, 2× faster, §9.2), only
+     behind a cheaply-checkable contract (a real verify catch-net) or explicit caller acceptance of
+     the tail. **Naive search is NOT built** (dropped, §9.2). Capability matching (RC-4) wires here.
+   - **Receipts (RC-10)** through existing Stream/metrics; per-node lineage + gap-report-with-evidence.
+   - *Open implementation question for this step:* whether the deterministic handle is litectx FTS-exact,
+     a code-side predicate filter over `recall` candidates, or both — pick by wiring, not another spike.
 8. **Replay the POC data through the shipped primitive** and reconcile any mismatch
    as a finding (verify-shipped-vs-POC doctrine).
 9. **(Optional) NB-6**: `writePlan` + `plan_write` skill emitting `rlm.md` (§4.8) —
@@ -694,11 +749,19 @@ deferred — only the calibration details below are.
   data-driven path is a *partition* of litectx handles, NOT a second `Planner` semantic
   decomposition (today's `recurseFanout` is the semantic/floor path) — wire it as a
   distinct partition path under the same `opts.count` floor, so the two don't conflate.
-- **litectx push vs pull** — ~~which wins on real tasks is open~~ **RESOLVED (§9.1,
-  spike 1): pull-default wins; push *and* raw lost to flat.** Caveat: the spike's
-  retriever was lexically exact, so pull's *margin* is directional, not the production
-  number (the real-code bracket was too easy to discriminate) — re-measure on fuzzy
-  retrieval when litectx is wired (step 7).
+- **litectx push vs pull, and pull-vs-flat under fuzzy retrieval** — ~~which wins is
+  open~~ **FULLY RESOLVED — do not re-run (§9.2, step-7 POC, 2026-06-27).** Spike 1
+  showed pull wins with an *exact* retriever; the fuzzy re-measure (the step-7 caveat)
+  is now DONE and **re-aligned RC-5**: with a REAL fuzzy retriever (litectx recall,
+  precision ≈ 0.24) naive pull is **high-variance** (verdict flipped across runs, 10%
+  catastrophe) and gives no token saving → **naive search DROPPED**. The winner is
+  **chop-it-up + code-reduce** (0 catastrophe, error halved). The handle is
+  **deterministic-first** (the paper's grep/code handle = spike-1's exact arm, already
+  PASS — not re-run); fuzzy embedding only *finds* candidates. Search/pull survives only
+  as an **opt-in cost/speed mode** behind a checkable verify net. The full experiment
+  ledger (Layer A precision, the three flipped runs, the guardrail attempt, the
+  token/caching artifact, the code-reduce proof, paper alignment) is §9.2 — read it
+  before ever re-opening this question.
 - **Synthesis strategy** (NB-3) — ~~Evaluator-driven merge vs naive concat vs
   structured merge~~ **RESOLVED + BUILT (§10 step 4, `src/recurse-synthesize.js`):**
   aggregation = **deterministic code-reduce** (the function form over child `results`;
