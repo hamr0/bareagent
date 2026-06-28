@@ -2,15 +2,18 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — steps 3–6 shipped; step-7 PRE-BUILD POC done + design
-> re-aligned** (§9 spikes 1 & 2 green; Family-A `recurse()` + NB-3 reducer + NB-2 Family-B fan-out
-> built/tested/live-smoked — §10 steps 3, 4, 5 ✅; step 6 capability-scrub verify-close ✅; **step-7
-> fuzzy-retrieval POC ✅ — §9.2: naive search DROPPED, chop-it-up + code-reduce is the no-footnote
-> default, RC-5 re-aligned to deterministic-handle + code-reduce, cross-checked against the RLM paper**).
-> **Step 7 is now WIRING, not discovery — do not re-run the pull/flat/search experiments (§9.2).**
+> requirements doc). Status: **In build — steps 3–6 shipped; step-7 PRE-BUILD POC done + GROUNDED on
+> real data, defaults locked** (§9 spikes 1 & 2 green; Family-A `recurse()` + NB-3 reducer + NB-2 Family-B
+> fan-out built/tested/live-smoked — §10 steps 3, 4, 5 ✅; step 6 capability-scrub verify-close ✅; **step-7
+> grounding ✅ — §9.2.1: litectx-retrieval correction + the MEASURED task-shape model (count→scan,
+> needle→search, exact→code-filter) on a real semantic corpus (AG News); scan-count window-knee + multi-pass
+> union calibrated; honesty negatives + the active half-window detector measured; defaults set in §10 step 7**).
+> **Step 7 is WIRING, not discovery — do not re-run pull/flat/search OR the litectx-retrieval study (§9.2/§9.2.1).**
 > Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`, `poc/rlm-nb2-calibrate.mjs`,
-> `poc/rlm-step7-fuzzy-retrieval.mjs`, `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
-> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-27.
+> `poc/rlm-step7-fuzzy-retrieval.mjs`, `poc/rlm-step7-handle-wiring.mjs`, `poc/rlm-step7-kind-retrieval.mjs`,
+> `poc/rlm-step7-semantic-corpus.mjs`, `poc/rlm-step7-window-knee.mjs`, `poc/rlm-step7-reliability.mjs`,
+> `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
+> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-28.
 
 ---
 
@@ -389,7 +392,7 @@ a `.prose.md` program; we don't need that meta-trick — a plain prompt suffices
 | **RC-2** | `spawn` runs children with **copy-on-return**: a **fresh context window** in (child sees only its sub-task + handed inputs, never the parent transcript) and **only the declared result out** (never the child's scratch/transcript). | **spawnChild** (exists) / **NB-4** (in-proc variant) | Mutation test: leak the parent transcript into a child → assertion fails; leak a child's transcript into the parent/synthesis → assertion fails. Children run concurrently (observed overlap), results collected in order. |
 | **RC-3** *(opt-in mode)* | In **forced fan-out mode**, the count is deterministic (classifier, not model). **Default Family A has no forced count** — the model spawns adaptively under budget, which is *why* the higher-bound failure doesn't arise. | **NB-2** (net-new, opt-in) | Fan-out mode: fixed input+tier ⇒ identical count across runs. Default mode: no upfront count is requested; spawn is budget-bounded (a test asserts no "how many subgoals" prompt on the default path). |
 | **RC-4** | **Capability-matched dispatch**: each sub-goal routed to a worker whose declared capability matches the slice. | **SkillRegistry** (exists) + glue | A sub-goal with no matching worker is reported (counted), not silently dropped. |
-| **RC-5** | **Context-as-handle, DETERMINISTIC-first, CODE-REDUCE aggregation** *(re-aligned 2026-06-27, §9.2 — supersedes the original "pull-default")*. A worker gets context as a **handle**, never the whole corpus. **Correctness rides a DETERMINISTIC handle** (exact FTS / code filter); **fuzzy embedding recall only FINDS candidates, never decides the answer** ("recall helps finding, not executing"). **Aggregation is always CODE**, never a model `Finish`/count (the paper's Algorithm-1 flaw #2). **Default delivery = process bounded slices + code-reduce** (the depth-0 pattern, harness-owned for SLMs); **search/pull is an opt-in cost/speed mode** behind a cheaply-checkable verify net. | **litectx** (exists, consumed as tools) + glue | A test asserts no full-corpus payload crosses into a worker; the aggregation is code-side (mutation: route the count through the model → the catastrophe tail returns). **POC: §9.1 spike-1** — *exact* handle → pull competitive (~8% vs flat ~16%). **§9.2 step-7** — *fuzzy* recall → high-variance (verdict flipped across runs, 10% catastrophe); **naive search DROPPED**; **chop-it-up + code-reduce = 0 catastrophe, error halved** (the no-footnote default). The deterministic-handle case is spike-1's exact arm — not re-run. |
+| **RC-5** | **Context-as-handle, routed by TASK SHAPE, CODE-REDUCE aggregation** *(re-grounded 2026-06-28, §9.2.1 — supersedes the "deterministic-handle" wording, which conflated three task shapes)*. A worker gets context as a **handle**, never the whole corpus, and **the handle is chosen by the question's shape** (§9.2.1): **count/"all"→scan every slice + LLM-judge + CODE-count** (the default — the only complete path; retrieval recall is structurally capped so search CANNOT count); **needle/"the few"→litectx `recall`** (embeddings on, `fact`/`episode` kind — semantic beats BM25 ~2×, capped at `KNN_K=8`); **exact rule→FTS-AND/code filter** (embeddings off). **Aggregation is always CODE**, never a model `Finish`/count (flaw #2). | **litectx** (exists, consumed as tools) + glue | A test asserts no full-corpus payload crosses a worker; aggregation is code-side (mutation: route the count through the model → catastrophe tail returns). **POC §9.1 spike-1** exact handle → pull competitive. **§9.2** synthetic-exact → chop+code-reduce 0 catastrophe. **§9.2.1** REAL semantic corpus (AG News): search recovers only 0.05–0.24 recall (can't count); scan-count knee = **window ≈ 8**, **2-pass union → recall 0.93 @ precision 0.98**; honesty negatives + active half-window detector measured. |
 | **RC-6** | **Termination guards** (depth/budget/wall-clock/calls) enforced. | **bareguard** (exists, via `wireGate`/`policy`) | Each cap has a test that trips it; the loop exits cleanly via `HaltError` when any trips. `recurse()` adds **no** second guard layer. |
 | **RC-7** | **Separate-context verifier** returns a structured gap report **with evidence**, never a bare boolean; generator never grades itself. | **Evaluator** (exists) | `Verdict` includes `status`, `pass`, `critique`/`gap`, `suggestions`; runs in a distinct context. Mutation: route verification back to the generator context → test flags it. |
 | **RC-8** | **Deterministic-first ladder**: checks (compiles/tests/lint/forbidden-import) before any model judgment. | **Evaluator** `predicate`→`rubric` (exists) | For the py→js exemplar, "no deps" / "no `.py` left" decided by `predicate` (no tokens); the rubric model is consulted only for the subjective clause. |
@@ -629,6 +632,65 @@ trusting them — each a harness fix, none a real failure.
 4. **Naive search dropped; raw/dump dropped** (drowns — §9.1).
 5. **Aggregate in code, always. Recursion opt-in, task-dependent.**
 
+### 9.2.1 — The litectx-retrieval correction + the MEASURED task-shape model (re-grounded 2026-06-28)
+
+**Why this exists:** §9.2 above (and RC-5's earlier "deterministic-handle" wording) mischaracterised litectx
+retrieval, and the "chop+code-reduce = no-footnote default" claim was validated only on a *synthetic
+exact-token* corpus. A review pushback ("litectx is core-tested on embedding retrieval — something smells")
+forced a re-grounding on **litectx source + a real semantic corpus** (AG News, 7600 labelled news items; the
+label IS ground truth). **Two original claims were wrong.** Evidence (all live): `poc/rlm-step7-handle-wiring.mjs`,
+`…-kind-retrieval.mjs`, `…-semantic-corpus.mjs`, `…-window-knee.mjs`, `…-reliability.mjs`. *Do not re-run — this
+is the litectx-retrieval study, settled here.*
+
+**CORRECTION 1 — "fuzzy embedding recall, precision 0.24" was wrong framing.** That 0.24 is **BM25
+OR-semantics**, not an embedding property. litectx `recall` (`index.js`) is **FTS-gated**: BM25 selects the
+candidate pool (`ftsMatch("a b c")` = `"a" OR "b" OR "c"`), then embeddings act *only within* that pool.
+`doc`/`code` kinds → embeddings **re-rank** (can't add a candidate FTS missed). `fact`/`episode` kinds →
+embeddings **also NOMINATE**: up to **`KNN_K=8` (hardcoded, not configurable)** semantic nearest-neighbours
+are unioned in — genuine zero-shared-term retrieval (proved: `automobile`→a "red sedan" record, ranked first;
+`doc` returns nothing for the same query). **litectx's embedding tier is real and works** — I'd tested the one
+kind (`doc`) that doesn't nominate and over-generalised. *(`remember()` embeds; the vectors were there — wrong
+kind, not a broken setup.)*
+
+**CORRECTION 2 — retrieval (any kind, any tier) CANNOT do an exhaustive count.** On AG News, retrieving
+*everything* (`n`=ALL) for "find the Sports articles" recovers recall **0.05 (BM25) → 0.24 (embeddings)** of the
+true set — BM25 caps at lexical hits, embeddings cap at `KNN_K=8`. **No knob makes retrieval exhaustive**, so
+"search→count" silently undercounts 75–95%. Scan is the default for **recall**, not just precision as §9.2 framed.
+
+**THE MEASURED TASK-SHAPE MODEL (the load-bearing result — the three approaches do NOT substitute):**
+
+| Question shape | Right tool | Grounded reason |
+|---|---|---|
+| **Count / "all of them"** | scan every slice + LLM-judge + **code**-count | only complete path; retrieval recall structurally capped |
+| **Needle / "the few relevant"** | litectx `recall` (embeddings on, `fact`/`episode`) | semantic beats BM25 ~2× (AG News); `KNN_K=8` is plenty for top-k |
+| **Exact predicate** | FTS-AND / code filter, embeddings OFF | meaning irrelevant; embeddings only add confusers |
+
+**Scan-count is the default but ONLY reliable with a calibrated window:**
+- **Window is RECALL-driven, not context-driven.** A weak judge (gpt-4o-mini) under-enumerates long lists:
+  recall **0.20 @ window 40 → ~0.73 @ window 6–8** (the knee; below ~6 it dips again — a plateau, not
+  "smaller=better"). Default **window ≈ 8**; collapses past 12. A too-big window silently undercounts — the
+  param I'd have defaulted *backwards* (big=cheap) and shipped wrong.
+- **Multi-pass union breaks the single-pass ceiling.** Re-scan with shuffled slice boundaries, union the IDs:
+  recall **0.75 → 0.91 (2 passes) → 0.93 (3 passes)**, **precision held 0.97–0.98** (the feared over-count
+  negative did NOT fire). Cost = N× sweeps. Default **2 passes**; `opts.passes` to dial.
+- **Irreducible ceiling:** even tuned, a weak judge caps ~0.93; full completeness needs a stronger judge / more passes.
+
+**Honesty negatives — measured; the default never silently lies:** zero matches → returns ~0 (0.9% FP); a slice
+judge fails → `{incomplete, missingSlices}` (RC-9, no survivor-sum); overlapping passes → union dedups.
+
+**Silent under-recall (a too-big window) has no natural alarm — two detectors tested:**
+- ✅ **Active half-window probe** (works, grounded by the knee): on a sample of slices, re-judge at half the
+  window; if matched count rises beyond noise, the window is too big → shrink until it plateaus. Cheap, no truth.
+- ❌ **Passive positional-skew** (FALSIFIED — do NOT build): hypothesised under-recall front-loads matches (tail
+  truncation). Measured: misses are **position-uniform** (`front-share ≈ 0.5`); symptom fires only in total
+  collapse. Recorded so it isn't re-attempted.
+
+**ADOPTER SURFACING (the principle):** *default to the complete approach; cheaper modes are explicit opt-in;
+uncertainty always resolves toward complete, never silently toward lossy.* The three approaches have an
+asymmetry — scan is slow but can't silently undercount; search/exact are cheap but can — so auto-detection may
+only ever **upgrade to scan** (safe), never silently downgrade. See §10 step 7 for the API + the
+completeness-contract guard.
+
 ## 10. Build sequence (dependency-ordered, delta-only)
 
 1. ~~**A/B POC** (§9, spike 1) on real data — **gate**~~ **✅ DONE (§9.1): PASS** —
@@ -693,21 +755,38 @@ trusting them — each a harness fix, none a real failure.
    stop). +5 mutation-checked tests (40 total in `test/recurse.test.js`); both new guarantees
    mutation-proved (scrub boundary `>=`→`>` and `canSpawn` `<`→`<=` each turn tests red). Also
    fixed a stale JSDoc ref (`scrubSpawn` → the inline `canSpawn` check, the actual tool half).
-7. **Wire litectx + receipts — to the §9.2 RE-ALIGNED design (NOT the original pull-default).**
-   The step-7 pre-build POC (§9.2) is DONE and settled the shape; this step is now *wiring*, not
-   discovery — **do not re-run the pull-vs-flat or naive-search experiments.** Build:
-   - **Default context path = process bounded slices + CODE-REDUCE** (workers return matching
-     items/IDs; code aggregates — the paper's flaw-#2 reliability lever; the only arm that earned
-     0% catastrophe). This generalizes the existing NB-3 `synthesize` from "aggregation nicety" to
-     "the default reliability mechanism."
-   - **litectx handle = DETERMINISTIC for correctness** (exact FTS / `get` / code-side filter);
-     **fuzzy `recall` embedding only FINDS candidates**, never decides the answer (RC-5 re-aligned).
-   - **`opts.tools` (pull/search) = opt-in cost/speed mode** (4× cheaper, 2× faster, §9.2), only
-     behind a cheaply-checkable contract (a real verify catch-net) or explicit caller acceptance of
-     the tail. **Naive search is NOT built** (dropped, §9.2). Capability matching (RC-4) wires here.
+7. **Wire litectx + receipts — to the §9.2.1 MEASURED task-shape model. Defaults LOCKED below.**
+   The step-7 POCs (§9.2 + §9.2.1) are DONE and settled the shape on real data; this step is *wiring*, not
+   discovery — **do not re-run pull/flat/search OR the litectx-retrieval study.** Build:
+   - **`opts.retrieval: 'scan' | 'search' | 'exact'` — DEFAULT `'scan'`.** The default is the only complete
+     path, so an adopter who sets nothing gets correct-but-thorough, never a silent undercount.
+   - **`'scan'` (default) = process every slice + LLM-judge + CODE-count** (generalises NB-3 `synthesize` from
+     "aggregation nicety" to the default reliability mechanism). **Locked defaults (§9.2.1):** `opts.window ≈ 8`
+     (RECALL-driven, per-model — calibrate via the active half-window probe, not context size); `opts.passes = 2`
+     (shuffled-boundary union → recall ~0.91, precision ~0.98; dial up for completeness, down for cost); code
+     unions matching IDs, intersects with the slice shown (RC-2), propagates `{incomplete, missingSlices}` on a
+     dead slice (RC-9). **Window default is the one calibrated number** — everything else is fixed.
+   - **`'search'` (opt-in, NEEDLE only) = litectx `recall` handle** — embeddings ON, `fact`/`episode` kind
+     (the KNN-nominate kinds; `doc`/`code` re-rank only). Capped at `KNN_K=8` — for finding the few, **never
+     counting**. Capability matching (RC-4) wires here. (Naive "search→count" is NOT built — §9.2.1 CORRECTION 2.)
+   - **`'exact'` (opt-in) = FTS-AND / code-side predicate filter**, embeddings OFF.
+   - **Per-query shape change:** a worker is OFFERED scan + search as TOOLS (Family-A) and picks per sub-task —
+     the shape can differ per sub-query with no adopter declaration.
+   - **Completeness-contract GUARD (RC-9 applied to retrieval):** if the contract/goal implies completeness
+     ("all / every / count / how many"), a capped-`search` result is flagged `recall-limited` (or the default is
+     forced to `scan`). **Auto-detection may only UPGRADE to scan (the safe direction), never silently downgrade.**
+   - **Do NOT build the positional-skew detector** (falsified, §9.2.1); the active half-window probe is the
+     under-recall detector.
    - **Receipts (RC-10)** through existing Stream/metrics; per-node lineage + gap-report-with-evidence.
-   - *Open implementation question for this step:* whether the deterministic handle is litectx FTS-exact,
-     a code-side predicate filter over `recall` candidates, or both — pick by wiring, not another spike.
+
+   **Adopter surface (locked):**
+   ```
+   recurse(task, ctx)                          // default: scan — complete, honest, window≈8, passes=2
+   recurse(task, ctx, { retrieval: 'search' }) // opt-in: needle, fast (embeddings/fact, KNN_K=8 cap)
+   recurse(task, ctx, { retrieval: 'exact' })  // opt-in: exact rule → code/FTS-AND filter
+   // opts.window / opts.passes tune scan; worker holds both tools for per-query shape;
+   // completeness-contract guard flags a capped search answering a "how many / all" ask.
+   ```
 8. **Replay the POC data through the shipped primitive** and reconcile any mismatch
    as a finding (verify-shipped-vs-POC doctrine).
 9. **(Optional) NB-6**: `writePlan` + `plan_write` skill emitting `rlm.md` (§4.8) —
@@ -749,19 +828,21 @@ deferred — only the calibration details below are.
   data-driven path is a *partition* of litectx handles, NOT a second `Planner` semantic
   decomposition (today's `recurseFanout` is the semantic/floor path) — wire it as a
   distinct partition path under the same `opts.count` floor, so the two don't conflate.
-- **litectx push vs pull, and pull-vs-flat under fuzzy retrieval** — ~~which wins is
-  open~~ **FULLY RESOLVED — do not re-run (§9.2, step-7 POC, 2026-06-27).** Spike 1
-  showed pull wins with an *exact* retriever; the fuzzy re-measure (the step-7 caveat)
-  is now DONE and **re-aligned RC-5**: with a REAL fuzzy retriever (litectx recall,
-  precision ≈ 0.24) naive pull is **high-variance** (verdict flipped across runs, 10%
-  catastrophe) and gives no token saving → **naive search DROPPED**. The winner is
-  **chop-it-up + code-reduce** (0 catastrophe, error halved). The handle is
-  **deterministic-first** (the paper's grep/code handle = spike-1's exact arm, already
-  PASS — not re-run); fuzzy embedding only *finds* candidates. Search/pull survives only
-  as an **opt-in cost/speed mode** behind a checkable verify net. The full experiment
-  ledger (Layer A precision, the three flipped runs, the guardrail attempt, the
-  token/caching artifact, the code-reduce proof, paper alignment) is §9.2 — read it
-  before ever re-opening this question.
+- **litectx push vs pull, pull-vs-flat, and "which retrieval wins"** — ~~which wins is
+  open~~ **FULLY RESOLVED — do not re-run (§9.2 + §9.2.1, 2026-06-27/28).** The question
+  itself was mis-posed: there is **no single retrieval winner** — it routes by **task
+  shape** (§9.2.1). **Count/"all" → SCAN + code-count** (retrieval recall is structurally
+  capped — BM25 at lexical hits, embeddings at `KNN_K=8` — so search recovers only
+  0.05–0.24 on real data and **cannot count**). **Needle/"the few" → litectx `recall`**
+  (embeddings on, `fact`/`episode`; semantic beats BM25 ~2×). **Exact rule → FTS-AND/code
+  filter** (embeddings off). Two earlier framings were corrected: "fuzzy embedding,
+  precision 0.24" was actually **BM25 OR-semantics** (litectx is FTS-gated; embeddings
+  genuinely work but only NOMINATE for `fact`/`episode`), and "chop+code-reduce is the
+  default" holds **for recall** (a too-big scan window silently undercounts; knee ≈ 8,
+  2-pass union → 0.93). The full ledgers (the three flipped runs, the token/caching
+  artifact, the code-reduce proof — §9.2; the litectx-retrieval correction, the
+  task-shape table, the window knee, the honesty negatives, the detector that failed —
+  §9.2.1) are settled. Read them before ever re-opening this.
 - **Synthesis strategy** (NB-3) — ~~Evaluator-driven merge vs naive concat vs
   structured merge~~ **RESOLVED + BUILT (§10 step 4, `src/recurse-synthesize.js`):**
   aggregation = **deterministic code-reduce** (the function form over child `results`;
