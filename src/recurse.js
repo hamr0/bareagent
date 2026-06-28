@@ -209,14 +209,18 @@ function forChild(opts) {
  * Decompose a task into fresh-context workers, verify against a setpoint, and synthesize one result —
  * assembled from existing primitives, not reimplemented (G1/G6).
  *
- * ⚠️ RESOURCE BOUNDS ARE bareguard's, not recurse()'s (§6, "no second guard layer"). `recurse()` adds NO
- * intrinsic total-work cap: `opts.maxDepth` (default 3) bounds DEPTH but not fan-out WIDTH, and a worker may
- * spawn many children per round — so the total node count compounds multiplicatively across depth × width.
- * Without a gate the ONLY backstop is each Loop's `HARD_ROUND_LIMIT` (100), which does NOT compose into a tree
- * bound. **WIRE bareguard** (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces
- * depth/budget/call caps and the pre-wave fan-out checkpoint. For a hard local cap without bareguard, set
- * `opts.maxDepth: 1` (flat fan-out, no nesting). (The measurable-overflow depth gate that justifies the open
- * `maxDepth=3` default is build step 7; until then depth-3 leans on model judgment + the gate.)
+ * ⚠️ RESOURCE BOUNDS ARE bareguard's, not recurse()'s — OPEN BY DESIGN (§6, "no second guard layer"), and the
+ * one thing to know before running it. `recurse()` adds NO intrinsic total-work cap. The **Family-A default**
+ * (model-driven `spawn_child`) lets a node spawn UP TO each Loop's `HARD_ROUND_LIMIT` (100) children PER LEVEL,
+ * each recursing to `opts.maxDepth` (default 3) — so node count, and therefore TOKEN + $ SPEND, compounds
+ * multiplicatively and is **not capped by recurse itself**. (The forced paths — `mode:'fanout'`/`'partition'` —
+ * ARE bounded: a deterministic `count` + a `concurrency` cap. The uncapped path is the model-driven default.)
+ * This is real, not theoretical: a live POC (`poc/rlm-defer2-history-overflow.mjs`) showed a weak model
+ * over-decomposing into 40–117 calls on a single run. **So: running WITHOUT bareguard — or without ANY
+ * token/cost cap — CAN BURN TOKENS / $ unboundedly (up to ~100×depth nodes).** **WIRE bareguard**
+ * (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces depth/budget/call caps and
+ * the pre-wave fan-out checkpoint, turning a runaway into a clean `{incomplete}`. With no gate available, the
+ * only local brakes are `opts.maxDepth: 1` (flat — no nesting) and the provider/key's own usage limits.
  *
  * @param {string} task - The goal.
  * @param {RecurseCtx} [ctx] - The runtime wiring (provider, policy, depth, …). Threaded down the tree.

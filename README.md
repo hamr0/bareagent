@@ -110,6 +110,8 @@ const { result } = await recurse(
 console.log(result.count, result.matchedIds);   // a code-derived count + the ids that back it
 ```
 
+> **⚠️ Cost is open by design — wire a cap.** `recurse()` adds no intrinsic total-work limit. On the model-driven default a node can spawn up to ~100 children per level, each recursing to `maxDepth` (default 3), so **token / $ spend compounds and is bounded only by your gate** — not by recurse. Run it **with bareguard** (`ctx.policy`, which enforces depth/budget/call caps) **or with some token/USD cap** for any non-trivial or untrusted task; ungoverned, a weak model that over-decomposes *will* burn tokens. For a hard local brake without a gate, set `maxDepth: 1` (flat, no nesting). The forced modes (`mode:'fanout'` / `'partition'`) are bounded by a deterministic count + concurrency cap; the open path is the model-driven default.
+
 **Govern — one gate over both axes.** `wireGate(gate)` routes every LLM + tool call through one bareguard policy + audit + budget. Denied tools never reach the model; halts (turn / budget / content caps) exit cleanly. `require('bare-agent/bareguard')`
 
 **Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Gemini (native), Ollama, CLIPipe, Fallback — or bring your own (one `generate` method). All return the same shape; swap freely. Usage including prompt-cache tiers is normalized, so `result.metrics` reports honest cumulative tokens + cost — and `null`, never a silent `0`, for a model it couldn't price.
