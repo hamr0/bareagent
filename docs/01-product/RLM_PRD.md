@@ -755,7 +755,20 @@ completeness-contract guard.
    stop). +5 mutation-checked tests (40 total in `test/recurse.test.js`); both new guarantees
    mutation-proved (scrub boundary `>=`→`>` and `canSpawn` `<`→`<=` each turn tests red). Also
    fixed a stale JSDoc ref (`scrubSpawn` → the inline `canSpawn` check, the actual tool half).
-7. **Wire litectx + receipts — to the §9.2.1 MEASURED task-shape model. Defaults LOCKED below.**
+7. **Wire litectx + receipts — to the §9.2.1 MEASURED task-shape model. Defaults LOCKED below.** **✅ DONE
+   (the wiring; step 8 replay next).** Built `src/recurse-retrieval.js` (`scanCount` + `buildSearchTool` +
+   `buildExactTool` + `impliesCompleteness` + the §9.2-validated classify prompt generalized verbatim — never
+   imported by `loop.js`) + the `opts.retrieval` dispatch / `recurseScan` branch / handle-tool injection /
+   completeness guard / receipts fields in `src/recurse.js`; exported the tool builders from `index.js`.
+   `opts.window`=8 / `opts.passes`=2 locked; RC-2 intersect, RC-9 dead-window/empty-corpus honest-incomplete,
+   gate-Halt-mid-scan all hold; backward-compatible (no corpus + no retrieval ⇒ unchanged). Validated by +16
+   mutation-checked offline tests (56 total in `test/recurse.test.js`) — incl. the multi-pass union mechanism
+   mutation-proved (single pass 15 vs 2-pass 20) and the RC-2 hallucination-drop. **Backend split (grounded):**
+   `scan` reads the generic array slice-source (`opts.corpus`), NOT litectx — the litectx-resident scan + the
+   data-driven *width* count wait on the litectx `enumerate` verb (spec handed off:
+   `docs/01-product/litectx-enumerate-spec.md`), which drops in behind the same socket with zero recurse
+   changes. (The per-query "worker offered scan-as-a-tool" face and the litectx-`enumerate` adapter are the
+   remaining step-7 follow-ons.)
    The step-7 POCs (§9.2 + §9.2.1) are DONE and settled the shape on real data; this step is *wiring*, not
    discovery — **do not re-run pull/flat/search OR the litectx-retrieval study.** Build:
    - **`opts.retrieval: 'scan' | 'search' | 'exact'` — DEFAULT `'scan'`.** The default is the only complete
@@ -770,6 +783,21 @@ completeness-contract guard.
      (the KNN-nominate kinds; `doc`/`code` re-rank only). Capped at `KNN_K=8` — for finding the few, **never
      counting**. Capability matching (RC-4) wires here. (Naive "search→count" is NOT built — §9.2.1 CORRECTION 2.)
    - **`'exact'` (opt-in) = FTS-AND / code-side predicate filter**, embeddings OFF.
+   - **Backend split (GROUNDED 2026-06-28 — corrects the earlier "litectx wired at step 7" framing).** Probing
+     litectx 0.16.0 showed every read path (`recall`/`Store.search`) is **FTS-gated** — there is **no
+     query-less, rank-free "give me every row of kind X."** So the three modes do **not** share one backend:
+     - **`scan` uses a GENERIC ARRAY SLICE-SOURCE, NOT litectx.** The corpus is the in-hand data the task is
+       over (a list of `{id, text}` slices); recurse partitions and code-counts it. This is the literally
+       POC-proven path (§9.2.1 scan ran over an in-memory list) and depends on **no** litectx delivery. Stance
+       mirrors `remember`'s generic Store socket: recurse depends on the slice-source *shape*, never on litectx.
+     - **`search`/`exact` use `ctx.litectx`** (`recall` / FTS-AND) — playing to what litectx is actually good at
+       (ranked needle retrieval), not asked to do exhaustion it cannot.
+     - **The "scan a corpus that ALREADY LIVES in litectx" case** (facts/episodes the agent accrued; an
+       `index()`-ed codebase) needs a NEW litectx verb — `enumerate` (exhaustive, scope-aware, paged, rank-free)
+       — which **does not exist today**. Spec written + handed off: `docs/01-product/litectx-enumerate-spec.md`.
+       It is the **un-defer seam**: when `enumerate` lands, a litectx adapter slots behind the same slice-source
+       socket with **zero recurse changes**. You would never ingest a fresh corpus just to enumerate it back
+       (strictly worse than scanning the array) — `enumerate` is only for already-resident memory.
    - **Per-query shape change:** a worker is OFFERED scan + search as TOOLS (Family-A) and picks per sub-task —
      the shape can differ per sub-query with no adopter declaration.
    - **Completeness-contract GUARD (RC-9 applied to retrieval):** if the contract/goal implies completeness
@@ -812,8 +840,13 @@ deferred — only the calibration details below are.
   measure/slice the *real* data. It sits **downstream of `assessComplexity`** (which
   reads only goal text and can't see the data) and is **capped by the guards**. Both
   families gain it: a **measurement** picks the count (B, deterministic) or the **model**
-  picks it (A). *Un-defer:* step 7 (litectx wiring) — or sooner if a giant-input
-  *read-everything* task (OOLONG-Pairs-like) becomes a live need. **Distinct** from the
+  picks it (A). *Un-defer:* ~~step 7 (litectx wiring)~~ **the litectx `enumerate` verb**
+  (grounded 2026-06-28): the partition path needs `count(kind)` → `⌈size/budget⌉` →
+  `enumerate(offset, limit)` over **resident** litectx memory — and litectx has **no
+  enumerate today** (every read is FTS-gated). Spec handed off:
+  `docs/01-product/litectx-enumerate-spec.md` (§6 names this the *strong* reuse). The
+  array slice-source path (in-hand data) does NOT need it and can land first; the
+  litectx-resident partition lands when `enumerate` ships. **Distinct** from the
   depth-overflow trigger below: this is *width* (more slices at one level); overflow is
   *depth* (one slice still too big → recurse).
   **Decision — `opts.count` semantics when both dials exist (LOCKED for step 7):**

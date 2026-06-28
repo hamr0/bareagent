@@ -599,3 +599,206 @@ describe('recurse — NB-3 synthesis / reduce (build step 4)', () => {
     await assert.rejects(() => synthesize('t', ['a'], { strategy: 'merge' }), /requires a provider/);
   });
 });
+
+// ── RLM_PRD §10 step 7 — retrieval modes (scan / search / exact + completeness guard) ──────────────────────
+const {
+  impliesCompleteness,
+  normalizeCorpus,
+  buildExactTool,
+  buildSearchTool,
+  classifySystem,
+  rotate,
+} = require('../src/recurse-retrieval');
+
+const isClassify = (messages) => systemOf(messages).includes('precise classifier');
+const SCAN_TASK = 'how many of these records match?'; // 'how many' → completeness ask
+
+// A scan corpus of N records, even ids matching ('MATCH'), odd not — so the truth count is known to CODE.
+function corpusOf(n, { allMatch = false } = {}) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `r${i}`,
+    text: allMatch ? `MATCH item ${i}` : (i % 2 === 0 ? `MATCH item ${i}` : `plain item ${i}`),
+  }));
+}
+
+// The scripted scan judge: parses the items it was SHOWN, returns the ids whose text contains 'MATCH'.
+// Knobs simulate the failure modes the mechanism must survive:
+//   hallucinate  — also emit a foreign id never shown (must be dropped by the RC-2 intersect)
+//   tailMiss     — drop the LAST item of each window (simulates tail under-recall the multi-pass union fixes)
+//   deadWindowAt — the Nth classify call faults (plain error) → a DEAD window (RC-9)
+function scanJudge({ hallucinate = false, tailMiss = false, deadWindowAt = null } = {}) {
+  let seen = 0;
+  return (messages) => {
+    if (!isClassify(messages)) return { text: 'none' };
+    const idx = seen++;
+    if (deadWindowAt != null && idx === deadWindowAt) throw new Error('provider boom');
+    const items = [];
+    for (const line of lastUser(messages).split('\n')) {
+      const m = line.match(/^(\S+): (.*)$/);
+      if (m) items.push({ id: m[1], text: m[2] });
+    }
+    let matched = items.filter((it) => /MATCH/.test(it.text));
+    if (tailMiss && items.length) {
+      const lastId = items[items.length - 1].id;
+      matched = matched.filter((it) => it.id !== lastId);
+    }
+    const ids = matched.map((it) => it.id);
+    if (hallucinate) ids.push('r999'); // never shown in any window → must be intersected away
+    return { text: ids.length ? ids.join(', ') : 'none' };
+  };
+}
+
+describe('recurse — retrieval scan (§10 step 7 / §9.2.1)', () => {
+  it('CODE-counts the unioned ids, and the RC-2 intersect drops a hallucinated foreign id', async () => {
+    const sp = scriptedProvider(scanJudge({ hallucinate: true }));
+    const corpus = corpusOf(20); // truth = 10 matches (even ids)
+    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { corpus, window: 4, passes: 1 });
+    assert.equal(out.result.count, 10, 'the count is the CODE-counted union of judged ids');
+    assert.equal(out.result.matchedIds.length, 10);
+    // mutation check: if the intersect-with-shown were removed, r999 would survive → count 11
+    assert.ok(!out.result.matchedIds.includes('r999'), 'a hallucinated id never shown in a window must be dropped (RC-2)');
+    assert.equal(out.receipts.retrieval, 'scan');
+    assert.equal(out.receipts.scan.scanned, 20);
+  });
+
+  it('default scan engages when a corpus is present (no retrieval opt needed)', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const out = await recurse('count the matching records', { provider: sp.provider }, { corpus: corpusOf(8), window: 4, passes: 1 });
+    assert.equal(out.receipts.retrieval, 'scan', 'a corpus with no retrieval opt defaults to scan');
+    assert.equal(out.result.count, 4);
+  });
+
+  it('multi-pass shuffled-boundary union recovers the tail a single pass misses (§9.2.1)', async () => {
+    const corpus = corpusOf(20, { allMatch: true }); // truth = 20; every record matches
+    const one = await recurse(SCAN_TASK, { provider: scriptedProvider(scanJudge({ tailMiss: true })).provider }, { corpus, window: 4, passes: 1 });
+    const two = await recurse(SCAN_TASK, { provider: scriptedProvider(scanJudge({ tailMiss: true })).provider }, { corpus, window: 4, passes: 2 });
+    assert.equal(one.result.count, 15, 'a single pass loses the last item of each of the 5 windows (5 dropped)');
+    assert.equal(two.result.count, 20, 'the 2nd pass shifts boundaries so the union recovers all 20 (mechanism bites)');
+    assert.equal(two.receipts.scan.passes, 2);
+  });
+
+  it('RC-9: a dead window → {incomplete, missingSlices}, never a silent undercount', async () => {
+    const sp = scriptedProvider(scanJudge({ deadWindowAt: 0 }));
+    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { corpus: corpusOf(12), window: 4, passes: 1 });
+    assert.equal(out.incomplete, true, 'a window we could not judge ⇒ the scan is incomplete');
+    assert.equal(out.result, undefined, 'an incomplete scan must NOT return a clean count (no faked pass)');
+    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.length > 0, 'the dead window is named in missingSlices');
+    assert.ok(out.best && typeof out.best.count === 'number', 'the partial count is surfaced as best (RC-9)');
+  });
+
+  it('a governance HaltError mid-scan is a clean incomplete exit, not a thrown run', async () => {
+    // A real budget halt fires through the GATE during metering (onLlmResult), not from the provider — the
+    // 2nd window's meter trips the cap. The Loop converts it to a clean `halt:` and the scan honors it.
+    const sp = scriptedProvider(scanJudge());
+    let metered = 0;
+    const onLlmResult = () => { if (++metered === 2) throw new HaltError('budget exhausted', { rule: 'budget' }); };
+    const out = await recurse(SCAN_TASK, { provider: sp.provider, onLlmResult }, { corpus: corpusOf(12), window: 4, passes: 1 });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'a gate halt mid-scan sets halted (clean exit, not a thrown run)');
+  });
+
+  it('an empty/absent corpus is an honest incomplete (litectx-enumerate path deferred), never a fabricated zero', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { retrieval: 'scan', corpus: [] });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.result, undefined, 'no corpus must NOT yield count:0 (that would be a fabricated answer)');
+    assert.ok(out.missingSlices.some((s) => /corpus/.test(s)));
+  });
+});
+
+describe('recurse — retrieval search/exact + completeness guard (§10 step 7)', () => {
+  const stubLitectx = { recall: async () => ({ fact: [{ path: 'f1', body: 'a fox fact' }], episode: [] }) };
+
+  it('the completeness guard UPGRADES a search on a "how many" ask to scan (never the reverse)', async () => {
+    const sp = scriptedProvider(scanJudge());
+    // search was requested, but the task implies completeness → must be upgraded to the only complete path
+    const out = await recurse(SCAN_TASK, { provider: sp.provider, litectx: stubLitectx }, { retrieval: 'search', corpus: corpusOf(8) });
+    assert.equal(out.receipts.retrieval, 'scan', 'search on a completeness ask is forced to scan');
+    assert.match(out.receipts.retrievalUpgraded, /search→scan/);
+    assert.equal(out.result.count, 4, 'and it actually scanned (code-count present)');
+    assert.ok(sp.calls.some((c) => isClassify(c.messages)), 'a scan judge ran (not a capped search)');
+  });
+
+  it('a needle search task is NOT upgraded and the worker is offered the search_memory tool', async () => {
+    const sp = scriptedProvider((messages, tools) => {
+      if (isVerify(messages)) return { text: SATISFIED };
+      const hasSearch = (tools || []).some((t) => t.name === 'search_memory');
+      const gotTool = messages.some((m) => m.role === 'tool');
+      if (hasSearch && !gotTool) return { toolCalls: [{ id: 's1', name: 'search_memory', arguments: { query: 'foxes' } }] };
+      return { text: 'NEEDLE_ANSWER' };
+    });
+    const out = await recurse('find the record about foxes', { provider: sp.provider, litectx: stubLitectx }, { retrieval: 'search' });
+    assert.equal(out.receipts.retrieval, 'search', 'a needle ask stays search (no completeness words)');
+    assert.equal(out.receipts.retrievalUpgraded, undefined, 'no upgrade on a needle ask');
+    assert.ok(sp.calls.some((c) => c.tools.includes('search_memory')), 'the worker was offered the search handle tool');
+    assert.equal(out.result, 'NEEDLE_ANSWER');
+  });
+
+  it('exact mode offers a code-side filter tool over the corpus', async () => {
+    const sp = scriptedProvider((messages, tools) => {
+      if (isVerify(messages)) return { text: SATISFIED };
+      const hasExact = (tools || []).some((t) => t.name === 'exact_match');
+      const gotTool = messages.some((m) => m.role === 'tool');
+      if (hasExact && !gotTool) return { toolCalls: [{ id: 'e1', name: 'exact_match', arguments: { terms: 'alpha' } }] };
+      return { text: 'EXACT_ANSWER' };
+    });
+    const corpus = [{ id: 'a', text: 'alpha record' }, { id: 'b', text: 'beta record' }];
+    const out = await recurse('select the alpha record', { provider: sp.provider }, { retrieval: 'exact', corpus });
+    assert.equal(out.receipts.retrieval, 'exact');
+    assert.ok(sp.calls.some((c) => c.tools.includes('exact_match')), 'the worker was offered the exact handle tool');
+  });
+
+  it('backward-compatible: no corpus and no retrieval opt ⇒ retrieval is null (unchanged behaviour)', async () => {
+    const sp = scriptedProvider(() => ({ text: 'direct' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
+    assert.equal(out.receipts.retrieval, null, 'a plain reasoning task runs no retrieval mode');
+    assert.equal(out.result, 'direct');
+    assert.ok(!sp.calls.some((c) => c.tools.includes('search_memory') || c.tools.includes('exact_match')), 'no retrieval tools leak in');
+  });
+});
+
+describe('recurse-retrieval — helper units (mutation points)', () => {
+  it('impliesCompleteness fires on the "all / every / count / how many" family, not on a needle', () => {
+    for (const t of ['how many match?', 'list all the records', 'count the errors', 'every failing test', 'the total number of X']) {
+      assert.equal(impliesCompleteness(t), true, `should be a completeness ask: ${t}`);
+    }
+    for (const t of ['find the fox record', 'what did Alice say', 'summarize the incident', null, undefined, 42]) {
+      assert.equal(impliesCompleteness(t), false, `should NOT be a completeness ask: ${t}`);
+    }
+  });
+
+  it('normalizeCorpus drops malformed entries (a non-string id/text can neither be judged nor counted)', () => {
+    const out = normalizeCorpus([{ id: 'a', text: 'x' }, { id: 1, text: 'y' }, { id: 'b' }, null, { id: 'c', text: 'z' }]);
+    assert.deepEqual(out.map((r) => r.id), ['a', 'c']);
+  });
+
+  it('buildExactTool is a deterministic AND-term filter over the corpus (embeddings-free, complete)', async () => {
+    const tool = buildExactTool([{ id: 'a', text: 'alpha beta' }, { id: 'b', text: 'alpha gamma' }, { id: 'c', text: 'delta' }]);
+    assert.match(await tool.execute({ terms: 'alpha' }), /^a: alpha beta\nb: alpha gamma$/);
+    assert.equal(await tool.execute({ terms: 'alpha beta' }), 'a: alpha beta'); // AND: both terms required
+    assert.equal(await tool.execute({ terms: 'zeta' }), 'no matches');
+    assert.match(await tool.execute({ terms: '' }), /requires/);
+  });
+
+  it('buildSearchTool caps recall and never returns the whole corpus (KNN_K)', async () => {
+    let capturedN = null;
+    const litectx = { recall: async (_q, opts) => { capturedN = opts.n; return { fact: [{ path: 'f', body: 'b' }], episode: [] }; } };
+    const tool = buildSearchTool(litectx);
+    const r = await tool.execute({ query: 'x' });
+    assert.equal(capturedN, 8, 'recall is capped at KNN_K=8 (cannot count)');
+    assert.match(r, /\[fact\] f: b/);
+  });
+
+  it('classifySystem keeps the §9.2-validated wording verbatim and forbids a model count', () => {
+    const s = classifySystem('SPORTS news');
+    assert.match(s, /Examine EACH item individually/);
+    assert.match(s, /No count, no prose/);
+    assert.match(s, /PREDICATE: SPORTS news/);
+  });
+
+  it('rotate is a deterministic boundary shift (no RNG) — same input ⇒ same output', () => {
+    assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
+    assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
+    assert.deepEqual(rotate([], 3), []);
+  });
+});

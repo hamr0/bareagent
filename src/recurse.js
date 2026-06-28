@@ -21,6 +21,7 @@
 /** @typedef {import('../types').Provider} Provider */
 /** @typedef {import('../types').ToolDef} ToolDef */
 /** @typedef {import('./evaluator').Verdict} Verdict */
+/** @typedef {{id: string, text: string}} Slice */
 
 const { Loop } = require('./loop');
 const { Evaluator } = require('./evaluator');
@@ -30,6 +31,13 @@ const { assessComplexity, isCritical } = require('./complexity');
 const { HaltError } = require('./errors');
 const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
 const { synthesize } = require('./recurse-synthesize');
+const {
+  scanCount,
+  impliesCompleteness,
+  normalizeCorpus,
+  buildSearchTool,
+  buildExactTool,
+} = require('./recurse-retrieval');
 
 // NB-2 forced-fan-out tier→count map (Family B). CALIBRATED live (poc/rlm-nb2-calibrate.mjs, gpt-4o-mini):
 // the measured coverage knees {2,4,6} == predicted ⌈corpus/worker-budget⌉ for medium/complex/critical. These
@@ -43,14 +51,27 @@ const DEFAULT_FANOUT_CONCURRENCY = 4;
  * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
  * the WHOLE task's final answer; a child grading its own slice against the whole definition-of-done is wasted
  * (the verdict is never read by the parent) AND misapplied (a slice isn't expected to satisfy the whole DoD).
- * Also strips the forced-fan-out knobs (`count`/`mode`) so a child runs Family A, not another forced wave.
- * The `critical → force-verify` SAFETY FLOOR is unaffected — it keys on the task text via `isCritical`, not the
- * contract, so a critical child still self-verifies. Handle tools, `synthesize`, and `maxDepth` carry down.
+ * Also strips the forced-fan-out knobs (`count`/`mode`) so a child runs Family A, not another forced wave, and
+ * the TOP-LEVEL retrieval knobs (`retrieval`/`corpus`/`window`/`passes`) — those describe how the WHOLE task is
+ * answered over the parent's corpus; a child has its own subtask and must not re-scan the parent's full corpus
+ * (that would fan a whole-corpus count out under every child). The `critical → force-verify` SAFETY FLOOR is
+ * unaffected — it keys on the task text via `isCritical`, not the contract, so a critical child still
+ * self-verifies. Handle tools (`opts.tools`), `synthesize`, and `maxDepth` carry down.
  * @param {RecurseOptions} opts
  * @returns {RecurseOptions}
  */
 function forChild(opts) {
-  return { ...opts, count: undefined, mode: undefined, contract: undefined, evaluate: undefined };
+  return {
+    ...opts,
+    count: undefined,
+    mode: undefined,
+    contract: undefined,
+    evaluate: undefined,
+    retrieval: undefined,
+    corpus: undefined,
+    window: undefined,
+    passes: undefined,
+  };
 }
 
 /**
@@ -65,6 +86,10 @@ function forChild(opts) {
  * @property {number} [depth] - The current recursion depth (0 at the top). Incremented on each self-call;
  *   threaded into `policy`. Callers normally omit it (defaults to 0).
  * @property {object} [stream] - Optional event stream forwarded to each worker Loop (receipts substrate).
+ * @property {{recall: Function}} [litectx] - Optional litectx handle (RC-5, §10 step 7). Backs the `search`
+ *   retrieval mode (`recall`). NOT used by `scan` — litectx has no exhaustive enumerate verb today; scan reads
+ *   the generic array slice-source `opts.corpus` instead (the litectx-resident scan case waits on the litectx
+ *   `enumerate` verb and drops in behind the same socket).
  */
 
 /**
@@ -95,6 +120,18 @@ function forChild(opts) {
  *   2/4/6; simple → 1). `opts.count` takes precedence when both are given.
  * @property {number} [concurrency] - (Family B) max workers run at once per wave (default 4). The wave
  *   structure is `runPlan`'s; bareguard still bounds the family rate independently.
+ * @property {'scan'|'search'|'exact'} [retrieval] - (§10 step 7) the retrieval shape for a task OVER A CORPUS,
+ *   routed by question shape (§9.2.1). `'scan'` (the default WHEN `opts.corpus` is present) = process every
+ *   slice + LLM-judge + CODE-count — the only COMPLETE path (for "how many / all"). `'search'` = litectx
+ *   `recall` handle tool offered to the worker (needle; CANNOT count; requires `ctx.litectx`). `'exact'` = a
+ *   deterministic code-side AND-term filter tool over `opts.corpus`. The completeness-contract guard upgrades a
+ *   `'search'` on a "how many / all" ask to `'scan'` (UPGRADE-only, never a silent downgrade). Absent `corpus`
+ *   AND `retrieval`, behaviour is unchanged (Family A / single-shot) — fully backward-compatible.
+ * @property {Slice[]} [corpus] - (§10 step 7) the generic ARRAY slice-source scan reads (`{id, text}[]`). NOT
+ *   litectx (which has no exhaustive-enumerate verb today). Malformed entries are dropped, never miscounted.
+ * @property {number} [window] - (scan) items per judge window. Default 8 (§9.2.1 recall knee — the one
+ *   calibrated number; per-model).
+ * @property {number} [passes] - (scan) shuffled-boundary passes unioned for recall. Default 2 (~0.91 recall).
  */
 
 /**
@@ -111,6 +148,12 @@ function forChild(opts) {
  * @property {boolean} halted
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
  * @property {string|null} model
+ * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
+ *   or null/absent for a plain reasoning node.
+ * @property {string} [retrievalUpgraded] - set when the completeness guard upgraded the mode (e.g.
+ *   `'search→scan (completeness)'`) — the audit trail for RC-9-applied-to-retrieval.
+ * @property {{window: number, passes: number, scanned: number, matched: number}} [scan] - (scan) the scan
+ *   shape: window/passes used, slices scanned, ids matched (CODE-counted).
  */
 
 /**
@@ -186,6 +229,25 @@ async function recurse(task, ctx = {}, opts = {}) {
     return recurseFanout(task, ctx, opts, { provider, depth, maxDepth, assessment, critical, node });
   }
 
+  // Retrieval routing (§10 step 7, §9.2.1 task-shape model). A task OVER A CORPUS gets context as a HANDLE
+  // chosen by the question's shape. `scan` is the default WHEN a corpus is present (the only complete path);
+  // `search`/`exact` are opt-in handle TOOLS for a Family-A worker. Absent both, behaviour is unchanged.
+  let retrieval = opts.retrieval || (Array.isArray(opts.corpus) ? 'scan' : null);
+  // Completeness-contract GUARD (RC-9 applied to retrieval): a "how many / all" ask must not be answered by a
+  // capped `search` (which cannot count). UPGRADE-only — never silently downgrade a scan to a search.
+  if (retrieval === 'search' && (impliesCompleteness(task) || impliesCompleteness(opts.contract))) {
+    retrieval = 'scan';
+    node.retrievalUpgraded = 'search→scan (completeness)';
+  }
+  node.retrieval = retrieval;
+
+  // `scan` is a deterministic ORCHESTRATION (code-driven judge-per-window + code-count), not a worker model
+  // call — it branches to its own path. `search`/`exact` fall through to the Family-A worker below with their
+  // handle tool injected (the worker decides per sub-query — the §10 step-7 "offered as tools" shape).
+  if (retrieval === 'scan') {
+    return recurseScan(task, ctx, opts, { provider, depth, critical, node });
+  }
+
   // Offer the spawn A-tool only below the cap AND only when decomposition is plausibly useful (`simple`
   // routes to single-shot). At `depth >= maxDepth` the tool is withheld — the NB-4 tool half of the scrub,
   // and what makes `maxDepth=1` flat (RC-11): top spawns, children cannot (no nesting).
@@ -196,7 +258,14 @@ async function recurse(task, ctx = {}, opts = {}) {
   // child's tools ⊆ its parent's (same handle tools, spawn dropped at the cap).
   const system = DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
 
-  const handleTools = Array.isArray(opts.tools) ? opts.tools : [];
+  // Handle tools (RC-5 pull-default) = caller-supplied `opts.tools` + the retrieval handle for `search`/`exact`
+  // (offered so the Family-A worker pulls context per sub-query, never the whole corpus). `search` needs
+  // `ctx.litectx`; `exact` is a code-side filter over the corpus. A mode whose backend is absent contributes
+  // no tool (the worker just answers directly) rather than erroring.
+  const retrievalTools = [];
+  if (retrieval === 'search' && ctx.litectx) retrievalTools.push(buildSearchTool(ctx.litectx, {}));
+  if (retrieval === 'exact') retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
+  const handleTools = [...(Array.isArray(opts.tools) ? opts.tools : []), ...retrievalTools];
   // NB-3: collect each child's declared RESULT value (copy-on-return: the value, never its transcript) so the
   // reducer can aggregate them. Step-3's seam handed the receipts only, so a code-reduce could not see what to
   // combine — this closes that gap and is what Family B (step 5) will reduce over `runPlan` results[].
@@ -292,6 +361,77 @@ async function recurse(task, ctx = {}, opts = {}) {
       node.halted = true;
       node.incomplete = true;
       return { incomplete: true, best: result, receipts: node };
+    }
+    throw err;
+  }
+}
+
+/**
+ * SCAN (§10 step 7 / §9.2.1) — the default retrieval mode for a "how many / all" task over a corpus. A
+ * deterministic ORCHESTRATION, not a worker model call: every slice is processed, an isolated Loop LLM-judges
+ * each window, and the matching ids are unioned + CODE-counted (the aggregation is CODE, never a model
+ * Finish/count — RC-5 / §9.1 flaw #2, the path that does not silently undercount). The result is structured
+ * (`{count, matchedIds}`), never a model-stated number. RC-9: a dead window → `{incomplete, missingSlices}`,
+ * never folded into the count as a zero; a governance HaltError mid-scan → clean incomplete.
+ *
+ * The corpus is the generic array slice-source `opts.corpus`. Absent it, scan has nothing to read — litectx's
+ * resident-corpus enumerate path is deferred (docs/01-product/litectx-enumerate-spec.md) — so we return an
+ * honest incomplete, never a fabricated zero.
+ * @param {string} task
+ * @param {RecurseCtx} ctx
+ * @param {RecurseOptions} opts
+ * @param {{provider: Provider, depth: number, critical: boolean, node: RecurseNode}} state
+ * @returns {Promise<RecurseResult>}
+ */
+async function recurseScan(task, ctx, opts, state) {
+  const { provider, critical, node } = state;
+  node.model = provider.model || null;
+
+  const corpus = normalizeCorpus(opts.corpus);
+  if (corpus.length === 0) {
+    node.incomplete = true;
+    return {
+      incomplete: true,
+      best: null,
+      missingSlices: ['scan requires a non-empty opts.corpus array slice-source (litectx-enumerate path deferred)'],
+      receipts: node,
+    };
+  }
+
+  try {
+    const scan = await scanCount(task, corpus, {
+      provider,
+      window: opts.window,
+      passes: opts.passes,
+      ctx: { ...ctx, depth: state.depth },
+      onLlmResult: ctx.onLlmResult,
+      policy: ctx.policy,
+    });
+    node.scan = { window: scan.window, passes: scan.passes, scanned: scan.scanned, matched: scan.count };
+    // Structured, CODE-counted result — the count is authoritative; matchedIds carry the evidence (RC-10).
+    const result = { count: scan.count, matchedIds: scan.matchedIds };
+
+    // RC-9: a dead window means we did NOT see every slice → the count is a floor, not the answer. Report it
+    // incomplete with the partial as `best`, never a clean pass over a hole.
+    if (scan.missingSlices.length > 0) {
+      node.incomplete = true;
+      return { incomplete: true, best: result, missingSlices: scan.missingSlices, receipts: node };
+    }
+
+    // Verify (RC-7): forced for critical, or when a contract/override is supplied. The judge grades the
+    // structured count against the goal/contract (an isolated grader, never the scanner itself).
+    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
+    if (wantVerify) {
+      const verdict = await verify(task, result, ctx, opts);
+      node.verdict = verdict;
+      return { result, verdict, receipts: node };
+    }
+    return { result, verdict: null, receipts: node };
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      return { incomplete: true, best: null, receipts: node };
     }
     throw err;
   }
