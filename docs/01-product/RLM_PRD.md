@@ -2,18 +2,25 @@
 
 > **Owner repo: bareagent** (orchestration lane). litectx grows **no** code from
 > this PRD (§3). Derived from `RLM_EXPLAINED.md` (the understanding doc; this is the
-> requirements doc). Status: **In build — steps 3–6 shipped; step-7 PRE-BUILD POC done + GROUNDED on
-> real data, defaults locked** (§9 spikes 1 & 2 green; Family-A `recurse()` + NB-3 reducer + NB-2 Family-B
-> fan-out built/tested/live-smoked — §10 steps 3, 4, 5 ✅; step 6 capability-scrub verify-close ✅; **step-7
-> grounding ✅ — §9.2.1: litectx-retrieval correction + the MEASURED task-shape model (count→scan,
-> needle→search, exact→code-filter) on a real semantic corpus (AG News); scan-count window-knee + multi-pass
-> union calibrated; honesty negatives + the active half-window detector measured; defaults set in §10 step 7**).
-> **Step 7 is WIRING, not discovery — do not re-run pull/flat/search OR the litectx-retrieval study (§9.2/§9.2.1).**
-> Evidence `poc/rlm-spike1-gate.mjs`, `poc/rlm-spike2-recursion.mjs`, `poc/rlm-nb2-calibrate.mjs`,
-> `poc/rlm-step7-fuzzy-retrieval.mjs`, `poc/rlm-step7-handle-wiring.mjs`, `poc/rlm-step7-kind-retrieval.mjs`,
-> `poc/rlm-step7-semantic-corpus.mjs`, `poc/rlm-step7-window-knee.mjs`, `poc/rlm-step7-reliability.mjs`,
-> `src/recurse.js`, `src/recurse-synthesize.js`, `src/planner.js`,
-> `test/recurse.test.js`, `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-28.
+> requirements doc). Status: **DELIVERED — build sequence steps 1–8 COMPLETE** (§9 spikes 1 & 2 green; §10
+> steps 3 Family-A, 4 NB-3 reduce, 5 NB-2 Family-B fan-out, 6 capability-scrub verify-close, 7 retrieval
+> modes, 8 e2e verify-shipped-vs-POC replay — all ✅), **PLUS the §11 data-driven width partition** (litectx
+> 0.26 `enumerate` → `litectxCorpus` + `mode:'partition'`) **and the per-query scan-as-a-tool face**
+> (`retrieval:'tools'` + `buildScanTool`). Live-validated **per seam** (smokes for 3/4/5; AG-News replay for
+> 7/8; `enumerate` DoD + partition 64-vs-63 + resident-scan e2e for the litectx path; mixed-task routing for
+> `'tools'`); 71 mutation-checked offline tests. **Two §11 items remain DELIBERATELY DEFERRED** (each with a
+> named un-defer condition — §11): **RC-4 capability registry/matcher** (substrate = SkillRegistry's
+> `{name,description}`; a concrete matcher is NOT wired — `capabilityScrub` is depth-based tool *withholding*,
+> not capability *matching* — **POC-ruled-out §11.1**) and **history-compaction policy** (the paper's
+> `fit(history)` — **POC found its overflow REAL & reproducible on the weak SLM target (gpt-4o-mini fan-out, 3/4
+> runs > 8k, driven by over-decomposition), so this is a TRACKED FOLLOW-ON, not a closed deferral; governance
+> caps bound it to honest-incomplete today, §11.1**). Calibration knobs (worker-overflow threshold, fan-out
+> count numbers) left tunable — **scan-window auto-calibration POC-ruled-out (§11.1: no knee reproducible across
+> 2 corpora × 2 models)**. **Steps 7/9.2 are SETTLED — do not re-run pull/flat/search OR the
+> litectx-retrieval study (§9.2/§9.2.1).** Evidence: `poc/rlm-spike{1,2}-*.mjs`, `poc/rlm-nb2-calibrate.mjs`,
+> `poc/rlm-step7-*.mjs`, `poc/rlm-step8-shipped-replay.mjs`, `poc/litectx-enumerate-verify.mjs`,
+> `poc/rlm-resident-scan-e2e.mjs`, `poc/rlm-scan-as-tool.mjs`, `src/recurse*.js`, `test/recurse.test.js`,
+> `poc/rlm-recurse-smoke.mjs`. Date: 2026-06-28.
 
 ---
 
@@ -932,6 +939,84 @@ reconciliation / world-models / `Maintains`+`Continuity`; the ProseScript DSL; t
 package registry + `prose write` self-hosting author; fingerprint memoization
 (defer-only); the monotonicity constraint (optional). And **never rebuilt** —
 consumed instead: litectx memory/handles, `Loop`, `Evaluator`, bareguard.
+
+### 11.1 Deferred-item validation POCs — empirical ruling (2026-06-28)
+
+> **Why this section exists.** Before leaving the three deferrals above on
+> *judgement* alone, each was put through a real, able-to-fail POC that pits the
+> deferred feature against **what we already have** — on real wire, code-computed
+> metrics, triangulated across **two methods × two model tiers** (claude-haiku-4-5 =
+> strong; gpt-4o-mini = the weak SLM target where a deferred feature is *most* likely
+> to earn its place). **Provenance:** #1 RC-4 ← /prose (declare-capabilities-up-front);
+> #2 history-compaction ← the RLM paper (`fit(history)` + externalize-by-handle); #3
+> calibration ← Aurora (2/4/6) + our own AG-News numbers (`window=8`). The POCs are
+> KEPT (`poc/rlm-defer*.mjs`) so a future need can re-open any of them with the harness
+> already built. **Outcome: all three stay deferred — none beat what we have.**
+
+**#1 — RC-4 capability-matched dispatch → RULED OUT (decisive).**
+- *What we have:* every spawned worker gets the same toolset; the model picks the
+  tool (SkillRegistry can reveal tools on demand for huge sets). *What RC-4 adds:* a
+  router that offers each sub-task ONLY its matching tool.
+- *POC `rlm-defer1-capability-match.mjs`* (same-family CONFUSABLE arithmetic ops,
+  16 sub-tasks, sweep toolset size 1→8→16→24): **accuracy 100% / 0 wrong-tool at every
+  size**, on BOTH haiku and gpt-4o-mini. matched − all-tools = **0 pp**.
+- *POC `rlm-defer1b-heterogeneous-tools.mjs`* (10 HETEROGENEOUS tools with deliberately
+  OVERLAPPING descriptions — three `search_*` + DB + employee lookup; 16 tasks; weak
+  model): all-tools **16/16 right-tool = matched 16/16**. 0 pp.
+- *Ruling:* a useful-grade model routes correctly regardless of toolset size/confusability;
+  scoping buys nothing. RC-4 = new code for zero measured benefit. **Un-defer only on a
+  concrete heterogeneous-worker case that demonstrably misroutes** (a much larger/messier
+  toolset, or a model weaker than gpt-4o-mini). Note: Family-A already has the *pull*
+  analogue (a worker `skill_use`s to acquire a capability) — shipped via SkillRegistry.
+
+**#2 — History-compaction (`fit(history)`) → NOT cleanly ruled out: overflow is REAL & REPRODUCIBLE on the weak SLM target.**
+- *What we have:* copy-on-return + handles keep heavy data OUT of the window; only short
+  result strings + gap-reports cross back; no active compaction (Loop's `trim`/`assemble`
+  seams exist if ever needed). *What it adds:* the paper's summarize-vs-externalize when a
+  node's history overflows. Honest bar = a SMALL-model window (8k / tight 4k), not 200k.
+- *Strong model (haiku), `rlm-defer2-history-overflow.mjs`* (fan-out WIDTH 3→6→9, verbose
+  ~120-word children): **1445 → 2200 → 3113 tok** — clean linear growth (~278 tok/child),
+  never near 4k. **Ruled out on a strong model.**
+- *Iterative axis (both models), `rlm-defer2b-iterative-history.mjs`* (one worker, 5→10→20
+  sequential tool calls accumulating in ITS OWN window): **710 → 1368 → 2688 tok** at 20
+  steps — well under budget. **The iterative path is ruled out.**
+- *Weak model (gpt-4o-mini) fan-out — the finding:* across 4 runs the node window
+  **REPRODUCIBLY overflowed 8k** (peaks **8098 / 9632 / 3745 / 18982 tok**; 3 of 4 crossed).
+  The peak **tracks CALL COUNT, not requested width** (43 calls → 3745 tok ok; 117 calls →
+  **18982** tok): the weak model **over-decomposes** (spawns grandchildren under
+  `maxDepth=2` / loops), and the accumulating transcript blows the window. This is exactly
+  the `fit(history)` regime — and the weak SLM tier is RLM's *actual* target. *(An earlier
+  single run looked like a non-monotonic one-off; the ×3 repeat FALSIFIED that — it
+  reproduces. Recorded so the dismissal isn't repeated.)*
+- *Ruling — deferral is now a CHOICE, not a non-issue.* Two caveats keep it from a full
+  flip: (1) **these POCs ran UNGOVERNED** — with bareguard wired (the normal config) the
+  **call/budget/depth caps trip first**, turning the runaway into an honest `{incomplete}`
+  (shipped behavior), so governance is the *first-line* bound, not `fit(history)`; (2)
+  `fit(history)`'s real added value is **graceful continuation** (compact + keep going) vs.
+  today's **halt-incomplete** — incremental, and the ROOT cause is over-decomposition,
+  which a weak-model depth/width discipline (`maxDepth=1`, a tighter spawn prompt) targets
+  more directly. **Un-defer condition is effectively MET on the weak tier** for the
+  "graceful continuation on small models" use case. Recommended order if pursued:
+  (a) confirm bareguard caps bound it cleanly; (b) a weak-model spawn discipline; (c)
+  `fit(history)` for graceful survival. Tracked as a real follow-on, not a closed deferral.
+
+**#3 — Calibration (auto-tune scan `window`) → RULED OUT (triangulated; no knee reproducible).**
+- *What we have:* fixed `window=8` (the AG-News-calibrated recall knee). *What it adds:*
+  auto-calibration (the active half-window probe) that measures the data and picks the
+  window — valuable ONLY if the knee is data-dependent (would FLIP the deferral).
+- *POC `rlm-defer3-calibration-sweep.mjs`* (sentiment, short ~7w vs long ~52w, window
+  4/8/16): recall **1.00 everywhere** — too easy, no knee (inconclusive).
+- *POC `rlm-defer3b-calibration-hard.mjs`* (HARDER: subtle refund-needle among 5 confusable
+  support categories, short ~11w vs long ~82w, window 4/8/12/16/24, single pass; both
+  models): recall **1.00 at every window, both lengths, both models** — even 24× 82-word
+  items did not make the judge under-enumerate. **No knee formed; window=8 never broke and
+  going WIDER never hurt.**
+- *Ruling:* across 2 corpora × 2 models × length sweep, the failure auto-calibration would
+  fix (a recall knee that moves with item length) **could not be reproduced** — `window=8`
+  is a safe, conservative default (the original AG-News knee looks model/task-specific to a
+  weaker judge than tested here). **Un-defer only if a real task is found where recall
+  collapses at `window=8`** (then the active half-window probe — not the falsified
+  positional-skew detector — is the mechanism). Aggregation stays CODE either way.
 
 ---
 
