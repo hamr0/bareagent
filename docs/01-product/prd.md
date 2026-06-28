@@ -63,6 +63,14 @@ catalog of MCP-exposed tools for 30 days) and `mcp_invoke` (calls them).
 > **[`eval-assist-prd.md`](./eval-assist-prd.md)** (DELIVERED 2026-06-24);
 > this `prd.md` stays the core one-shot-runner spec.
 
+> **`recurse()` — the RLM primitive (companion spec).** A second opt-in component,
+> built the same way (composed *around* the Loop, never imposed): decompose →
+> fan-out → verify → synthesize in one call, with code-side aggregation and honest
+> `{incomplete}` on guard exhaustion. Design, build sequence, the litectx-retrieval
+> task-shape model, and the deferred-item validation POCs live in
+> **[`RLM_PRD.md`](./RLM_PRD.md)** (DELIVERED 2026-06-28). Kept separate from this
+> core spec, mirroring `eval-assist-prd.md`.
+
 ## 4. What bareagent is NOT
 
 - **NOT a scheduler.** It does not wake up at a future time. Scheduled
