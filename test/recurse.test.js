@@ -634,7 +634,7 @@ function scanJudge({ hallucinate = false, tailMiss = false, deadWindowAt = null 
     if (deadWindowAt != null && idx === deadWindowAt) throw new Error('provider boom');
     const items = [];
     for (const line of lastUser(messages).split('\n')) {
-      const m = line.match(/^(\S+): (.*)$/);
+      const m = line.match(/^(\S+) => (.*)$/); // shipped display format: `<id> => <text>`
       if (m) items.push({ id: m[1], text: m[2] });
     }
     let matched = items.filter((it) => /MATCH/.test(it.text));
@@ -789,11 +789,15 @@ describe('recurse-retrieval — helper units (mutation points)', () => {
     assert.match(r, /\[fact\] f: b/);
   });
 
-  it('classifySystem keeps the §9.2-validated wording verbatim and forbids a model count', () => {
+  it('classifySystem keeps the §9.2-validated wording, forbids a model count, and pins ids unambiguously', () => {
     const s = classifySystem('SPORTS news');
     assert.match(s, /Examine EACH item individually/);
     assert.match(s, /No count, no prose/);
     assert.match(s, /PREDICATE: SPORTS news/);
+    // step-8 finding: a colon-ambiguous id instruction silently under-recalled (0.93→0.29); the fix is an
+    // unambiguous ` => ` delimiter + a VERBATIM-copy instruction that keeps colon-bearing ids whole.
+    assert.match(s, /VERBATIM/);
+    assert.match(s, /=> /);
   });
 
   it('rotate is a deterministic boundary shift (no RNG) — same input ⇒ same output', () => {

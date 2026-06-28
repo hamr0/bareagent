@@ -816,7 +816,18 @@ completeness-contract guard.
    // completeness-contract guard flags a capped search answering a "how many / all" ask.
    ```
 8. **Replay the POC data through the shipped primitive** and reconcile any mismatch
-   as a finding (verify-shipped-vs-POC doctrine).
+   as a finding (verify-shipped-vs-POC doctrine). **✅ DONE** — `poc/rlm-step8-shipped-replay.mjs`
+   drove the SHIPPED `recurse({retrieval:'scan'})` over AG News on the live wire
+   (gpt-4o-mini). **A real regression was caught:** the first run scored recall **0.29**
+   (vs the §9.2.1 POC's 0.93) — generalizing the classify prompt's id hint from the
+   concrete "the `rec:N` tokens" to "the leading token up to the first `': '`" was
+   ambiguous on colon-bearing ids, so the model emitted malformed ids the RC-2
+   `shown.has()` intersect correctly dropped (a silent under-recall). **Fixed** (item
+   display `<id> => <text>` + a verbatim-copy instruction) and **re-validated live:
+   recall 0.88 / precision 0.97 / err 9% / `count === matchedIds`** — within the §9.2.1
+   envelope; the `search` tool's litectx `recall` shape confirmed in the same run. The
+   finding is the doctrine working: the 56 offline mutation tests (all green) could not
+   expose a prompt that confuses a *real* model — only the shipped-vs-POC replay could.
 9. **(Optional) NB-6**: `writePlan` + `plan_write` skill emitting `rlm.md` (§4.8) —
    only if a concrete HITL or agent-self-authoring need is live; recurse ships
    without it.

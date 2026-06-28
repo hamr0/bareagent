@@ -59,9 +59,10 @@ function impliesCompleteness(text) {
  */
 function classifySystem(predicate) {
   return (
-    'You are a precise classifier. Examine EACH item individually. Output ONLY the IDs (the leading token ' +
-    'before each item, up to the first ": ") of the items that match the predicate below. Comma-separated. ' +
-    'If none, output "none". No count, no prose.\n\nPREDICATE: ' +
+    'You are a precise classifier. Examine EACH item individually. Each item is shown on its own line as ' +
+    '`<id> => <text>`. Output ONLY the IDs of the items that match the predicate below — copy each matching ' +
+    'item\'s <id> VERBATIM (the exact characters before " => "; an id may itself contain ":" — keep all of ' +
+    'it). Comma-separated. If none, output "none". No count, no prose.\n\nPREDICATE: ' +
     predicate
   );
 }
@@ -93,7 +94,7 @@ async function judgeWindow(predicate, window, opts) {
     onLlmResult: opts.onLlmResult || undefined,
     throwOnError: false,
   });
-  const body = window.map((r) => `${r.id}: ${r.text}`).join('\n');
+  const body = window.map((r) => `${r.id} => ${r.text}`).join('\n');
   // A per-window nonce busts provider prompt-caching on live runs (identical windows across passes would
   // otherwise be served from cache); harmless offline.
   const user = `[run ${opts.nonce}] Find the items matching the predicate.\n\nITEMS:\n${body}\n\nReply with ONLY the comma-separated matching ids (or "none").`;

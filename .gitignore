@@ -26,3 +26,6 @@ poc/assess-*.mjs
 /src/**/*.d.ts
 /tools/**/*.d.ts
 /bin/**/*.d.ts
+
+# RLM step-8 e2e dataset (fetched on demand, not committed)
+agnews.csv
