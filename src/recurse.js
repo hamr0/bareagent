@@ -46,6 +46,27 @@ const {
 const TIER_COUNT = { simple: 1, medium: 2, complex: 4, critical: 6 };
 // Cap on workers run at once within a fan-out wave (in-process; bareguard caps the family rate too). Overridable.
 const DEFAULT_FANOUT_CONCURRENCY = 4;
+// Data-driven width (NB-2 / §11): default items-per-worker for the PARTITION path. width = ⌈size/budget⌉ — how
+// many parallel scan-workers a measured corpus needs. A calibratable knob (the §9.1 algorithm; corpus-specific),
+// not a discovered constant — overridable via `opts.workerBudget`. 100 items ≈ a worker doing ~25 scan windows.
+const DEFAULT_WORKER_BUDGET = 100;
+
+/**
+ * Split an array into EXACTLY `n` contiguous, near-equal chunks (the data-partition for the §11 width path).
+ * Deterministic; every chunk non-empty when `n <= arr.length` (the caller caps `n` at the size).
+ * @template T @param {T[]} arr @param {number} n @returns {T[][]}
+ */
+function partitionInto(arr, n) {
+  /** @type {T[][]} */
+  const chunks = [];
+  let start = 0;
+  for (let i = 0; i < n; i++) {
+    const take = Math.ceil((arr.length - start) / (n - i)); // even spread of the remainder
+    chunks.push(arr.slice(start, start + take));
+    start += take;
+  }
+  return chunks;
+}
 
 /**
  * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
@@ -115,9 +136,14 @@ function forChild(opts) {
  *   it OVERRIDES the tier→count map. Setting it (or `mode:'fanout'`) takes the deterministic-parallelism path
  *   instead of the model-driven Family-A default. For known-parallel tasks where the caller wants guaranteed
  *   fan-out, not the model's adaptive choice.
- * @property {'fanout'} [mode] - (Opt-in, NB-2 / Family B) request forced fan-out WITHOUT a fixed count — the
- *   count is then derived from `assessComplexity`'s tier via the calibrated map (medium/complex/critical →
- *   2/4/6; simple → 1). `opts.count` takes precedence when both are given.
+ * @property {'fanout'|'partition'} [mode] - (Opt-in, NB-2 / Family B) `'fanout'` = forced semantic fan-out
+ *   WITHOUT a fixed count — derived from `assessComplexity`'s tier via the calibrated map (medium/complex/
+ *   critical → 2/4/6; simple → 1); `opts.count` takes precedence. `'partition'` = the DATA-DRIVEN WIDTH path
+ *   (§11): measure `opts.corpus` and partition it into `max(opts.count floor, ⌈size/workerBudget⌉)` parallel
+ *   scan-workers (capped by the guards), CODE-reducing the per-chunk counts. Distinct from `'fanout'`: a data
+ *   partition, not a `Planner` semantic split.
+ * @property {number} [workerBudget] - (`mode:'partition'`) items per worker; width = `⌈corpus.length /
+ *   workerBudget⌉` (default 100). A calibratable knob (the §9.1 algorithm), not a discovered constant.
  * @property {number} [concurrency] - (Family B) max workers run at once per wave (default 4). The wave
  *   structure is `runPlan`'s; bareguard still bounds the family rate independently.
  * @property {'scan'|'search'|'exact'} [retrieval] - (§10 step 7) the retrieval shape for a task OVER A CORPUS,
@@ -127,8 +153,10 @@ function forChild(opts) {
  *   deterministic code-side AND-term filter tool over `opts.corpus`. The completeness-contract guard upgrades a
  *   `'search'` on a "how many / all" ask to `'scan'` (UPGRADE-only, never a silent downgrade). Absent `corpus`
  *   AND `retrieval`, behaviour is unchanged (Family A / single-shot) — fully backward-compatible.
- * @property {Slice[]} [corpus] - (§10 step 7) the generic ARRAY slice-source scan reads (`{id, text}[]`). NOT
- *   litectx (which has no exhaustive-enumerate verb today). Malformed entries are dropped, never miscounted.
+ * @property {Slice[] | (() => Promise<Slice[]>)} [corpus] - (§10 step 7) the generic slice-source scan/partition
+ *   reads: an in-hand `{id, text}[]` array, OR an async `() => Promise<Slice[]>` (e.g. `litectxCorpus(litectx,
+ *   {kind})` materializing a litectx-resident corpus via `enumerate`). recurse depends on this SHAPE, never on
+ *   litectx. Malformed entries are dropped, never miscounted.
  * @property {number} [window] - (scan) items per judge window. Default 8 (§9.2.1 recall knee — the one
  *   calibrated number; per-model).
  * @property {number} [passes] - (scan) shuffled-boundary passes unioned for recall. Default 2 (~0.91 recall).
@@ -154,6 +182,9 @@ function forChild(opts) {
  *   `'search→scan (completeness)'`) — the audit trail for RC-9-applied-to-retrieval.
  * @property {{window: number, passes: number, scanned: number, matched: number}} [scan] - (scan) the scan
  *   shape: window/passes used, slices scanned, ids matched (CODE-counted).
+ * @property {{size: number, workerBudget: number, floor: number, dataWidth: number, width: number, matched?: number}} [partition]
+ *   - (`mode:'partition'`) the data-driven width audit: corpus size, the budget knob, the count floor, the
+ *   data-derived width `⌈size/budget⌉`, the chosen `width = max(floor, dataWidth)`, and matched count.
  */
 
 /**
@@ -225,6 +256,13 @@ async function recurse(task, ctx = {}, opts = {}) {
   // this path does NOT offer the model the spawn tool; a deterministic count → Planner → runPlan waves →
   // NB-3 reduce → verify. assessComplexity is still only a hint here (it sets the count when no explicit
   // `opts.count`); `critical` still forces verify. Branches before the Family-A spawn-tool setup below.
+  // Data-driven width PARTITION (NB-2 / §11) — opt-in, checked BEFORE the fanout branch so `opts.count` acts as
+  // the width FLOOR here (not a fanout trigger). Distinct from Family B's semantic decomposition: it PARTITIONS
+  // a measured corpus into ⌈size/workerBudget⌉ parallel scan-workers (capped by guards), never a Planner split.
+  if (opts.mode === 'partition') {
+    return recursePartition(task, ctx, opts, { provider, depth, critical, node });
+  }
+
   if (opts.mode === 'fanout' || opts.count != null) {
     return recurseFanout(task, ctx, opts, { provider, depth, maxDepth, assessment, critical, node });
   }
@@ -232,7 +270,10 @@ async function recurse(task, ctx = {}, opts = {}) {
   // Retrieval routing (§10 step 7, §9.2.1 task-shape model). A task OVER A CORPUS gets context as a HANDLE
   // chosen by the question's shape. `scan` is the default WHEN a corpus is present (the only complete path);
   // `search`/`exact` are opt-in handle TOOLS for a Family-A worker. Absent both, behaviour is unchanged.
-  let retrieval = opts.retrieval || (Array.isArray(opts.corpus) ? 'scan' : null);
+  // A corpus may be an in-hand array OR an async slice-source `() => Promise<Slice[]>` (e.g. `litectxCorpus`
+  // over a litectx-resident corpus). Either form defaults retrieval to scan.
+  const hasCorpus = Array.isArray(opts.corpus) || typeof opts.corpus === 'function';
+  let retrieval = opts.retrieval || (hasCorpus ? 'scan' : null);
   // Completeness-contract GUARD (RC-9 applied to retrieval): a "how many / all" ask must not be answered by a
   // capped `search` (which cannot count). UPGRADE-only — never silently downgrade a scan to a search.
   if (retrieval === 'search' && (impliesCompleteness(task) || impliesCompleteness(opts.contract))) {
@@ -387,13 +428,28 @@ async function recurseScan(task, ctx, opts, state) {
   const { provider, critical, node } = state;
   node.model = provider.model || null;
 
-  const corpus = normalizeCorpus(opts.corpus);
+  // Resolve the slice-source: an in-hand array, or an async `() => Promise<Slice[]>` (e.g. `litectxCorpus`
+  // materializing a litectx-resident corpus via enumerate). A source fault is an honest incomplete, not a
+  // fabricated empty scan; a governance HaltError during materialization is a clean halt.
+  let corpus;
+  try {
+    const raw = typeof opts.corpus === 'function' ? await opts.corpus() : opts.corpus;
+    corpus = normalizeCorpus(raw);
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      return { incomplete: true, best: null, receipts: node };
+    }
+    node.incomplete = true;
+    return { incomplete: true, best: null, missingSlices: [`scan corpus source failed: ${err.message}`], receipts: node };
+  }
   if (corpus.length === 0) {
     node.incomplete = true;
     return {
       incomplete: true,
       best: null,
-      missingSlices: ['scan requires a non-empty opts.corpus array slice-source (litectx-enumerate path deferred)'],
+      missingSlices: ['scan requires a non-empty corpus (array or an async slice-source like litectxCorpus)'],
       receipts: node,
     };
   }
@@ -432,6 +488,122 @@ async function recurseScan(task, ctx, opts, state) {
       node.halted = true;
       node.incomplete = true;
       return { incomplete: true, best: null, receipts: node };
+    }
+    throw err;
+  }
+}
+
+/**
+ * DATA-DRIVEN WIDTH PARTITION (NB-2 / §11) — the *width* dial that stacks above the fixed/semantic count floor.
+ * Distinct from Family B's `recurseFanout` (a `Planner` SEMANTIC decomposition): this MEASURES a real corpus and
+ * PARTITIONS it into `width = max(floor, ⌈size / workerBudget⌉)` contiguous chunks (capped by the guards and by
+ * the size), each scanned by a fresh-window `recurse({retrieval:'scan'})` worker, then CODE-reduced (union the
+ * matched ids → count; the §9.1 aggregation, never a model count). `opts.count` is the width FLOOR (never
+ * lowered); the data may RAISE it. Like `recurseFanout`: a pre-wave `ctx.policy('recurse_partition', …)`
+ * checkpoint runs once `width` is known (a budget HaltError → clean incomplete before any worker spends); RC-9
+ * holds (a dead/incomplete chunk → `{incomplete, missingSlices}`, never a survivor-sum).
+ *
+ * The corpus is the generic slice-source (`opts.corpus` array or async fn, e.g. `litectxCorpus`) — materialized
+ * once in the parent (cheap: data in an array), then each worker's LLM context sees only its chunk's windows.
+ * @param {string} task
+ * @param {RecurseCtx} ctx
+ * @param {RecurseOptions} opts
+ * @param {{provider: Provider, depth: number, critical: boolean, node: RecurseNode}} state
+ * @returns {Promise<RecurseResult>}
+ */
+async function recursePartition(task, ctx, opts, state) {
+  const { provider, depth, critical, node } = state;
+  node.model = provider.model || null;
+
+  // 1) Materialize the slice-source (array or async fn). A fault is an honest incomplete; a Halt is clean.
+  let corpus;
+  try {
+    const raw = typeof opts.corpus === 'function' ? await opts.corpus() : opts.corpus;
+    corpus = normalizeCorpus(raw);
+  } catch (err) {
+    if (err instanceof HaltError) { node.halted = true; node.incomplete = true; return { incomplete: true, best: null, receipts: node }; }
+    node.incomplete = true;
+    return { incomplete: true, best: null, missingSlices: [`partition corpus source failed: ${err.message}`], receipts: node };
+  }
+  if (corpus.length === 0) {
+    node.incomplete = true;
+    return { incomplete: true, best: null, missingSlices: ['partition requires a non-empty corpus (array or async slice-source)'], receipts: node };
+  }
+
+  // 2) Width = max(floor, ⌈size / workerBudget⌉), never below the floor, capped at the corpus size (no empty
+  //    workers). `opts.count` is the floor; the data raises it. The guards (the checkpoint below) are the ceiling.
+  const size = corpus.length;
+  const floor = Number.isInteger(opts.count) && /** @type {number} */ (opts.count) > 0 ? /** @type {number} */ (opts.count) : 1;
+  const workerBudget = Number.isInteger(opts.workerBudget) && /** @type {number} */ (opts.workerBudget) > 0 ? /** @type {number} */ (opts.workerBudget) : DEFAULT_WORKER_BUDGET;
+  const dataWidth = Math.ceil(size / workerBudget);
+  const width = Math.min(Math.max(floor, dataWidth), size);
+  const concurrency = Number.isInteger(opts.concurrency) && /** @type {number} */ (opts.concurrency) > 0 ? /** @type {number} */ (opts.concurrency) : DEFAULT_FANOUT_CONCURRENCY;
+  node.partition = { size, workerBudget, floor, dataWidth, width };
+
+  const childResults = [];
+  try {
+    // 2b) Pre-wave checkpoint — width (the cost) is now known. A governance HaltError halts BEFORE any worker
+    //     spends (bounds the burst to zero); a plain deny is advisory (allowlist-safe), same contract as fanout.
+    if (typeof ctx.policy === 'function') {
+      try {
+        await ctx.policy('recurse_partition', { width, size, depth }, { ...ctx, depth });
+      } catch (err) {
+        if (err instanceof HaltError) throw err;
+      }
+    }
+
+    // 3) Partition into `width` chunks; each chunk → a fresh-window scan worker. The chunk rides on the step so
+    //    `runPlan` (waves + concurrency cap) can route it (executeFn gets only the step); results align by index.
+    const chunks = partitionInto(corpus, width);
+    const childOpts = { ...forChild(opts), retrieval: /** @type {'scan'} */ ('scan'), window: opts.window, passes: opts.passes };
+    const steps = chunks.map((chunk, i) => ({ id: `p${i}`, action: `partition ${i} (${chunk.length} items)`, dependsOn: [], chunk }));
+    const results = await runPlan(
+      steps,
+      (step) => recurse(task, { ...ctx, depth: depth + 1 }, { ...childOpts, corpus: /** @type {any} */ (step).chunk }),
+      { concurrency },
+    );
+
+    // 4) CODE-reduce: union the matched ids across chunks (chunks are disjoint, so union size == Σ counts, and
+    //    union is robust to any overlap). RC-9: a dead/incomplete chunk is a MISSING slice, never survivor-summed.
+    /** @type {Set<string>} */
+    const matched = new Set();
+    /** @type {string[]} */
+    const missingSlices = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const label = steps[i] ? steps[i].action : `partition ${i}`;
+      if (r.status !== 'done' || !r.result) {
+        node.spawned.push(makeDeadNode(label, depth + 1));
+        missingSlices.push(label);
+        continue;
+      }
+      const child = /** @type {RecurseResult} */ (r.result);
+      node.spawned.push(child.receipts);
+      const val = child.incomplete ? child.best : child.result;
+      if (val && Array.isArray(val.matchedIds)) for (const id of val.matchedIds) matched.add(id);
+      childResults.push(val);
+      if (child.incomplete) missingSlices.push(label);
+    }
+    const result = { count: matched.size, matchedIds: [...matched] };
+    node.partition.matched = matched.size;
+
+    if (missingSlices.length > 0) {
+      node.incomplete = true;
+      return { incomplete: true, best: result, missingSlices, receipts: node };
+    }
+    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
+    if (wantVerify) {
+      const verdict = await verify(task, result, ctx, opts);
+      node.verdict = verdict;
+      return { result, verdict, receipts: node };
+    }
+    return { result, verdict: null, receipts: node };
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      const best = childResults.length ? { count: new Set(childResults.flatMap((v) => (v && Array.isArray(v.matchedIds) ? v.matchedIds : []))).size } : null;
+      return { incomplete: true, best, receipts: node };
     }
     throw err;
   }

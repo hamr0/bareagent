@@ -5,7 +5,7 @@ const { Planner } = require('./src/planner');
 const { Evaluator } = require('./src/evaluator');
 const { refine } = require('./src/refine');
 const { recurse } = require('./src/recurse');
-const { buildSearchTool, buildExactTool } = require('./src/recurse-retrieval');
+const { buildSearchTool, buildExactTool, litectxCorpus } = require('./src/recurse-retrieval');
 const { remember } = require('./src/remember');
 const { assessComplexity, isCritical } = require('./src/complexity');
 const { SkillRegistry } = require('./src/skills');
@@ -38,6 +38,7 @@ module.exports = {
   recurse,
   buildSearchTool,
   buildExactTool,
+  litectxCorpus,
   remember,
   assessComplexity,
   isCritical,

@@ -64,6 +64,20 @@ console.log(`  receipts.retrieval=${out.receipts.retrieval}  receipts.scan=${JSO
 const scanPass = recall >= 0.85 && precision >= 0.9 && err < 0.2 && countAgrees;
 console.log(`  => ${scanPass ? 'PASS — shipped scan reproduces the §9.2.1 mechanism' : 'MISMATCH — reconcile as a finding'}`);
 
+// ── 1b) data-driven width PARTITION (opt-in, PARTITION=1) — must produce the SAME count as the flat scan,
+//        just distributed across ⌈size/workerBudget⌉ parallel workers. Doubles cost (re-scans the corpus). ──
+let partitionOK = true;
+if (process.env.PARTITION) {
+  const WB = Number(process.env.WORKER_BUDGET || 80);
+  const pout = await recurse(task, { provider, onLlmResult }, { mode: 'partition', corpus, workerBudget: WB, window: WINDOW, passes: PASSES });
+  if (pout.incomplete) { console.error('\nPARTITION came back INCOMPLETE:', pout.missingSlices); process.exit(1); }
+  const drift = out.result.count ? Math.abs(pout.result.count - out.result.count) / out.result.count : 0;
+  partitionOK = drift <= 0.05; // partition must not change the answer (small drift only from window-boundary effects)
+  console.log(`\n── PARTITION (mode:'partition', workerBudget=${WB}) ──`);
+  console.log(`  width=${pout.receipts.partition.width} (⌈${pout.receipts.partition.size}/${WB}⌉), workers=${pout.receipts.spawned.length}`);
+  console.log(`  partition count=${pout.result.count} vs flat scan=${out.result.count}  drift=${(100 * drift).toFixed(0)}%  => ${partitionOK ? 'PASS (partition preserves the count)' : 'MISMATCH'}`);
+}
+
 // ── 2) search-tool smoke against a REAL litectx (the shape only a stub covered offline) ──────────
 console.log(`\n── search_memory smoke (real litectx, embeddings on) ──`);
 const root = mkdtempSync(join(tmpdir(), 's8-'));
@@ -75,5 +89,5 @@ const searchOK = typeof res === 'string' && res !== 'no matches' && /^\[(fact|ep
 console.log('  ' + res.split('\n').slice(0, 3).join('\n  '));
 console.log(`  => search shape OK (grouped + body, [kind] path: text): ${searchOK}`);
 
-console.log(`\nVERDICT: ${scanPass && searchOK ? 'PASS' : 'FAIL'} — shipped scan ${scanPass ? 'reproduces POC' : 'DIVERGED'}; search shape ${searchOK ? 'confirmed live' : 'WRONG'}`);
-process.exit(scanPass && searchOK ? 0 : 1);
+console.log(`\nVERDICT: ${scanPass && searchOK && partitionOK ? 'PASS' : 'FAIL'} — shipped scan ${scanPass ? 'reproduces POC' : 'DIVERGED'}; search shape ${searchOK ? 'confirmed live' : 'WRONG'}${process.env.PARTITION ? `; partition ${partitionOK ? 'preserves count' : 'DRIFTED'}` : ''}`);
+process.exit(scanPass && searchOK && partitionOK ? 0 : 1);

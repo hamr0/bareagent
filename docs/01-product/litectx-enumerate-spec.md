@@ -1,7 +1,11 @@
 # litectx feature request — `enumerate`: exhaustive, scope-aware, paginated read
 
 > **Requesting repo:** bare-agent (RLM_PRD §10 step 7).
-> **Status:** spec for litectx to POC-then-build. Self-contained; no bareagent code required to validate.
+> **Status:** ✅ **DELIVERED in litectx 0.26.0** and verified against this spec's DoD (§5) from the bare-agent
+> side (`poc/litectx-enumerate-verify.mjs` — gapless+complete, scope-isolation, deterministic order, body
+> fidelity, `count(kind)` consistency; all PASS). Consumed by `recurse()` via `litectxCorpus` (resident scan)
+> and `mode:'partition'` (data-driven width). Signature shipped as specified; v1 is the memory axis
+> (`fact`/`episode`) — `code`/`doc` enumeration remains deferred (open question §8). Original spec follows.
 > **One-line ask:** add a query-less, rank-free verb that pages through **every** stored row of a `kind`,
 > honoring scope — the one read litectx cannot do today.
 

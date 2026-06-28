@@ -254,6 +254,42 @@ function buildExactTool(corpus) {
   };
 }
 
+// Default page size when materializing a litectx-resident corpus. Pages are an internal detail (the union/
+// rotation scan needs the whole array in hand); a larger page = fewer round-trips, the caller's memory budget.
+const ENUM_PAGE = 200;
+
+/**
+ * Build a SCAN slice-source backed by a litectx-RESIDENT corpus (facts/episodes the agent already accrued) —
+ * the §10-step-7 deferral un-blocked by litectx 0.26's `enumerate` verb (spec:
+ * docs/01-product/litectx-enumerate-spec.md). Returns the generic async slice-source recurse's scan reads: a
+ * `() => Promise<Slice[]>` that pages through EVERY row of `kind` via `enumerate` (exhaustive — the rank-free
+ * read `recall` structurally cannot do) and maps each to `{id: item.path, text: item.body}`. recurse stays
+ * litectx-agnostic: it depends on this source SHAPE, never on litectx (same stance as `remember`'s Store
+ * socket) — an adopter can hand any `() => Promise<Slice[]>` (a DB, a file, an API) instead.
+ *
+ * Only for a corpus ALREADY in litectx for its own reasons — never ingest a fresh corpus just to enumerate it
+ * back (strictly worse than scanning the in-hand array; spec §1.1).
+ * @param {{enumerate: Function}} litectx
+ * @param {{kind?: 'fact'|'episode', pageSize?: number}} [opts]
+ * @returns {() => Promise<Slice[]>}
+ */
+function litectxCorpus(litectx, opts = {}) {
+  const kind = opts.kind === 'episode' ? 'episode' : 'fact'; // enumerate v1 is the memory axis (fact/episode)
+  const pageSize = Number.isInteger(opts.pageSize) && /** @type {number} */ (opts.pageSize) > 0 ? /** @type {number} */ (opts.pageSize) : ENUM_PAGE;
+  return async () => {
+    /** @type {Slice[]} */
+    const out = [];
+    let offset = 0;
+    for (;;) {
+      const page = await litectx.enumerate({ kind, offset, limit: pageSize, body: true });
+      for (const it of page.items) out.push({ id: String(it.path), text: it.body == null ? '' : String(it.body) });
+      if (page.nextOffset == null) break;
+      offset = page.nextOffset;
+    }
+    return out;
+  };
+}
+
 module.exports = {
   scanCount,
   judgeWindow,
@@ -262,6 +298,7 @@ module.exports = {
   normalizeCorpus,
   buildSearchTool,
   buildExactTool,
+  litectxCorpus,
   rotate,
   SCAN_WINDOW,
   SCAN_PASSES,

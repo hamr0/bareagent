@@ -767,8 +767,10 @@ completeness-contract guard.
    `scan` reads the generic array slice-source (`opts.corpus`), NOT litectx — the litectx-resident scan + the
    data-driven *width* count wait on the litectx `enumerate` verb (spec handed off:
    `docs/01-product/litectx-enumerate-spec.md`), which drops in behind the same socket with zero recurse
-   changes. (The per-query "worker offered scan-as-a-tool" face and the litectx-`enumerate` adapter are the
-   remaining step-7 follow-ons.)
+   changes. **Update (litectx 0.26):** the litectx-`enumerate` adapter is now BUILT — `litectxCorpus` (resident
+   scan slice-source) + `mode:'partition'` (data-driven width); `enumerate` was verified against the spec DoD
+   first (`poc/litectx-enumerate-verify.mjs`). The one remaining step-7 follow-on is the per-query "worker
+   offered scan-as-a-tool" face (the deterministic recurse-level modes ship today).
    The step-7 POCs (§9.2 + §9.2.1) are DONE and settled the shape on real data; this step is *wiring*, not
    discovery — **do not re-run pull/flat/search OR the litectx-retrieval study.** Build:
    - **`opts.retrieval: 'scan' | 'search' | 'exact'` — DEFAULT `'scan'`.** The default is the only complete
@@ -845,8 +847,17 @@ deferred — only the calibration details below are.
   (deterministic tier→count, medium/complex/critical→**2/4/6**, §4.3 NB-2); exact
   numbers/target-vs-ceiling open. *Un-defer:* the A/B POC. **Default Family A needs no
   count** (the model spawns adaptively under budget).
-- **Auto / as-needed decomposition count (data-driven *width*)** — *in scope, deferred
-  to step 7.* The fixed 2/4/6 ships now; the **data-driven count** (chop a big input
+- **Auto / as-needed decomposition count (data-driven *width*)** — **✅ RESOLVED + BUILT
+  (litectx 0.26 `enumerate`).** Shipped as `recurse(task, ctx, {mode:'partition', corpus,
+  workerBudget?})`: measures the corpus and partitions it into `width = max(opts.count
+  floor, ⌈size/workerBudget⌉)` parallel scan-workers (capped by the guards + the size),
+  union-counting the per-chunk results; a distinct partition path from `recurseFanout`'s
+  semantic split, under the same `opts.count` FLOOR. `litectxCorpus(litectx,{kind})` is
+  the resident slice-source (paginates `enumerate`); the array source needs no litectx.
+  Pre-wave `recurse_partition` checkpoint + RC-9 hold. litectx's `enumerate` was verified
+  against the spec DoD first (`poc/litectx-enumerate-verify.mjs`). The original deferral
+  text follows for the record. ~~*in scope, deferred
+  to step 7.*~~ The fixed 2/4/6 ships now; the **data-driven count** (chop a big input
   into as-many-slices-as-needed — the paper's chunking, §10F) needs litectx so code can
   measure/slice the *real* data. It sits **downstream of `assessComplexity`** (which
   reads only goal text and can't see the data) and is **capped by the guards**. Both

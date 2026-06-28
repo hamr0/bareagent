@@ -607,8 +607,25 @@ const {
   buildExactTool,
   buildSearchTool,
   classifySystem,
+  litectxCorpus,
   rotate,
 } = require('../src/recurse-retrieval');
+
+// A fake litectx exposing ONLY `enumerate` (the slice-source contract recurse depends on — NOT the whole
+// litectx API), paging a known fact set. Mirrors litectx 0.26's verified shape: items carry `.path` (the id)
+// and `.body`; `nextOffset` is null past the last row; `total` is the full count.
+function fakeLitectx(rows) {
+  const lc = {
+    calls: 0,
+    enumerate({ kind, offset = 0, limit = 100 }) {
+      lc.calls++;
+      const items = rows.slice(offset, offset + limit).map((r) => ({ path: r.id, body: r.text }));
+      const nextOffset = offset + items.length < rows.length ? offset + items.length : null;
+      return Promise.resolve({ items, total: rows.length, offset, nextOffset });
+    },
+  };
+  return lc;
+}
 
 const isClassify = (messages) => systemOf(messages).includes('precise classifier');
 const SCAN_TASK = 'how many of these records match?'; // 'how many' → completeness ask
@@ -804,5 +821,98 @@ describe('recurse-retrieval — helper units (mutation points)', () => {
     assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
     assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
     assert.deepEqual(rotate([], 3), []);
+  });
+});
+
+describe('recurse — litectx-resident scan adapter (litectxCorpus / enumerate, step-7 follow-on)', () => {
+  it('litectxCorpus pages through EVERY row via enumerate and maps path→id, body→text', async () => {
+    const lc = fakeLitectx(corpusOf(20)); // 20 rows
+    const source = litectxCorpus(lc, { kind: 'fact', pageSize: 7 });
+    const slices = await source();
+    assert.equal(slices.length, 20, 'every row materialized across pages (no early stop)');
+    assert.ok(lc.calls >= 3, `paginated (ceil(20/7)=3 calls), got ${lc.calls}`); // mutation: a single-page read would be 1 call → 7 rows
+    assert.deepEqual(slices[4], { id: 'r4', text: 'MATCH item 4' }, 'path→id and body→text mapping');
+  });
+
+  it('recurse scans a function (async) slice-source end-to-end — default scan, no retrieval opt', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const lc = fakeLitectx(corpusOf(20)); // truth = 10 matches (even ids)
+    const out = await recurse('how many records match?', { provider: sp.provider }, { corpus: litectxCorpus(lc), window: 4, passes: 1 });
+    assert.equal(out.receipts.retrieval, 'scan', 'a function slice-source defaults to scan (not Family-A)');
+    assert.equal(out.result.count, 10, 'the resident corpus is materialized then code-counted');
+    assert.equal(out.receipts.scan.scanned, 20);
+  });
+
+  it('a slice-source that throws is an honest incomplete, never a fabricated empty scan', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const badSource = async () => { throw new Error('enumerate blew up'); };
+    const out = await recurse('how many match?', { provider: sp.provider }, { retrieval: 'scan', corpus: badSource });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.result, undefined, 'a failed corpus source must NOT yield count:0');
+    assert.ok(out.missingSlices.some((s) => /corpus source failed/.test(s)));
+  });
+});
+
+describe('recurse — data-driven width partition (mode:"partition", NB-2 / §11)', () => {
+  it('width = ⌈size/workerBudget⌉ partitions the corpus into that many parallel scan-workers; union-counts', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const out = await recurse('how many records match?', { provider: sp.provider },
+      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10, window: 10, passes: 1 });
+    assert.equal(out.receipts.partition.dataWidth, 3, '⌈30/10⌉ = 3');
+    assert.equal(out.receipts.partition.width, 3);
+    assert.equal(out.receipts.spawned.length, 3, '3 parallel chunk-workers ran (RC-10 lineage)');
+    assert.equal(out.result.count, 15, 'the per-chunk scan counts union to the corpus truth (even ids)');
+    assert.equal(out.receipts.retrieval, undefined, 'partition is its own path, not the scan dispatch');
+  });
+
+  it('opts.count is a FLOOR the data may raise but never lower (width = max(floor, dataWidth))', async () => {
+    const sp = scriptedProvider(scanJudge());
+    // small data (dataWidth=1) but floor=4 → width must be 4, not 1
+    const out = await recurse('how many match?', { provider: sp.provider },
+      { mode: 'partition', corpus: corpusOf(10), workerBudget: 100, count: 4, window: 10, passes: 1 });
+    assert.equal(out.receipts.partition.dataWidth, 1, '⌈10/100⌉ = 1');
+    assert.equal(out.receipts.partition.floor, 4);
+    assert.equal(out.receipts.partition.width, 4, 'the floor raised width above the data-derived 1');
+    assert.equal(out.receipts.spawned.length, 4);
+    // mutation check: if width ignored the floor, this would be 1, not 4
+  });
+
+  it('width is capped at the corpus size (no empty workers)', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const out = await recurse('count matches', { provider: sp.provider },
+      { mode: 'partition', corpus: corpusOf(3), workerBudget: 1, count: 10, window: 10, passes: 1 });
+    assert.equal(out.receipts.partition.width, 3, 'max(floor 10, dataWidth 3) = 10, capped at size 3');
+    assert.equal(out.receipts.spawned.length, 3);
+  });
+
+  it('RC-9: a dead chunk → {incomplete, missingSlices}, never a survivor-sum', async () => {
+    const sp = scriptedProvider(scanJudge({ deadWindowAt: 1 })); // one chunk's window faults
+    const out = await recurse('how many match?', { provider: sp.provider },
+      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10, window: 10, passes: 1 });
+    assert.equal(out.incomplete, true, 'one dead chunk ⇒ the whole partition is incomplete');
+    assert.equal(out.result, undefined, 'an incomplete partition must NOT return a clean count');
+    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.length > 0, 'the dead chunk is named in missingSlices');
+    assert.ok(out.best && typeof out.best.count === 'number', 'the partial union is surfaced as best');
+  });
+
+  it('pre-wave checkpoint: a governance Halt on recurse_partition halts BEFORE any worker spends', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const policy = (tool) => { if (tool === 'recurse_partition') throw new HaltError('budget', { rule: 'budget' }); };
+    const out = await recurse('how many match?', { provider: sp.provider, policy },
+      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10 });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.receipts.spawned.length, 0, 'NO chunk-worker ran (burst bounded to zero)');
+    assert.ok(!sp.calls.some((c) => isClassify(c.messages)), 'no scan judge fired before the halt');
+  });
+
+  it('integration: mode:"partition" over a litectx-resident corpus (litectxCorpus + enumerate)', async () => {
+    const sp = scriptedProvider(scanJudge());
+    const lc = fakeLitectx(corpusOf(30));
+    const out = await recurse('how many records match?', { provider: sp.provider },
+      { mode: 'partition', corpus: litectxCorpus(lc), workerBudget: 10, window: 10, passes: 1 });
+    assert.equal(out.receipts.partition.size, 30, 'the resident corpus was measured');
+    assert.equal(out.receipts.partition.width, 3);
+    assert.equal(out.result.count, 15);
   });
 });
