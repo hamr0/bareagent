@@ -606,6 +606,7 @@ const {
   normalizeCorpus,
   buildExactTool,
   buildSearchTool,
+  buildScanTool,
   classifySystem,
   litectxCorpus,
   rotate,
@@ -723,6 +724,51 @@ describe('recurse — retrieval scan (§10 step 7 / §9.2.1)', () => {
   });
 });
 
+describe('recurse — retrieval "tools" mode (per-query scan-as-a-tool, §10 step-7 follow-on)', () => {
+  const toolsLitectx = { recall: async () => ({ fact: [{ path: 'f1', body: 'a fox fact' }], episode: [] }) };
+
+  it('offers scan_count + search_memory + exact_match together, and a "how many" ask is NOT upgraded away', async () => {
+    // The load-bearing distinction from `retrieval:'search'`: a completeness ask does NOT force-upgrade `tools`
+    // to scan (which would strip the search handle and break a MIXED task), because scan_count is ALREADY offered
+    // alongside — the complete path is reachable per sub-query.
+    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'DIRECT' }));
+    const out = await recurse(SCAN_TASK, { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools', corpus: corpusOf(8) });
+    assert.equal(out.receipts.retrieval, 'tools', 'tools mode is NOT force-upgraded to scan on a completeness ask');
+    assert.equal(out.receipts.retrievalUpgraded, undefined, 'no upgrade — scan_count is offered alongside search');
+    assert.ok(
+      sp.calls.some((c) => c.tools.includes('scan_count') && c.tools.includes('search_memory') && c.tools.includes('exact_match')),
+      'all three handle tools are offered together (the per-query face)',
+    );
+  });
+
+  it('the offered scan_count tool runs the full scan and threads a CODE-counted total back to the worker', async () => {
+    // One scripted provider serves both the WORKER (which calls scan_count) and the scan's isolated window JUDGE
+    // (the classify Loop inside scan_count). corpusOf(8) ⇒ 4 even-id MATCH records ⇒ the tool must report count=4.
+    const judge = scanJudge();
+    const sp = scriptedProvider((messages, tools) => {
+      if (isClassify(messages)) return judge(messages); // the scan's per-window judge
+      if (isVerify(messages)) return { text: SATISFIED };
+      const hasScan = (tools || []).some((t) => t.name === 'scan_count');
+      const gotTool = messages.some((m) => m.role === 'tool');
+      if (hasScan && !gotTool) return { toolCalls: [{ id: 'sc1', name: 'scan_count', arguments: { predicate: 'records containing MATCH' } }] };
+      const toolMsg = messages.filter((m) => m.role === 'tool').map((m) => m.content).join(' | ');
+      return { text: `WORKER_REPORT[${toolMsg}]` };
+    });
+    const out = await recurse('answer the question about the records', { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools', corpus: corpusOf(8), window: 4, passes: 1 });
+    assert.ok(sp.calls.some((c) => c.tools.includes('scan_count')), 'the scan_count handle was offered');
+    assert.match(out.result, /count=4 \(scanned 8 records/, 'the tool result carried the CODE-counted truth (4), not a model number');
+    assert.match(out.result, /matching ids: r0, r2, r4, r6/, 'the matching ids are the evidence (RC-10) threaded into the worker answer');
+  });
+
+  it('offers only the handles whose backend is present (no corpus ⇒ no scan/exact; no litectx ⇒ no search)', async () => {
+    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'DIRECT' }));
+    // litectx present, NO corpus → only search_memory is offered (scan/exact need the corpus)
+    await recurse('answer about the records', { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools' });
+    assert.ok(sp.calls.some((c) => c.tools.includes('search_memory')), 'search offered when litectx present');
+    assert.ok(!sp.calls.some((c) => c.tools.includes('scan_count') || c.tools.includes('exact_match')), 'no corpus ⇒ no scan_count / exact_match');
+  });
+});
+
 describe('recurse — retrieval search/exact + completeness guard (§10 step 7)', () => {
   const stubLitectx = { recall: async () => ({ fact: [{ path: 'f1', body: 'a fox fact' }], episode: [] }) };
 
@@ -821,6 +867,39 @@ describe('recurse-retrieval — helper units (mutation points)', () => {
     assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
     assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
     assert.deepEqual(rotate([], 3), []);
+  });
+
+  it('buildScanTool wraps the full scan into a per-query tool: CODE-counted head + matching-id evidence', async () => {
+    const sp = scriptedProvider(scanJudge()); // matches 'MATCH' in shown items
+    const tool = buildScanTool(corpusOf(6), { provider: sp.provider, window: 3, passes: 1 }); // 3 even-id matches
+    const r = await tool.execute({ predicate: 'records containing MATCH' });
+    assert.match(r, /^count=3 \(scanned 6 records, window=3, passes=1\)/, 'the head is the CODE-counted total (not a model number)');
+    assert.match(r, /matching ids: r0, r2, r4/, 'the matching ids are returned as evidence');
+    assert.match(await tool.execute({ predicate: '' }), /requires a non-empty predicate/, 'an empty predicate is rejected, not scanned');
+  });
+
+  it('buildScanTool surfaces a dead window as an explicit FLOOR (RC-9 at the tool boundary), never a clean hole', async () => {
+    const sp = scriptedProvider(scanJudge({ deadWindowAt: 0 })); // the first window faults
+    const tool = buildScanTool(corpusOf(8), { provider: sp.provider, window: 4, passes: 1 });
+    const r = await tool.execute({ predicate: 'records containing MATCH' });
+    assert.match(r, /INCOMPLETE/, 'a dead window is flagged, not hidden');
+    assert.match(r, /floor, not exact/, 'the count is presented as a floor (the worker must not treat it as exact)');
+  });
+
+  it('buildScanTool materializes an async slice-source ONCE (cached) and propagates a HaltError unwrapped', async () => {
+    let sourceCalls = 0;
+    const source = async () => { sourceCalls++; return corpusOf(4); };
+    const ok = scriptedProvider(scanJudge());
+    const tool = buildScanTool(source, { provider: ok.provider, window: 2, passes: 1 });
+    await tool.execute({ predicate: 'records containing MATCH' });
+    await tool.execute({ predicate: 'records containing MATCH' });
+    assert.equal(sourceCalls, 1, 'the async source is resolved once and cached (a re-scan reads the same set — RC-3)');
+
+    // A governance HaltError from the inner scan must PROPAGATE out of execute (the Loop turns it into a clean
+    // halt), never be swallowed into a ToolError (the 0.18.0 tool-execute invariant).
+    const onLlmResult = () => { throw new HaltError('budget exhausted', { rule: 'budget' }); };
+    const halting = buildScanTool(corpusOf(4), { provider: scriptedProvider(scanJudge()).provider, window: 2, passes: 1, onLlmResult });
+    await assert.rejects(() => halting.execute({ predicate: 'records containing MATCH' }), (e) => e instanceof HaltError);
   });
 });
 

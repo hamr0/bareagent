@@ -769,8 +769,16 @@ completeness-contract guard.
    `docs/01-product/litectx-enumerate-spec.md`), which drops in behind the same socket with zero recurse
    changes. **Update (litectx 0.26):** the litectx-`enumerate` adapter is now BUILT — `litectxCorpus` (resident
    scan slice-source) + `mode:'partition'` (data-driven width); `enumerate` was verified against the spec DoD
-   first (`poc/litectx-enumerate-verify.mjs`). The one remaining step-7 follow-on is the per-query "worker
-   offered scan-as-a-tool" face (the deterministic recurse-level modes ship today).
+   first (`poc/litectx-enumerate-verify.mjs`). **Update (per-query face — DONE):** the last step-7 follow-on,
+   the "worker offered scan-as-a-tool" face, is now BUILT — `retrieval:'tools'` offers `scan_count` (the new
+   `buildScanTool`, the complete code-count path) alongside `search_memory`/`exact_match` so a Family-A worker
+   routes PER SUB-QUERY by the tool descriptions (scan says "use for how many / all / count"; search says "never
+   count"). The completeness guard does NOT fire for `'tools'` (scan_count is always offered, so a MIXED task —
+   needle + count — keeps its search tool). Live-validated (`poc/rlm-scan-as-tool.mjs`, claude-haiku-4-5): on a
+   mixed task a real worker called `search_memory` for the needle and `scan_count` for the count, returning the
+   code-known truth — routed by the descriptions alone (neutral system prompt, no hand-steering). RC-9 honesty
+   holds at the tool boundary (a dead window → an explicit "the count is a floor", never a clean hole); a
+   governance `HaltError` from the inner scan propagates unwrapped. +6 mutation-checked tests (71 total).
    The step-7 POCs (§9.2 + §9.2.1) are DONE and settled the shape on real data; this step is *wiring*, not
    discovery — **do not re-run pull/flat/search OR the litectx-retrieval study.** Build:
    - **`opts.retrieval: 'scan' | 'search' | 'exact'` — DEFAULT `'scan'`.** The default is the only complete

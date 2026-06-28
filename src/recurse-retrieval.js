@@ -254,6 +254,69 @@ function buildExactTool(corpus) {
   };
 }
 
+/**
+ * The `scan` handle tool (RC-5 COMPLETE path, the per-query Family-A face of §10 step 7) — the deterministic
+ * counterpart to `search`/`exact` as a TOOL a worker may call per sub-query. Where `search_memory` returns the
+ * top FEW (capped, cannot count) and `exact_match` is a lexical rule, `scan_count` runs the full §9.2.1 scan
+ * (`scanCount`) over EVERY record and returns an exact, CODE-counted total — the only tool that does not silently
+ * undercount. The completeness routing lives in the DESCRIPTIONS, not a code-guard: this tool says "use for how
+ * many / all / count"; `search_memory` says "never use to count" — so a worker picks the complete path per
+ * sub-query (the shape can differ per sub-query with no adopter declaration). RC-9 honesty is preserved at the
+ * tool boundary: a dead window surfaces as an explicit `INCOMPLETE — the count is a floor`, never a clean number
+ * over a hole. A governance `HaltError` from the inner scan PROPAGATES (the Loop turns it into a clean halt —
+ * never wrapped to a `ToolError`).
+ * @param {Slice[] | (() => Promise<Slice[]>)} corpus - The slice-source (array or async, like `litectxCorpus`);
+ *   materialized lazily on first call and cached for the tool's lifetime.
+ * @param {{provider: Provider, window?: number, passes?: number, ctx?: object, onLlmResult?: Function, policy?: Function}} opts
+ * @returns {ToolDef}
+ */
+function buildScanTool(corpus, opts) {
+  /** @type {Slice[]|null} */
+  let resolved = null; // materialize the source once (a re-scan re-reads the same set; RC-3 determinism)
+  return {
+    name: 'scan_count',
+    description:
+      'COUNT or list ALL records matching a predicate, completely. Use this whenever the question is "how many", ' +
+      '"all", "every", "count", or "total" over the records — it examines EVERY record (not just the top matches ' +
+      'like search) and returns an exact, code-counted total plus the matching ids. It is the only complete, ' +
+      'no-undercount path; slower than search, and the right tool when completeness matters.',
+    parameters: {
+      type: 'object',
+      properties: {
+        predicate: { type: 'string', description: 'natural-language description of which records match (what to count)' },
+      },
+      required: ['predicate'],
+    },
+    /** @param {{predicate?: string}} args */
+    execute: async (args) => {
+      const predicate = typeof args?.predicate === 'string' ? args.predicate.trim() : '';
+      if (!predicate) return '[error] scan_count requires a non-empty predicate';
+      if (resolved == null) {
+        const raw = typeof corpus === 'function' ? await corpus() : corpus;
+        resolved = normalizeCorpus(raw);
+      }
+      if (resolved.length === 0) return '[error] scan_count has no records to scan';
+      // HaltError from scanCount is INTENTIONALLY not caught — it must propagate so the Loop exits cleanly
+      // (governance), never be swallowed into a ToolError (the 0.18.0 invariant).
+      const scan = await scanCount(predicate, resolved, {
+        provider: opts.provider,
+        window: opts.window,
+        passes: opts.passes,
+        ctx: opts.ctx,
+        onLlmResult: opts.onLlmResult,
+        policy: opts.policy,
+      });
+      const head = `count=${scan.count} (scanned ${scan.scanned} records, window=${scan.window}, passes=${scan.passes})`;
+      // RC-9 at the tool boundary: a dead window means the count is a FLOOR — say so, never present a hole as exact.
+      const miss = scan.missingSlices.length
+        ? `\nINCOMPLETE — ${scan.missingSlices.length} window(s) failed; the count is a floor, not exact (${scan.missingSlices.join('; ')})`
+        : '';
+      const ids = scan.matchedIds.length ? `\nmatching ids: ${scan.matchedIds.join(', ')}` : '';
+      return head + miss + ids;
+    },
+  };
+}
+
 // Default page size when materializing a litectx-resident corpus. Pages are an internal detail (the union/
 // rotation scan needs the whole array in hand); a larger page = fewer round-trips, the caller's memory budget.
 const ENUM_PAGE = 200;
@@ -298,6 +361,7 @@ module.exports = {
   normalizeCorpus,
   buildSearchTool,
   buildExactTool,
+  buildScanTool,
   litectxCorpus,
   rotate,
   SCAN_WINDOW,

@@ -37,6 +37,7 @@ const {
   normalizeCorpus,
   buildSearchTool,
   buildExactTool,
+  buildScanTool,
 } = require('./recurse-retrieval');
 
 // NB-2 forced-fan-out tier→count map (Family B). CALIBRATED live (poc/rlm-nb2-calibrate.mjs, gpt-4o-mini):
@@ -146,13 +147,18 @@ function forChild(opts) {
  *   workerBudget⌉` (default 100). A calibratable knob (the §9.1 algorithm), not a discovered constant.
  * @property {number} [concurrency] - (Family B) max workers run at once per wave (default 4). The wave
  *   structure is `runPlan`'s; bareguard still bounds the family rate independently.
- * @property {'scan'|'search'|'exact'} [retrieval] - (§10 step 7) the retrieval shape for a task OVER A CORPUS,
- *   routed by question shape (§9.2.1). `'scan'` (the default WHEN `opts.corpus` is present) = process every
- *   slice + LLM-judge + CODE-count — the only COMPLETE path (for "how many / all"). `'search'` = litectx
+ * @property {'scan'|'search'|'exact'|'tools'} [retrieval] - (§10 step 7) the retrieval shape for a task OVER A
+ *   CORPUS, routed by question shape (§9.2.1). `'scan'` (the default WHEN `opts.corpus` is present) = process
+ *   every slice + LLM-judge + CODE-count — the only COMPLETE path (for "how many / all"). `'search'` = litectx
  *   `recall` handle tool offered to the worker (needle; CANNOT count; requires `ctx.litectx`). `'exact'` = a
- *   deterministic code-side AND-term filter tool over `opts.corpus`. The completeness-contract guard upgrades a
- *   `'search'` on a "how many / all" ask to `'scan'` (UPGRADE-only, never a silent downgrade). Absent `corpus`
- *   AND `retrieval`, behaviour is unchanged (Family A / single-shot) — fully backward-compatible.
+ *   deterministic code-side AND-term filter tool over `opts.corpus`. `'tools'` = the PER-QUERY Family-A face:
+ *   offer the worker `scan_count` (over `opts.corpus`) + `search_memory` (when `ctx.litectx`) + `exact_match`
+ *   (array corpus) ALL AT ONCE, and let it pick the shape PER SUB-QUERY — the routing lives in the tool
+ *   descriptions (scan says "use for how many / all / count"; search says "never count"), so a mixed task gets
+ *   needle-search AND complete-count without per-sub-query adopter declaration. The completeness guard upgrades a
+ *   `'search'` on a "how many / all" ask to `'scan'` (UPGRADE-only, never a silent downgrade); it does NOT fire
+ *   for `'tools'` (the complete `scan_count` is always offered there, so a mixed task keeps its search tool).
+ *   Absent `corpus` AND `retrieval`, behaviour is unchanged (Family A / single-shot) — fully backward-compatible.
  * @property {Slice[] | (() => Promise<Slice[]>)} [corpus] - (§10 step 7) the generic slice-source scan/partition
  *   reads: an in-hand `{id, text}[]` array, OR an async `() => Promise<Slice[]>` (e.g. `litectxCorpus(litectx,
  *   {kind})` materializing a litectx-resident corpus via `enumerate`). recurse depends on this SHAPE, never on
@@ -299,13 +305,31 @@ async function recurse(task, ctx = {}, opts = {}) {
   // child's tools ⊆ its parent's (same handle tools, spawn dropped at the cap).
   const system = DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
 
-  // Handle tools (RC-5 pull-default) = caller-supplied `opts.tools` + the retrieval handle for `search`/`exact`
-  // (offered so the Family-A worker pulls context per sub-query, never the whole corpus). `search` needs
+  // Handle tools (RC-5 pull-default) = caller-supplied `opts.tools` + the retrieval handle for `search`/`exact`/
+  // `tools` (offered so the Family-A worker pulls context per sub-query, never the whole corpus). `search` needs
   // `ctx.litectx`; `exact` is a code-side filter over the corpus. A mode whose backend is absent contributes
   // no tool (the worker just answers directly) rather than erroring.
   const retrievalTools = [];
   if (retrieval === 'search' && ctx.litectx) retrievalTools.push(buildSearchTool(ctx.litectx, {}));
   if (retrieval === 'exact') retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
+  // `tools` (§10 step-7 follow-on, per-query face) — offer ALL applicable handles at once; the worker routes by
+  // their descriptions per sub-query. `scan_count` is the COMPLETE path (so the completeness guard need not fire
+  // for `tools`); `search_memory`/`exact_match` are the cheap needle/rule paths. Each is offered only when its
+  // backend is present (a corpus for scan/exact, `ctx.litectx` for search), else simply absent.
+  if (retrieval === 'tools') {
+    if (hasCorpus) {
+      retrievalTools.push(buildScanTool(/** @type {Slice[] | (() => Promise<Slice[]>)} */ (opts.corpus), {
+        provider,
+        window: opts.window,
+        passes: opts.passes,
+        ctx: { ...ctx, depth },
+        onLlmResult: ctx.onLlmResult,
+        policy: ctx.policy,
+      }));
+    }
+    if (ctx.litectx) retrievalTools.push(buildSearchTool(ctx.litectx, {}));
+    if (Array.isArray(opts.corpus)) retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
+  }
   const handleTools = [...(Array.isArray(opts.tools) ? opts.tools : []), ...retrievalTools];
   // NB-3: collect each child's declared RESULT value (copy-on-return: the value, never its transcript) so the
   // reducer can aggregate them. Step-3's seam handed the receipts only, so a code-reduce could not see what to
