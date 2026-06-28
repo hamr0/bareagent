@@ -62,7 +62,7 @@ and show me the wiring code.
 
 ## What's inside
 
-Every piece works alone — take what you need, ignore the rest. Two axes: **Act** (get work done) and **Verify** (check it, keep context clean), with **one gate** over both.
+Every piece works alone — take what you need, ignore the rest. Two axes: **Act** (get work done) and **Verify** (check it, keep context clean), with **one gate** over both — plus **`recurse`**, an Act-side primitive big enough to earn its own spotlight below.
 
 ### Act — get work done
 
