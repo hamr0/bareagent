@@ -72,6 +72,7 @@ Every piece works alone — take what you need, ignore the rest. Two axes: **Act
 | **Planner** | Break a goal into a step DAG. Cached |
 | **assessComplexity** | Rate a goal `simple`→`critical` from its text — no LLM. Gates whether to plan |
 | **runPlan** | Run plan steps in parallel waves. Dependency-aware, per-step retry |
+| **recurse** | RLM decompose→fan-out→verify→synthesize in one call. Model-driven (`spawn_child`) or forced fan-out (`count`); `retrieval:'scan'` answers "how many / all" over a corpus by scanning every slice and code-counting — never a faked pass (honest `{incomplete, missingSlices}`) |
 | **Memory** | Persist + recall across sessions via a swappable `Store` — zero-dep JSON, SQLite, or [litectx](https://npmjs.com/package/litectx) in a one-line swap |
 | **StateMachine** | Task lifecycle: `pending → running → done / failed / waiting / cancelled` |
 | **Scheduler** | Cron or relative triggers. Jobs survive restarts |
