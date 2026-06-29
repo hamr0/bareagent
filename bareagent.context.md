@@ -668,6 +668,41 @@ const out = await recurse('Audit auth.js, billing.js, gateway.js for authz bugs'
 
 **What a delegated child inherits (important — the setpoint is the TOP node's job):** when a worker delegates with `spawn_child`, the child runs a **fresh `recurse`** that inherits `tools`, `synthesize`, `maxDepth`, and `persona` — but the parent's **`contract`/`evaluate` are stripped** (and the forced `count`/`mode` + the corpus `retrieval` knobs). A slice is not graded against the *whole*-task definition-of-done (that verdict is the top node's, and a slice satisfying the whole DoD is the wrong question); only the top `recurse` verifies the synthesized result. The non-overridable `critical → force-verify` safety floor still fires per node (it keys on the task text, not the contract). So: set `contract`/`evaluate` once at the top; they do not — and should not — re-run per intermediate node.
 
+## Wiring with Evaluator + refine (output-side verification)
+
+`Evaluator` is the output-side judge (the mirror of `Planner`): it grades a result against a goal and returns a tri-state `Verdict`. `refine` is the bounded generate → evaluate → regenerate loop. Both compose *around* a Loop — neither lives inside `loop.js`.
+
+```javascript
+const { Evaluator, refine } = require('bare-agent');
+
+const evaluator = new Evaluator({ provider });   // provider REQUIRED for rubric/agentic; predicate needs none
+
+// Three criteria types — pass EXACTLY ONE:
+const v1 = await evaluator.evaluate(goal, result, { predicate: (r) => r.includes('DONE') });       // deterministic, 0 tokens
+const v2 = await evaluator.evaluate(goal, result, { rubric: 'Cites a source for every claim.' });  // isolated adversarial LLM grader
+const v3 = await evaluator.evaluate(goal, url,    { agentic: 'Open the page, click Submit, check the console for errors.' }); // tool-running critic that EXERCISES the artifact
+
+// Verdict: { status: 'satisfied' | 'needs_revision' | 'failed', pass, score, critique, suggestions }
+//   pass = (status === 'satisfied');  needs_revision is retryable;  failed is terminal (stop spending).
+if (!v2.pass) console.log(v2.critique, v2.suggestions);
+```
+
+Key invariants:
+- The **rubric path runs an isolated adversarial grader** — a separate context window with a harsh, independent prompt, never the generator's transcript. That isolation (not a feedback knob) is what defeats the self-evaluation trap; the grader treats the RESULT as untrusted DATA (judge prompt-injection defence).
+- **`agentic`** (the third type) spins up a fresh Loop with scoped tools (set on the Evaluator, or per-call `opts.tools`) that **exercises** the live artifact — clicks, reads console/network — rather than reading text. Each critic round forwards to `onLlmResult`; a governance `HaltError` re-throws clean.
+- **`contract`** (a definition of done) is graded against instead of the loose goal: `evaluate(goal, result, { rubric, contract })`. Judge tokens forward to the gate via `onLlmResult` (`kind:'evaluate'`) so verification spend is visible to the budget.
+
+**`refine`** drives a caller-supplied `attempt`/`evaluate` until a satisfied verdict, a terminal `failed`, or `maxIterations` (the real bound is bareguard maxTurns/budget). It threads the latest `critique` into the next attempt (fresh-feedback, not anchoring on a failed answer) and a shared `contract` to both sides.
+
+```javascript
+const { result, verdict, iterations, history } = await refine({
+  attempt:  ({ critique, contract }) => generate(prompt, { critique, contract }), // critique = null on the first pass
+  evaluate: (result, { contract })   => evaluator.evaluate(goal, result, { rubric, contract }),
+  contract: 'No TODOs; every public fn has a JSDoc; tests pass.',
+  maxIterations: 3,   // hard cap; the REAL bound is the gate
+});
+```
+
 ## Provider options
 
 ```javascript
@@ -676,6 +711,9 @@ new OpenAI({ apiKey, model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' 
 
 // Anthropic
 new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
+
+// Gemini (native generateContent — needed for prompt-cache token tiers; the OpenAI-compat endpoint drops them)
+new Gemini({ apiKey, model: 'gemini-2.5-flash', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' })
 
 // Ollama (local, no key needed)
 new Ollama({ model: 'llama3.2', url: 'http://localhost:11434' })
