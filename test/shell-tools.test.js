@@ -31,11 +31,11 @@ describe('createShellTools', () => {
   });
 
   describe('shape', () => {
-    it('returns four tools with correct names', () => {
+    it('returns five tools with correct names', () => {
       const { tools } = createShellTools();
-      assert.equal(tools.length, 4);
+      assert.equal(tools.length, 5);
       const names = tools.map(t => t.name).sort();
-      assert.deepEqual(names, ['shell_exec', 'shell_grep', 'shell_read', 'shell_run']);
+      assert.deepEqual(names, ['shell_exec', 'shell_grep', 'shell_read', 'shell_run', 'shell_write']);
       for (const t of tools) {
         assert.equal(typeof t.execute, 'function');
         assert.equal(typeof t.description, 'string');
@@ -279,6 +279,71 @@ describe('createShellTools', () => {
       });
       assert.match(r.stderr, /command not found/);
       assert.equal(r.code, null);
+    });
+  });
+
+  describe('shell_write (no shell)', () => {
+    it('writes content to a new file, creating parent dirs', async () => {
+      const { tools } = createShellTools();
+      const target = path.join(TMP, 'written', 'deep', 'new.txt');
+      const r = await findTool(tools, 'shell_write').execute({ path: target, content: 'fresh content' });
+      assert.match(r, /wrote 13 bytes/);
+      assert.equal(fs.readFileSync(target, 'utf8'), 'fresh content');
+    });
+
+    it('overwrites by default and appends with append:true', async () => {
+      const { tools } = createShellTools();
+      const write = findTool(tools, 'shell_write');
+      const target = path.join(TMP, 'over.txt');
+      await write.execute({ path: target, content: 'one' });
+      await write.execute({ path: target, content: 'two' }); // overwrite
+      assert.equal(fs.readFileSync(target, 'utf8'), 'two');
+      const r = await write.execute({ path: target, content: '-three', append: true });
+      assert.match(r, /appended 6 bytes/);
+      assert.equal(fs.readFileSync(target, 'utf8'), 'two-three');
+    });
+
+    it('rejects an empty path and an over-cap write', async () => {
+      const { tools } = createShellTools();
+      const write = findTool(tools, 'shell_write');
+      await assert.rejects(() => write.execute({ path: '', content: 'x' }), /non-empty "path"/);
+      await assert.rejects(
+        () => write.execute({ path: path.join(TMP, 'overcap.txt'), content: 'abcdef', maxBytes: 3 }),
+        /over the 3-byte cap/,
+      );
+      assert.equal(fs.existsSync(path.join(TMP, 'overcap.txt')), false, 'an over-cap write must not touch disk');
+    });
+
+    // BA-2 gating contract (mirrors poc/ba2-write-tool-gate.mjs as a regression): translated to {type:'write'},
+    // shell_write is gated by fs.writeScope — in-scope lands, out-of-scope is denied BEFORE execute (no file).
+    it('is gated by bareguard fs.writeScope when translated to {type:"write"} (in-scope lands, out-of-scope denied)', async () => {
+      const scope = fs.mkdtempSync(path.join(os.tmpdir(), 'ba2-scope-'));
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ba2-out-'));
+      const inPath = path.join(scope, 'ok.txt');
+      const outPath = path.join(outside, 'leak.txt');
+      const provider = {
+        round: 0,
+        async generate() {
+          this.round++;
+          if (this.round === 1) return { text: '', toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: inPath, content: 'OK' } }], usage: {} };
+          if (this.round === 2) return { text: '', toolCalls: [{ id: 'w2', name: 'shell_write', arguments: { path: outPath, content: 'LEAK' } }], usage: {} };
+          return { text: 'done', toolCalls: [], usage: {} };
+        },
+      };
+      const { tools } = createShellTools();
+      const gate = new Gate({ fs: { writeScope: [scope] }, humanChannel: async () => ({ decision: 'deny' }) });
+      await gate.init?.();
+      const { policy, onToolResult } = wireGate(gate, {
+        actionTranslator: (name, args, ctx) =>
+          name === 'shell_write' ? { type: 'write', path: args?.path, args, _ctx: ctx ?? null } : { type: name, args, _ctx: ctx ?? null },
+      });
+      const loop = new Loop({ provider, policy, onToolResult, throwOnError: false });
+      await loop.run([{ role: 'user', content: 'write both' }], tools);
+
+      assert.equal(fs.readFileSync(inPath, 'utf8'), 'OK', 'the in-scope write must land');
+      assert.equal(fs.existsSync(outPath), false, 'the out-of-scope write must be denied before execute (no file)');
+      fs.rmSync(scope, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
     });
   });
 

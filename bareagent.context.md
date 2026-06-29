@@ -62,7 +62,7 @@ Eight entry points:
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
 | Control Android/iOS devices | createMobileTools + Loop |
 | Control mobile (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
-| Read files, list directories, run shell commands, grep | createShellTools + Loop({ policy }) |
+| Read/write files, list directories, run shell commands, grep | createShellTools (shell_read/grep/**write**/run/exec) + Loop({ policy }) — gate `shell_write` via `fs.writeScope` with an actionTranslator |
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
 | Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
 | Gate every tool call with one policy hook | `wireGate(gate).policy` → `Loop({ policy })` |
@@ -384,15 +384,16 @@ Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot cons
 ```javascript
 const { policy, onToolResult } = wireGate(gate, {
   actionTranslator: (toolName, args, ctx) => {
-    if (toolName === 'shell_exec') return { type: 'bash', args, _ctx: ctx };   // bareguard 0.4.1+ reads args.command
-    if (toolName === 'shell_run')  return { type: 'bash', args, _ctx: ctx };   // reads args.argv → joins to cmd
-    if (toolName === 'shell_read') return { type: 'read', args, _ctx: ctx };   // reads args.path
+    if (toolName === 'shell_exec')  return { type: 'bash', args, _ctx: ctx };   // bareguard 0.4.1+ reads args.command
+    if (toolName === 'shell_run')   return { type: 'bash', args, _ctx: ctx };   // reads args.argv → joins to cmd
+    if (toolName === 'shell_read')  return { type: 'read',  args, _ctx: ctx };  // reads args.path
+    if (toolName === 'shell_write') return { type: 'write', args, _ctx: ctx };  // gate by fs.writeScope (reads args.path)
     return { type: toolName, args, _ctx: ctx };          // fall through to defaultActionTranslator
   },
 });
 ```
 
-`onLlmResult` always uses `{type:'llm'}` regardless of the translator (so budget rules match without translator collusion). `defaultActionTranslator` is exported for composition.
+`onLlmResult` always uses `{type:'llm'}` regardless of the translator (so budget rules match without translator collusion). `defaultActionTranslator` is exported for composition. **A tool is NOT auto-gated by the fs/bash primitives without this translator** — e.g. `shell_write` runs the write but `fs.writeScope` only enforces once `shell_write` → `{type:'write', path}`; the default `{type:'shell_write'}` matches `tools.allow/denylist` only. Verified live: with the translator, `gate.check` ALLOWs `shell_run ["ls","/tmp"]` and DENYs `shell_read /etc/passwd` (`[deny: fs.readScope]`), and an out-of-scope `shell_write` is denied **before** `execute` (nothing touches disk).
 
 **Bounding tool rounds — use `limits.maxToolRounds` (bareguard 0.4.2+), not doubled `maxTurns`.** `limits.maxTurns` ticks on every `gate.record` (LLM + tool), so an "N LLM-tool round" cap is `maxTurns: N*2`. `limits.maxToolRounds: N` ticks only on non-`llm` records and gives the natural semantic — pairs cleanly with our split `onLlmResult` / `onToolResult` (the LLM side writes `{type:'llm'}` records which the counter skips). Halt severity, same shape as `maxTurns`, rebuilt from audit on cold-start.
 
@@ -628,6 +629,8 @@ if (out.incomplete) {
 }
 console.log(out.receipts.spawned.length);          // RC-10 audit tree: parent→child lineage, per-node tokens/verdict
 ```
+
+> **Audit-safe by construction (since Unreleased).** You pass `provider` on `ctx`, and a wired gate records the per-run ctx VERBATIM as `action._ctx`. `recurse()` **strips the live provider** (and thus its `apiKey`) from the ctx at every governance boundary before it reaches `gate.record`/`gate.check`, so the key never lands in the audit JSONL — only the provider *name* does (identity, not secret). The provider still reaches the worker (it runs); only the audited copy is cleaned. (bareguard's own secret-redaction is opt-in and value/pattern-based, so do not rely on it to catch a key you put on `ctx` — but DO scrub any *other* secret-bearing field you thread on `ctx` yourself, or configure `gate` `secrets`.)
 
 **Control families (how the tree is shaped):**
 

@@ -3,13 +3,30 @@
 /**
  * Pure-Node shell tools — cross-platform (linux, macOS, Windows), no external binaries.
  *
- * Three primitives:
+ * Primitives:
  *   shell_read  — read a file or list a directory
  *   shell_grep  — regex search across files (JS regex, no grep/rg/findstr)
- *   shell_exec  — run a shell command with timeout + max buffer
+ *   shell_write — write/overwrite (or append to) a file, creating parent dirs (no shell)
+ *   shell_run   — run a command via an argv array (no shell, allowlist-friendly on argv[0])
+ *   shell_exec  — run a raw shell command with timeout + max buffer
  *
- * All three run through Loop's policy hook when wired via `new Loop({ policy })`.
+ * All run through Loop's policy hook when wired via `new Loop({ policy })`.
  * Library ships zero baked-in allowlist — gating is the agent author's responsibility.
+ *
+ * GATING WITH bareguard's fs/bash PRIMITIVES: these tools carry tool-named actions by default
+ * (`{ type:'shell_write' }`), which match `tools.allowlist`/`tools.denylist` but do NOT activate the
+ * `fs`/`bash` primitives — those need `action.type ∈ {read,write,edit,bash}` with `action.path`/`action.cmd`.
+ * To gate `shell_write` by `fs.writeScope` (so a write outside the allowed root is denied BEFORE it touches
+ * disk), translate it at the gate — see `examples/with-bareguard.mjs` for the `wireGate(gate, { actionTranslator })`
+ * mapping (`shell_write` → `{ type:'write', path }`, `shell_read`/`shell_grep` → `{ type:'read', path }`,
+ * `shell_run`/`shell_exec` → `{ type:'bash', cmd }`). A write tool alone is NOT auto-gated — validated by
+ * poc/ba2-write-tool-gate.mjs (without the translator the out-of-scope write leaks).
+ *
+ * CAVEAT (applies to read AND write scopes): bareguard's `fs` primitive matches paths LEXICALLY (no
+ * `realpath`/symlink resolution), so a symlink that lives INSIDE the allowed scope but points OUTSIDE it is
+ * not caught — a `shell_write` through such a link can escape the scope. If untrusted input can create
+ * symlinks under your scope, canonicalize (`fs.realpath`) before the gate, or keep the scope on a root with
+ * no attacker-writable symlinks. This is bareguard's documented lexical-match contract, not specific to this tool.
  */
 
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -20,6 +37,7 @@ const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;       // 256 KB
+const DEFAULT_WRITE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB — a sanity ceiling on a single write (LLM-authored)
 const DEFAULT_GREP_MAX_MATCHES = 200;
 const DEFAULT_GREP_TIMEOUT_MS = 5_000;           // hard ceiling on a single grep — bounds ReDoS
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
@@ -65,6 +83,31 @@ async function readEntry(rawPath, maxBytes) {
     }
   }
   return fs.readFile(resolved, 'utf8');
+}
+
+/**
+ * Write text to a file (the BA-2 first-class write primitive — a coding agent must edit files, and routing
+ * writes through the shell is impractical: redirection is a shell metachar that an argv/bash allowlist denies).
+ * Creates parent directories. Caps size as a sanity ceiling. NO shell — so it gates cleanly through bareguard's
+ * fs primitive when the adopter translates `shell_write` → `{ type:'write', path }` (see createShellTools doc).
+ * @param {{path: string, content?: string, append?: boolean, maxBytes?: number}} args
+ * @returns {Promise<string>}
+ */
+async function writeFile({ path: rawPath, content = '', append = false, maxBytes }) {
+  if (typeof rawPath !== 'string' || rawPath.length === 0) {
+    throw new Error('shell_write requires a non-empty "path" string');
+  }
+  const text = content == null ? '' : String(content);
+  const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > cap) {
+    throw new Error(`shell_write content is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
+  }
+  const resolved = path.resolve(expandHome(rawPath));
+  await fs.mkdir(path.dirname(resolved), { recursive: true });
+  if (append) await fs.appendFile(resolved, text, 'utf8');
+  else await fs.writeFile(resolved, text, 'utf8');
+  return `${append ? 'appended' : 'wrote'} ${bytes} bytes to ${resolved}`;
 }
 
 // Probe the first 1KB for NUL bytes to skip binary files in grep walks.
@@ -374,6 +417,23 @@ function createShellTools() {
       execute: async (/** @type {GrepArgs} */ args) => grepPath(args),
     },
     {
+      name: 'shell_write',
+      description: 'Write text to a file (overwriting it), creating parent directories as needed. No shell — so an ' +
+        'fs.writeScope policy can gate it by path (translate to {type:"write"}). Use append:true to add to the end ' +
+        'instead of overwriting. Returns a "wrote N bytes to <path>" summary. Max 5MB per write by default.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Target file path. ~ expands to home. Parent dirs are created.' },
+          content: { type: 'string', description: 'The full text to write (UTF-8).' },
+          append: { type: 'boolean', description: 'Append to the file instead of overwriting it (default false).' },
+          maxBytes: { type: 'integer', description: 'Reject a write larger than this many bytes (default 5242880).' },
+        },
+        required: ['path', 'content'],
+      },
+      execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) => writeFile(args),
+    },
+    {
       name: 'shell_run',
       description: 'Run a command with an argv array (no shell, no interpolation) and return {stdout, stderr, code, timedOut}. Use this when a policy allowlist needs to match on argv[0] — no shell metacharacter injection is possible. Default timeout 30s, max output 1MB.',
       parameters: {
@@ -413,4 +473,4 @@ function createShellTools() {
   return { tools };
 }
 
-module.exports = { createShellTools, _grepCore };
+module.exports = { createShellTools, _grepCore, _writeFile: writeFile };

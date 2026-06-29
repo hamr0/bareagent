@@ -1043,3 +1043,55 @@ describe('recurse — data-driven width partition (mode:"partition", NB-2 / §11
     assert.equal(out.result.count, 15);
   });
 });
+
+// F16 / BA-1 (relayfact probe-03) — the live `provider` (with `apiKey`) must NOT reach the audited ctx. recurse
+// threads its wiring blob (including the provider) down the tree, and a wired gate records the run ctx VERBATIM
+// as `action._ctx`; without scrubbing, `_ctx.provider.apiKey` lands in the plaintext audit. These prove the
+// provider is stripped from every ctx that becomes a governance `_ctx` (worker run, direct policy checkpoints),
+// while STILL reaching the worker so it runs. Mutation: drop auditSafeCtx and the secret reappears below.
+describe('recurse — no API key leaks into the audited ctx (F16 / BA-1)', () => {
+  const SECRET = 'sk-ant-api03-LEAKME-secret-key';
+  const hasSecret = (v) => JSON.stringify(v ?? null).includes(SECRET);
+  const carriesProvider = (c) => !!(c && typeof c === 'object' && c.provider);
+
+  it('Family-A: the provider/apiKey never reaches onLlmResult.ctx or policy.ctx — but the worker still runs', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    sp.provider.apiKey = SECRET; // a real provider carries its key on the instance
+    const llmCtxs = [];
+    const policyCtxs = [];
+    const out = await recurse(
+      COMPLEX_TASK,
+      {
+        provider: sp.provider,
+        onLlmResult: (e) => { llmCtxs.push(e.ctx); },
+        policy: (_tool, _args, ctx) => { policyCtxs.push(ctx); return true; },
+      },
+    );
+    // the worker still ran (provider reached the Loop constructor): a real synthesized answer came back
+    assert.ok(typeof out.result === 'string' && out.result.startsWith('PARENT_SYNTHESIS'), 'worker produced a result');
+    // the gate saw at least one LLM round AND the spawn_child policy check — the two leak vectors
+    assert.ok(llmCtxs.length > 0, 'onLlmResult fired (the confirmed probe-03 {type:llm} leak vector)');
+    assert.ok(policyCtxs.length > 0, 'policy fired for the worker tool call');
+    for (const c of llmCtxs) {
+      assert.equal(carriesProvider(c), false, 'onLlmResult.ctx must not carry the live provider');
+      assert.equal(hasSecret(c), false, 'onLlmResult.ctx must not contain the apiKey');
+      assert.equal(c.depth >= 0, true, 'depth is still threaded for the gate');
+    }
+    for (const c of policyCtxs) {
+      assert.equal(carriesProvider(c), false, 'policy ctx must not carry the live provider');
+      assert.equal(hasSecret(c), false, 'policy ctx must not contain the apiKey');
+    }
+  });
+
+  it('Family-B fan-out: the recurse_fanout pre-wave checkpoint ctx is scrubbed of the provider/apiKey', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    sp.provider.apiKey = SECRET;
+    let fanoutCtx;
+    const policy = (tool, _args, ctx) => { if (tool === 'recurse_fanout') fanoutCtx = ctx; return true; };
+    await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 2 });
+    assert.ok(fanoutCtx, 'the recurse_fanout checkpoint fired');
+    assert.equal(carriesProvider(fanoutCtx), false, 'checkpoint ctx must not carry the live provider');
+    assert.equal(hasSecret(fanoutCtx), false, 'checkpoint ctx must not contain the apiKey');
+    assert.equal(fanoutCtx.depth >= 0, true, 'depth is still threaded for the gate');
+  });
+});

@@ -1136,6 +1136,42 @@ two doc + one real API gap:
   seam, not a doc fix — and a hard-coded internal (the worker system prompt) is exactly where the next
   adopter collides; expose it as an augmenting, carry-down seam, never a replace.
 
+**Found POST-RELEASE (relayfact adopter round 2, 2026-06-29) → fixed under `[Unreleased]`.** Six asks
+(`docs/00-context/UPSTREAM-FIXES.md` BA-1..BA-6); one 🔴 security blocker + one completeness gap + four
+doc/example fixes. All validated with run-it-don't-assert POCs (no handwaving):
+- **(🔴 security — BA-1/F16) `recurse()` leaked the API key into the bareguard audit.** A wired gate
+  records the per-run ctx VERBATIM as `action._ctx` (`defaultActionTranslator`), and `recurse()` threaded
+  its wiring blob — which holds the **live `provider` instance (with `apiKey`)** — as that ctx, so every
+  `{type:'llm'}` audit record (plus the `recurse_fanout`/`recurse_partition` checkpoints and each `scan`
+  round) wrote the raw `sk-…` key to disk in plaintext. **Reproduced on-disk** (`poc/ba1-audit-leak-ondisk.mjs`:
+  a real `Gate` with `audit:{path}`, a provider carrying a fake key, recurse run, then grep the JSONL —
+  the record showed `_ctx.provider.apiKey` verbatim, matching relayfact probe-03). **Fixed with
+  `auditSafeCtx(ctx, overrides)`** — strips the provider from the ctx at every governance boundary (worker
+  `Loop.run`, both pre-wave `ctx.policy` checkpoints, `scanCount` ×2). The provider still rides the
+  recurse-internal ctx (children need it for self-calls) and is a Loop constructor option; **`Loop.run`
+  never reads `ctx.provider`**, so stripping the run-ctx copy is invisible to the worker. The provider
+  *name* still reaches the audit (identity, not secret). Mutation-proven: neuter the scrub → the key
+  re-appears on disk (POC exit 1) at both the Family-A worker and the Family-B checkpoint. **Lesson:** any
+  primitive that threads a wiring blob as the governance ctx must scrub live handles/secrets — the audit
+  serializes whatever it's handed. (bareguard's own redaction, BG-1, is opt-in value/pattern-based, NOT
+  auto-by-key-name — so the bareagent-side scrub is the real fix, not a backstop to rely on.)
+- **(completeness — BA-2/F6+F8) no file-write tool.** `createShellTools()` shipped only read/grep/run/exec;
+  a coding agent must edit files, and routing writes through the shell is impractical (redirection is a
+  shell metachar an argv/bash allowlist force-denies). **Added `shell_write`** (no-shell write/append,
+  parent-dir create, 5 MB cap). It gates cleanly via `fs.writeScope` when translated to `{type:'write'}` —
+  proven on-disk (`poc/ba2-write-tool-gate.mjs`: in-scope lands, out-of-scope denied before execute;
+  able-to-fail — drop the translator and the out-of-scope write leaks).
+- **(doc/examples — BA-3/4/6) dead/stale examples.** `with-bareguard.mjs` set `bash.allow`/`fs.readScope`
+  but wired the default translator (those primitives never fired) + used deprecated `wrapTools` + stale
+  `result.cost` → rewritten with a real `actionTranslator` (proven: `gate.check` ALLOWs `ls /tmp`, DENYs
+  `/etc/passwd` via `[deny: fs.readScope]`) + `onToolResult`/`onLlmResult` + `result.metrics.costUsd`.
+  `litectx-as-store.mjs` `new LiteCtx({dbPath})` → `{root}` (≥0.21 throws otherwise; now runs end-to-end).
+  `humanChannel` `deny`≠stop vs `terminate`=clean-halt documented.
+- **(works-as-intended — BA-5) recurse worker observability** is `ctx.stream` (`loop:tool_call` /
+  `loop:tool_result`), not a `onToolCall` Loop callback — documented on `RecurseCtx.stream`.
+- **Docs shipped WITH the code:** CHANGELOG `[Unreleased]` + README + this PRD + `bareagent.context.md`
+  in the same change (the round-1 lesson: the integration guide is a shipped surface too).
+
 ---
 
 ## Source & cross-refs

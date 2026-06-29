@@ -63,16 +63,23 @@ async function main() {
   } catch {
     console.log('\n[litectx] not installed — the swap is one line:');
     console.log("    import { LiteCtx, liteCtxAsStore } from 'litectx';");
-    console.log('    const lc = new LiteCtx({ dbPath: \'./agent.db\' }); await lc.ready();');
+    console.log('    const lc = new LiteCtx({ root: \'./agent-ctx\' }); await lc.ready();');
     console.log('    const memory = new Memory({ store: liteCtxAsStore(lc) });  // ← only this line changes');
     console.log('\n  Install it (`npm install litectx`) to run the litectx half of this example.');
     return;
   }
 
-  const lc = new LiteCtx({ dbPath: join(tmpdir(), `litectx-as-store-${process.pid}.db`) });
+  // litectx >= 0.21 takes a `root` DIRECTORY (it manages its own files under it), not a `dbPath` file —
+  // passing `{ dbPath }` throws on construction. Use a fresh temp dir per run.
+  const root = mkdtempSync(join(tmpdir(), `litectx-as-store-${process.pid}-`));
+  const lc = new LiteCtx({ root });
   if (typeof lc.ready === 'function') await lc.ready();
-  await hostWorkflow(new Memory({ store: liteCtxAsStore(lc) }), 'litectx (ranked, graph-aware)');
-  if (typeof lc.close === 'function') lc.close();
+  try {
+    await hostWorkflow(new Memory({ store: liteCtxAsStore(lc) }), 'litectx (ranked, graph-aware)');
+  } finally {
+    if (typeof lc.close === 'function') lc.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

@@ -112,6 +112,30 @@ function forChild(opts) {
 }
 
 /**
+ * The ctx handed to a worker `Loop.run({ ctx })` or to a direct `ctx.policy(...)` checkpoint — i.e. the ctx
+ * that a wired gate records VERBATIM into the audit as `action._ctx` (see `defaultActionTranslator` in
+ * src/bareguard-adapter.js). It STRIPS the live `provider` instance, because that object carries the API key
+ * (`provider.apiKey`) and bareguard serializes `_ctx` to disk — so an un-stripped ctx writes the raw
+ * `sk-…` key into the plaintext audit log (F16/BA-1, confirmed by relayfact probe-03).
+ *
+ * Only the AUDITED copy is cleaned: the provider still rides in the recurse-internal ctx that is threaded into
+ * each child `recurse()` self-call (children need `ctx.provider` to run), and the worker Loop already receives
+ * the provider as a constructor option — `Loop.run` never reads `ctx.provider`. The provider's IDENTITY is not
+ * lost from the audit either: the meter records the provider NAME on the `{type:'llm'}` action's args.
+ *
+ * NB: this strips the provider only — the leak that was grounded. A caller that threads its OWN secret-bearing
+ * fields onto ctx is backstopped by bareguard-side redaction (BG-1), the defense-in-depth pair to this fix.
+ * @param {RecurseCtx} ctx
+ * @param {object} [overrides] - extra fields to set on the audited copy (e.g. `{ depth }`).
+ * @returns {object}
+ */
+function auditSafeCtx(ctx, overrides = {}) {
+  const safe = { ...(ctx || {}) };
+  delete (/** @type {any} */ (safe)).provider;
+  return { ...safe, ...overrides };
+}
+
+/**
  * @typedef {object} RecurseCtx
  * The per-run runtime blob — the wiring, threaded down the whole recursion tree (and forwarded to the worker
  * Loop's `policy`/governance via `options.ctx`). Distinct from `opts` (the policy knobs).
@@ -122,7 +146,12 @@ function forChild(opts) {
  *   and worker tokens are all real spend (BA1: never invisible).
  * @property {number} [depth] - The current recursion depth (0 at the top). Incremented on each self-call;
  *   threaded into `policy`. Callers normally omit it (defaults to 0).
- * @property {object} [stream] - Optional event stream forwarded to each worker Loop (receipts substrate).
+ * @property {object} [stream] - Optional event stream forwarded to each worker Loop (receipts substrate). This
+ *   is the observability channel for worker activity (relayfact F15/BA-5): recurse intentionally does NOT take
+ *   `onToolCall`/`onText` Loop callbacks — instead every worker Loop emits `loop:tool_call` / `loop:tool_result`
+ *   (and `loop:text`/`loop:done`) to THIS stream (loop.js), so a consumer observes worker tool calls by reading
+ *   the stream, not via per-call callbacks. The full audit trail is stream + the RC-10 receipts tree + (if a
+ *   gate is wired) the bareguard audit.
  * @property {{recall: Function}} [litectx] - Optional litectx handle (RC-5, §10 step 7). Backs the `search`
  *   retrieval mode (`recall`). NOT used by `scan` — litectx has no exhaustive enumerate verb today; scan reads
  *   the generic array slice-source `opts.corpus` instead (the litectx-resident scan case waits on the litectx
@@ -363,7 +392,7 @@ async function recurse(task, ctx = {}, opts = {}) {
         provider,
         window: opts.window,
         passes: opts.passes,
-        ctx: { ...ctx, depth },
+        ctx: auditSafeCtx(ctx, { depth }), // scan's Loop run ctx reaches the gate — strip provider (F16/BA-1)
         onLlmResult: ctx.onLlmResult,
         policy: ctx.policy,
       }));
@@ -394,7 +423,10 @@ async function recurse(task, ctx = {}, opts = {}) {
   const out = await loop.run(
     [{ role: 'user', content: task }],
     tools,
-    { ctx: { ...ctx, depth } },
+    // auditSafeCtx: the run ctx reaches the gate as `_ctx`; strip the key-bearing provider (F16/BA-1). The
+    // worker Loop already has `provider` as a constructor option, so stripping it from the run ctx is invisible
+    // to the worker and only cleans the audited copy.
+    { ctx: auditSafeCtx(ctx, { depth }) },
   );
 
   node.tokens = out.metrics ? out.metrics.tokens : null;
@@ -524,7 +556,7 @@ async function recurseScan(task, ctx, opts, state) {
       provider,
       window: opts.window,
       passes: opts.passes,
-      ctx: { ...ctx, depth: state.depth },
+      ctx: auditSafeCtx(ctx, { depth: state.depth }), // scan's Loop run ctx reaches the gate — strip provider (F16/BA-1)
       onLlmResult: ctx.onLlmResult,
       policy: ctx.policy,
     });
@@ -615,7 +647,7 @@ async function recursePartition(task, ctx, opts, state) {
     //     spends (bounds the burst to zero); a plain deny is advisory (allowlist-safe), same contract as fanout.
     if (typeof ctx.policy === 'function') {
       try {
-        await ctx.policy('recurse_partition', { width, size, depth }, { ...ctx, depth });
+        await ctx.policy('recurse_partition', { width, size, depth }, auditSafeCtx(ctx, { depth }));
       } catch (err) {
         if (err instanceof HaltError) throw err;
       }
@@ -731,7 +763,7 @@ async function recurseFanout(task, ctx, opts, state) {
     //    descriptor — the load-bearing budget signal is the HaltError, on bareguard's existing contract.
     if (typeof ctx.policy === 'function') {
       try {
-        await ctx.policy('recurse_fanout', { count: steps.length, depth }, { ...ctx, depth });
+        await ctx.policy('recurse_fanout', { count: steps.length, depth }, auditSafeCtx(ctx, { depth }));
       } catch (err) {
         if (err instanceof HaltError) throw err;
         // non-halt policy error/deny → advisory; proceed (per-worker policy still gates each child below)
