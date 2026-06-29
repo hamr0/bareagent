@@ -78,7 +78,8 @@ function partitionInto(arr, n) {
  * @returns {string}
  */
 function workerPersonaPrefix(persona) {
-  return typeof persona === 'string' && persona.trim() ? persona.trim() + '\n\n' : '';
+  const p = typeof persona === 'string' ? persona.trim() : '';
+  return p ? p + '\n\n' : '';
 }
 
 /**
