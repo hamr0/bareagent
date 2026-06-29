@@ -309,6 +309,53 @@ describe('recurse — Family A decomposition (NB-4 spawn A-tool)', () => {
   });
 });
 
+describe('recurse — worker persona seam (Gap 3 / 0.21.0)', () => {
+  const PERSONA = 'PERSONA::senior-security-engineer'; // newline-free + greppable so substring checks bite
+
+  it('opts.persona is PREPENDED to the top worker prompt and AUGMENTS (not replaces) the decomposition policy', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: PERSONA });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.ok(topCall, 'a top Family-A worker call exists');
+    const sys = systemOf(topCall.messages);
+    assert.ok(sys.includes(PERSONA), 'the persona is injected into the worker system prompt');
+    assert.ok(sys.includes(DECOMPOSITION_POLICY), 'the decomposition policy is STILL present (augment, not replace)');
+    // mutation: persona must come BEFORE the policy (prepend) so the worker reads its stance first
+    assert.ok(sys.indexOf(PERSONA) < sys.indexOf(DECOMPOSITION_POLICY), 'persona is prepended, not appended');
+  });
+
+  it('persona CARRIES DOWN to a spawned child (forChild preserves it — a durable stance, unlike contract/evaluate)', async () => {
+    const sp = scriptedProvider(decomposingHandler({ subtask: 'child leaf body' }));
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: PERSONA });
+    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('child leaf body'));
+    assert.ok(childCalls.length >= 1, 'the child worker ran');
+    // mutation: if forChild stripped persona, the child system would lack it
+    assert.ok(childCalls.every(c => systemOf(c.messages).includes(PERSONA)), 'the persona carries into the child window');
+  });
+
+  it('no persona ⇒ the worker prompt is byte-identical to the pre-0.21 default (backward-compatible)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.equal(systemOf(topCall.messages), DECOMPOSITION_POLICY + capabilityScrub(0, 3), 'default worker system = policy + scrub(0,3), no prefix');
+  });
+
+  it('a blank/whitespace persona is treated as ABSENT (no empty prefix added)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: '   ' });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.equal(systemOf(topCall.messages), DECOMPOSITION_POLICY + capabilityScrub(0, 3), 'a blank persona adds nothing');
+  });
+
+  it('persona is NOT injected into the isolated verifier (the anti-sycophancy isolation, A1, holds)', async () => {
+    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'breach contained' }));
+    await recurse(CRITICAL_TASK, { provider: sp.provider }, { persona: PERSONA });
+    const verifyCall = sp.calls.find(c => isVerify(c.messages));
+    assert.ok(verifyCall, 'a verify call must exist (critical task forces it)');
+    assert.ok(!systemOf(verifyCall.messages).includes(PERSONA), 'the grader must NOT inherit the worker persona (isolation preserved)');
+  });
+});
+
 describe('recurse — topology knob & capability-scrub (RC-11 / RC-12 / NB-4)', () => {
   it('RC-11: maxDepth=1 ⇒ flat fan-out — the child is offered NO spawn tool (no nesting)', async () => {
     const sp = scriptedProvider(decomposingHandler({ subtask: 'leaf subtask' }));

@@ -1107,6 +1107,35 @@ consumed instead: litectx memory/handles, `Loop`, `Evaluator`, bareguard.
   `0.19.0` agrees across `package.json`, `package-lock.json`, and `bareagent.context.md`, and
   all branch work is staged under CHANGELOG `[Unreleased]` — so no bump is half-done. Clean.
 
+**Found POST-RELEASE (adopter review by relayfact, 2026-06-29) → fixed in 0.21.0.** Three findings,
+two doc + one real API gap:
+- **(doc) `recurse()` shipped in 0.20.0 undocumented in the integration guide.** The primitive was
+  in `src/` + the README spotlight + this PRD, but `bareagent.context.md` — the AI-assistant-facing
+  guide that **ships in the npm tarball** (`package.json` `files`) and is the adopter's ground truth
+  — had ZERO mentions. The "ship docs WITH code" rule was honored for README/CHANGELOG/PRD but the
+  **integration guide is also a shipped surface** and was missed. Fixed: a full "Wiring with recurse"
+  section grounded in the shipped JSDoc, every symbol verified against `index.js`. **Lesson:** the
+  docs-surfaces checklist for a new primitive is README + CHANGELOG + PRD **+ `bareagent.context.md`**.
+- **(doc) The child setpoint-strip was invisible.** `forChild` strips a delegated child's
+  `contract`/`evaluate` (the whole-task DoD is the TOP node's job; a slice grading itself against it
+  is wasted + misapplied) — correct by design, but undocumented, so an adopter modelling an
+  "executable close" per-intermediate-node could not see it doesn't apply there. Fixed: documented in
+  the guide (what a child inherits vs. what is stripped).
+- **(API gap — the material one) No worker-persona seam.** Every worker hard-coded
+  `system = DECOMPOSITION_POLICY + capabilityScrub(...)` with NO injection point, so an adopter could
+  not give Family-A workers a stance (relayfact's senior-dev persona). This was a real missing seam,
+  not a doc gap. **Built `opts.persona`** (0.21.0): a string PREPENDED to every worker prompt that
+  AUGMENTS (never replaces — the decomposition text drives the spawn mechanics) and CARRIES DOWN the
+  tree (preserved by `forChild`, a durable stance unlike the top-only contract/evaluate); deliberately
+  NOT applied to the isolated verifier (preserves the A1 anti-sycophancy isolation) nor the scan judge.
+  POC-first (`poc/rlm-persona-seam.mjs`, live claude-haiku-4-5): the risky assumption — does a
+  prepended persona break the model's use of `spawn_child`? — was falsifiable and held (persona arm
+  decomposed 3/3 AND adopted the persona at top AND in a child; control arm decomposed with no stray
+  marker). +5 mutation-checked tests (the carry-down one proved to bite: stripping persona in
+  `forChild` turns it red). **Lesson:** an adopter's "doctrine-critical" need can be a genuine missing
+  seam, not a doc fix — and a hard-coded internal (the worker system prompt) is exactly where the next
+  adopter collides; expose it as an augmenting, carry-down seam, never a replace.
+
 ---
 
 ## Source & cross-refs

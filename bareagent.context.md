@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.20.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
+> v0.21.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -36,6 +36,7 @@ Eight entry points:
 | Execute a step DAG with parallelism | runPlan + executeFn |
 | Decompose a hard task into a verified tree (RLM) | recurse — decompose → fan-out → verify → synthesize in one call (**wire a gate**, cost is open by design) |
 | Count / answer "how many / all" over a corpus, honestly | recurse(task, ctx, `{ corpus, retrieval: 'scan' }`) — scans every slice, CODE-counts |
+| Give recurse workers a persona/role (senior-dev stance) | recurse(task, ctx, `{ persona }`) — prepended to every worker, carries down the tree; not applied to the verifier |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |
 | Require human approval before dangerous actions | Checkpoint |
@@ -656,6 +657,16 @@ console.log(result.count, result.matchedIds);      // a code-derived count + the
 ```
 
 **Synthesis (`opts.synthesize`):** a **function** (deterministic code-reduce over child `results` — use for arithmetic/aggregation; LLM arithmetic over partials carried ~10–15% error), or `'concat'` (lossless no-LLM join), or `'merge'` (isolated Loop-driven subjective merge). Default = the parent model's own closing-turn synthesis. **`opts.contract`** = a definition-of-done the verifier grades against (instead of the loose task); **`opts.evaluate`** overrides the verifier. Exported helpers for the per-query face: `buildScanTool`, `buildSearchTool`, `buildExactTool`, `litectxCorpus`.
+
+**Worker persona (`opts.persona`, v0.21.0):** a string PREPENDED to every Family-A worker's system prompt — give workers a stance (`persona: 'You are a senior security engineer; be specific and cite the exact file:line'`). It **augments**, never replaces, the built-in decomposition policy + depth-scrub (those drive the spawn mechanics), and **carries down the whole tree** (a child of a "senior security engineer" is still one). It is deliberately **not** applied to the isolated verifier (that isolation is what defeats self-grading sycophancy) nor the deterministic scan judge. Absent ⇒ the worker prompt is unchanged from pre-0.21.
+
+```javascript
+const out = await recurse('Audit auth.js, billing.js, gateway.js for authz bugs', ctx, {
+  persona: 'You are a blunt senior application-security engineer. Report each finding as file:line + impact + fix.',
+});
+```
+
+**What a delegated child inherits (important — the setpoint is the TOP node's job):** when a worker delegates with `spawn_child`, the child runs a **fresh `recurse`** that inherits `tools`, `synthesize`, `maxDepth`, and `persona` — but the parent's **`contract`/`evaluate` are stripped** (and the forced `count`/`mode` + the corpus `retrieval` knobs). A slice is not graded against the *whole*-task definition-of-done (that verdict is the top node's, and a slice satisfying the whole DoD is the wrong question); only the top `recurse` verifies the synthesized result. The non-overridable `critical → force-verify` safety floor still fires per node (it keys on the task text, not the contract). So: set `contract`/`evaluate` once at the top; they do not — and should not — re-run per intermediate node.
 
 ## Provider options
 

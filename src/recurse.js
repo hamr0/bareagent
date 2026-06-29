@@ -70,6 +70,18 @@ function partitionInto(arr, n) {
 }
 
 /**
+ * The persona prefix for a worker system prompt (Gap 3 / 0.21.0). A caller-supplied `opts.persona` AUGMENTS the
+ * decomposition policy + scrub (never replaces them — that text drives the spawn mechanics). Returns '' when
+ * absent/blank, so the default worker prompt is byte-identical to pre-0.21 (backward-compatible). Validated live
+ * by `poc/rlm-persona-seam.mjs` (the worker still decomposes, adopts the persona, and carries it to children).
+ * @param {unknown} persona
+ * @returns {string}
+ */
+function workerPersonaPrefix(persona) {
+  return typeof persona === 'string' && persona.trim() ? persona.trim() + '\n\n' : '';
+}
+
+/**
  * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
  * the WHOLE task's final answer; a child grading its own slice against the whole definition-of-done is wasted
  * (the verdict is never read by the parent) AND misapplied (a slice isn't expected to satisfy the whole DoD).
@@ -78,7 +90,9 @@ function partitionInto(arr, n) {
  * answered over the parent's corpus; a child has its own subtask and must not re-scan the parent's full corpus
  * (that would fan a whole-corpus count out under every child). The `critical → force-verify` SAFETY FLOOR is
  * unaffected — it keys on the task text via `isCritical`, not the contract, so a critical child still
- * self-verifies. Handle tools (`opts.tools`), `synthesize`, and `maxDepth` carry down.
+ * self-verifies. Handle tools (`opts.tools`), `synthesize`, `maxDepth`, and **`persona`** carry down — the
+ * persona is a DURABLE worker stance (a child of a "senior security engineer" is still one), unlike the
+ * top-only `contract`/`evaluate` setpoint. It rides through the `...opts` spread (not in the strip list).
  * @param {RecurseOptions} opts
  * @returns {RecurseOptions}
  */
@@ -120,6 +134,12 @@ function forChild(opts) {
  * @property {number} [maxDepth=3] - Open topology ceiling (§1): the depth past which the `spawn_child` tool is
  *   no longer offered (`maxDepth=1` ⇒ flat fan-out, no nesting). NOT the safety halt — that is bareguard's,
  *   and actual depth is always ≤ `limits.maxDepth`.
+ * @property {string} [persona] - (Gap 3 / 0.21.0) An optional caller stance PREPENDED to every Family-A worker's
+ *   system prompt (e.g. "You are a senior security engineer; …"). It AUGMENTS the built-in decomposition policy +
+ *   depth-scrub, never replaces them (that text drives the spawn mechanics), and CARRIES DOWN the whole tree
+ *   (preserved by `forChild` — a durable worker stance, unlike the top-only `contract`/`evaluate`). Deliberately
+ *   NOT applied to the isolated verifier (would defeat the anti-sycophancy isolation, A1) nor the deterministic
+ *   scan judge. Absent/blank ⇒ the worker prompt is byte-identical to pre-0.21 (backward-compatible).
  * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
  *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
  * @property {string} [contract] - Definition of done (A3). When present, the verifier grades against THIS,
@@ -312,10 +332,15 @@ async function recurse(task, ctx = {}, opts = {}) {
   // and what makes `maxDepth=1` flat (RC-11): top spawns, children cannot (no nesting).
   const canSpawn = depth < maxDepth && assessment.level !== 'simple';
 
-  // Capability-scrub (NB-4 / RC-12): the worker system prompt is the decomposition policy (NB-5) + a
-  // depth-conservative suffix that nudges deeper workers toward direct action. Tool set is monotone: a
-  // child's tools ⊆ its parent's (same handle tools, spawn dropped at the cap).
-  const system = DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
+  // Capability-scrub (NB-4 / RC-12): the worker system prompt is the OPTIONAL caller persona (`opts.persona`) +
+  // the decomposition policy (NB-5) + a depth-conservative suffix that nudges deeper workers toward direct
+  // action. The persona AUGMENTS, never replaces — the decomposition + scrub text is load-bearing for the spawn
+  // mechanics, so a persona that replaced it would break decomposition (POC `rlm-persona-seam.mjs` validated the
+  // prepend: the worker still decomposes AND adopts the persona). Persona CARRIES DOWN the tree (it is preserved
+  // by `forChild`, unlike contract/evaluate) — a durable worker stance, not a top-only setpoint. It is deliberately
+  // NOT applied to the isolated verifier (that would defeat the anti-sycophancy isolation) nor the scan judge.
+  // Tool set is monotone: a child's tools ⊆ its parent's (same handle tools, spawn dropped at the cap).
+  const system = workerPersonaPrefix(opts.persona) + DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
 
   // Handle tools (RC-5 pull-default) = caller-supplied `opts.tools` + the retrieval handle for `search`/`exact`/
   // `tools` (offered so the Family-A worker pulls context per sub-query, never the whole corpus). `search` needs
