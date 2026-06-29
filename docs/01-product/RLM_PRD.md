@@ -1018,6 +1018,69 @@ consumed instead: litectx memory/handles, `Loop`, `Evaluator`, bareguard.
   collapses at `window=8`** (then the active half-window probe — not the falsified
   positional-skew detector — is the mechanism). Aggregation stays CODE either way.
 
+### 11.2 Pre-publish residual ledger — the honest "not all clean" list (2026-06-28)
+
+> **Why this section exists.** After the RLM build sequence (steps 1–8) landed, a
+> self-audit pushed back on an "all clean" ship claim. The code logic is sound (deep-read,
+> no logic bugs in `recurse*.js`/`planner.js`), but "all clean" glossed over genuine
+> residuals. This ledger records every one — what is **open by design**, what is a **tracked
+> follow-on**, what is a **minor defect fixed in this pass**, and what still **needs a keyed
+> run before publish** — so nothing is silently carried as "done." Items marked *(fixed
+> 2026-06-28)* were addressed in the cleanup pass that created this section.
+
+**Open by design (risk acknowledged, not a bug).**
+- **Cost/burst is OPEN — no intrinsic total-work cap on the Family-A default.** Documented
+  (the `recurse()` JSDoc + CLAUDE.md banner + commit `d06f621`), but documenting ≠ removing
+  the risk: an **ungoverned** Family-A `recurse` can spawn up to a Loop's `HARD_ROUND_LIMIT`
+  (100) children/level × `maxDepth`, so token/$ spend compounds and is bounded ONLY by the
+  gate. **Run with bareguard (or any token/USD cap).** The local brake without a gate is
+  `maxDepth:1` (flat fan-out). Forced `fanout`/`partition` ARE bounded (deterministic count +
+  concurrency cap + pre-wave checkpoint); the open path is the model-driven default. This is
+  a deliberate design stance, restated here so it is not mistaken for "resolved."
+
+**Tracked follow-on (real, unresolved — see §11.1 #2).**
+- **History-compaction (`fit(history)`) is NOT closed.** The node-window overflow
+  **reproduces on the weak SLM tier** (gpt-4o-mini over-decomposes; peak tracks call count,
+  not width — up to 18982 tok across an 8k budget in one run). Governance caps trip first and
+  turn the runaway into an honest `{incomplete}` (shipped behavior), so this is a
+  *graceful-continuation* enhancement, not a correctness hole — but it is a genuine open
+  follow-on, not a settled deferral. Recommended order if pursued: confirm bareguard bounds it
+  → weak-model spawn discipline (`maxDepth:1`, tighter prompt) → `fit(history)`.
+
+**Minor defects (found in the cleanup audit).**
+- **`receipts.retrieval` was `undefined` on the `partition`/`fanout` paths** — `node.retrieval`
+  was set only on the Family-A dispatch, after those branches early-return. Cosmetic (receipts
+  only), but an inconsistency a consumer reading the audit trail would trip on. *(fixed
+  2026-06-28: `retrieval` is initialized on the node literal so it is always defined; the
+  partition path records the `scan` mode its workers run.)*
+- **`scan_count` (per-query `buildScanTool`) had no cost note** despite each call triggering a
+  **full-corpus scan** (window-judge over every slice). A worker routing by description had no
+  signal that this is the expensive handle. *(fixed 2026-06-28: the tool description now flags
+  the full-corpus cost.)*
+- **`mode:'fanout'`/`count` + `retrieval:'tools'` silently ignores `'tools'`** — the dispatch
+  returns at the fan-out branch before the retrieval routing, so the per-query tool face never
+  attaches. Not a bug (explicit forced fan-out is the stronger intent and should win), but the
+  precedence was undocumented. *(fixed 2026-06-28: precedence documented in the dispatch JSDoc;
+  no behavior change.)*
+- **`poc/rlm-defer1-capability-match.mjs` printed ~0 tokens** — the POC's `onLlmResult` token
+  wiring was wrong, so its meter under-reported. Evidence-file defect (the POC's *accuracy*
+  finding stands; only the token column was wrong). *(fixed 2026-06-28.)*
+
+**Keyed run — DONE (2026-06-29).**
+- **The full integration/e2e suite was run keyed and is GREEN: 722 pass / 0 fail / 2 skipped**
+  (724 total — grown past the old 679 with the recurse work), `OPENAI_API_KEY` +
+  `ANTHROPIC_API_KEY` present. This was the real pre-publish gate (unit + typecheck alone could
+  not cover it); it is now cleared. No longer a blocker.
+- **Test-quality audit of the recurse suite.** The suite is green, but this codebase has a
+  documented false-pass history (the `JSON.stringify().includes(multi-line)` assert that could
+  never match). The recurse tests were audited in this pass for tautological/weak assertions
+  (findings recorded in the commit); a green suite proves wiring, not assertion strength.
+
+**Resolved during the audit (was flagged, turned out clean).**
+- **Version "3 spots" agreement.** Memory notes a version bump touches 3 surfaces. Confirmed
+  `0.19.0` agrees across `package.json`, `package-lock.json`, and `bareagent.context.md`, and
+  all branch work is staged under CHANGELOG `[Unreleased]` — so no bump is half-done. Clean.
+
 ---
 
 ## Source & cross-refs

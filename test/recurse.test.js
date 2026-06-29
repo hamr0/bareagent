@@ -112,6 +112,7 @@ describe('recurse — Family B forced fan-out (NB-2)', () => {
     const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 3 });
     // the planner was told to make EXACTLY 3 independent slices (the NB-2 seam)
     const planner = sp.calls.find(c => c.messages.some(m => m.role === 'system' && /planning agent/.test(m.content)));
+    assert.ok(planner, 'a planning call must have been made (else the fan-out never decomposed)');
     assert.ok(/EXACTLY 3 independent/.test(systemOf(planner.messages)), 'planner must receive the forced count=3 directive');
     // 3 slices ran and the lossless concat carries every slice's result (no survivor-drop)
     assert.equal(out.incomplete, undefined);
@@ -909,7 +910,7 @@ describe('recurse — litectx-resident scan adapter (litectxCorpus / enumerate, 
     const source = litectxCorpus(lc, { kind: 'fact', pageSize: 7 });
     const slices = await source();
     assert.equal(slices.length, 20, 'every row materialized across pages (no early stop)');
-    assert.ok(lc.calls >= 3, `paginated (ceil(20/7)=3 calls), got ${lc.calls}`); // mutation: a single-page read would be 1 call → 7 rows
+    assert.equal(lc.calls, 3, `paginated EXACTLY ⌈20/7⌉=3 calls, got ${lc.calls}`); // catches BOTH under-pagination (1 call → 7 rows) AND wasteful over-pagination (an extra empty end-probe)
     assert.deepEqual(slices[4], { id: 'r4', text: 'MATCH item 4' }, 'path→id and body→text mapping');
   });
 
@@ -941,7 +942,7 @@ describe('recurse — data-driven width partition (mode:"partition", NB-2 / §11
     assert.equal(out.receipts.partition.width, 3);
     assert.equal(out.receipts.spawned.length, 3, '3 parallel chunk-workers ran (RC-10 lineage)');
     assert.equal(out.result.count, 15, 'the per-chunk scan counts union to the corpus truth (even ids)');
-    assert.equal(out.receipts.retrieval, undefined, 'partition is its own path, not the scan dispatch');
+    assert.equal(out.receipts.retrieval, null, 'partition is its own path (audit = receipts.partition), not the scan dispatch — but retrieval is DEFINED (null), never undefined, on every path');
   });
 
   it('opts.count is a FLOOR the data may raise but never lower (width = max(floor, dataWidth))', async () => {

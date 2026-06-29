@@ -260,6 +260,10 @@ async function recurse(task, ctx = {}, opts = {}) {
     halted: false,
     tokens: null,
     model: null,
+    // Always-defined so the audit trail is consistent across ALL dispatch paths (the partition/fanout branches
+    // early-return before the Family-A retrieval routing below, where this used to be the only assignment).
+    // null = no corpus retrieval (Family A/B single-shot or semantic fan-out); a mode string when one ran.
+    retrieval: null,
   };
 
   // Family B (NB-2) — FORCED fan-out, opt-in. The caller asked for guaranteed deterministic parallelism, so
@@ -273,6 +277,10 @@ async function recurse(task, ctx = {}, opts = {}) {
     return recursePartition(task, ctx, opts, { provider, depth, critical, node });
   }
 
+  // PRECEDENCE: an explicit forced fan-out (`mode:'fanout'`/`count`) is the stronger, deterministic intent and
+  // wins over `retrieval:'tools'` — this branch returns BEFORE the retrieval routing below, so a worker-level
+  // per-query tool face is NOT attached on a forced fan-out (each fan-out slice is its own fresh-window recurse
+  // and may route retrieval for ITS subtask). Pair forced fan-out with a per-slice `corpus`, not `retrieval:'tools'`.
   if (opts.mode === 'fanout' || opts.count != null) {
     return recurseFanout(task, ctx, opts, { provider, depth, maxDepth, assessment, critical, node });
   }
@@ -567,6 +575,10 @@ async function recursePartition(task, ctx, opts, state) {
   const width = Math.min(Math.max(floor, dataWidth), size);
   const concurrency = Number.isInteger(opts.concurrency) && /** @type {number} */ (opts.concurrency) > 0 ? /** @type {number} */ (opts.concurrency) : DEFAULT_FANOUT_CONCURRENCY;
   node.partition = { size, workerBudget, floor, dataWidth, width };
+  // NB: `node.retrieval` stays null here (its default) — the partition orchestrator is its OWN dispatch path, not
+  // the Family-A scan dispatch; its audit record is `node.partition`. The per-chunk WORKERS run scan and record it
+  // on THEIR nodes (`receipts.spawned`). The node-literal null default is what makes this consistently defined
+  // (never `undefined`) across every dispatch path.
 
   const childResults = [];
   try {

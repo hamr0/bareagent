@@ -69,7 +69,11 @@ async function runArm(label, toolsFor) {
     const loop = new Loop({
       provider,
       system: 'You compute an arithmetic result by calling exactly ONE tool, then reply with ONLY the integer result (no words).',
-      onLlmResult: ({ tokens }) => { if (tokens) toks += (tokens.inputTokens || 0) + (tokens.outputTokens || 0); },
+      // Loop forwards the round usage as `usage` (NOT `tokens`); sum all four normalized tiers so cache-read/
+      // creation aren't dropped (the earlier `{ tokens }` destructure was always undefined → ~0 tok reported).
+      onLlmResult: ({ usage }) => {
+        if (usage) toks += (usage.inputTokens || 0) + (usage.outputTokens || 0) + (usage.cacheReadTokens || 0) + (usage.cacheCreationTokens || 0);
+      },
       throwOnError: false,
     });
     const q = `What is ${t.a} ${OPS[t.op].word} ${t.b}? Use a tool.`;

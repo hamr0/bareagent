@@ -279,7 +279,9 @@ function buildScanTool(corpus, opts) {
       'COUNT or list ALL records matching a predicate, completely. Use this whenever the question is "how many", ' +
       '"all", "every", "count", or "total" over the records — it examines EVERY record (not just the top matches ' +
       'like search) and returns an exact, code-counted total plus the matching ids. It is the only complete, ' +
-      'no-undercount path; slower than search, and the right tool when completeness matters.',
+      'no-undercount path. COST: each call runs an LLM judge over EVERY record (a full-corpus pass) — it is the ' +
+      'most expensive handle, so call it once per population you need counted, not repeatedly or for needle ' +
+      'lookups (use search_memory for those). The right tool only when completeness matters.',
     parameters: {
       type: 'object',
       properties: {
