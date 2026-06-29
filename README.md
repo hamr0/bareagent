@@ -94,7 +94,7 @@ Every piece works alone — take what you need, ignore the rest. Two axes: **Act
 
 ### Recurse — break a hard task into a tree *(the RLM primitive)*
 
-`recurse(task, ctx, opts)` does **decompose → fan-out → verify → synthesize** in one call — Recursive Language Models as a single import, composed *around* the Loop (never a new engine). The default is **model-driven**: the worker is handed a `spawn_child` tool and decides whether to split, bounded by depth + bareguard (no second guard layer). Forced fan-out (`count` / `mode:'fanout'`) and data-driven width (`mode:'partition'`, measured from a corpus) are opt-in. The headline guarantee: **aggregation is code, never a model-stated number**, and a dead worker or exhausted guard returns an honest `{ incomplete, missingSlices }` — never a faked pass.
+`recurse(task, ctx, opts)` does **decompose → fan-out → verify → synthesize** in one call — Recursive Language Models as a single import, composed *around* the Loop (never a new engine). The default is **model-driven**: the worker is handed a `spawn_child` tool and decides whether to split, bounded by depth + bareguard (no second guard layer). Forced fan-out (`count` / `mode:'fanout'`) and data-driven width (`mode:'partition'`, measured from a corpus) are opt-in. Give workers a stance with `opts.persona` (prepended to every worker, carries down the tree, deliberately kept out of the isolated verifier). The headline guarantee: **aggregation is code, never a model-stated number**, and a dead worker or exhausted guard returns an honest `{ incomplete, missingSlices }` — never a faked pass.
 
 Over a corpus, context reaches a worker as a **handle routed by question shape** (`opts.retrieval`):
 
