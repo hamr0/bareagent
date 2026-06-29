@@ -4,6 +4,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-06-29
+
 ### Security
 
 - **`recurse()` no longer leaks the API key into the bareguard audit (relayfact F16/BA-1).** A wired gate records the per-run `ctx` VERBATIM as `action._ctx` (`defaultActionTranslator`, src/bareguard-adapter.js), and `recurse()` threaded its whole wiring blob — which holds the **live `provider` instance, and thus `provider.apiKey`** — as that ctx, so every `{type:'llm'}` audit record (and each direct `recurse_fanout`/`recurse_partition` checkpoint, and every `scan` Loop round) wrote the raw `sk-…` key to disk in plaintext. Confirmed by relayfact's probe-03 (`run-probe03-*-audit.jsonl`); did not occur pre-recurse (a plain `{userId}` ctx carried no provider). Fixed by a new `auditSafeCtx(ctx, overrides)` helper that **strips the live provider** from the ctx at every point it becomes a governance `_ctx` (the worker `Loop.run`, both pre-wave `ctx.policy` checkpoints, and `scanCount` ×2). The provider still rides in the recurse-internal ctx threaded into child self-calls (children need it to run) and is given to the worker Loop as a constructor option — only the **audited** copy is cleaned; `Loop.run` never reads `ctx.provider`. The provider's identity is not lost from the audit (the meter records the provider NAME on the `{type:'llm'}` action). Pairs with bareguard's own secret-redaction (BG-1, shipped in bareguard 0.9.0) as defense-in-depth. `src/recurse.js`, `test/recurse.test.js` (+2, mutation-proven: removing the scrub re-leaks the key in both the Family-A worker and the Family-B fan-out checkpoint).
