@@ -96,7 +96,14 @@ Every piece works alone — take what you need, ignore the rest. Two axes: **Act
 
 `recurse(task, ctx, opts)` does **decompose → fan-out → verify → synthesize** in one call — Recursive Language Models as a single import, composed *around* the Loop (never a new engine). The default is **model-driven**: the worker is handed a `spawn_child` tool and decides whether to split, bounded by depth + bareguard (no second guard layer). Forced fan-out (`count` / `mode:'fanout'`) and data-driven width (`mode:'partition'`, measured from a corpus) are opt-in. The headline guarantee: **aggregation is code, never a model-stated number**, and a dead worker or exhausted guard returns an honest `{ incomplete, missingSlices }` — never a faked pass.
 
-Over a corpus, context reaches a worker as a **handle routed by question shape**: `'scan'` answers *"how many / all"* by scanning every slice and **code-counting** the matches (the only path that can't silently undercount); `'search'` / `'exact'` are per-query handle tools for needles and rules; `'tools'` offers all three and lets the worker pick per sub-query.
+Over a corpus, context reaches a worker as a **handle routed by question shape** (`opts.retrieval`):
+
+| `retrieval` | Use it for | How |
+|---|---|---|
+| `'scan'` *(default over a corpus)* | "how many / all / count" | scans every slice, LLM-judges each, **code-counts** the union — the only path that can't silently undercount |
+| `'search'` | find a needle (few matches) | litectx `recall` handle tool, embeddings on — **cannot count** |
+| `'exact'` | rule / exact-term match | code-side AND-filter, embeddings off |
+| `'tools'` | mixed task (needle *and* count) | offers all three; the worker picks per sub-query by tool description |
 
 ```js
 const { recurse } = require('bare-agent');
