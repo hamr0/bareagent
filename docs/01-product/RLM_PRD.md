@@ -14,7 +14,8 @@
 > not capability *matching* — **POC-ruled-out §11.1**) and **history-compaction policy** (the paper's
 > `fit(history)` — **POC found its overflow REAL & reproducible on the weak SLM target (gpt-4o-mini fan-out, 3/4
 > runs > 8k, driven by over-decomposition), so this is a TRACKED FOLLOW-ON, not a closed deferral; governance
-> caps bound it to honest-incomplete today, §11.1**). Calibration knobs (worker-overflow threshold, fan-out
+> caps bound it to honest-incomplete today — **now PROVEN live** (`poc/rlm-defer2c`: a wired gate cut the
+> 43–117-call runaway to 4–5 calls / clean `{incomplete}`, §11.1/§11.2)**). Calibration knobs (worker-overflow threshold, fan-out
 > count numbers) left tunable — **scan-window auto-calibration POC-ruled-out (§11.1: no knee reproducible across
 > 2 corpora × 2 models)**. **Steps 7/9.2 are SETTLED — do not re-run pull/flat/search OR the
 > litectx-retrieval study (§9.2/§9.2.1).** Evidence: `poc/rlm-spike{1,2}-*.mjs`, `poc/rlm-nb2-calibrate.mjs`,
@@ -455,6 +456,16 @@ which is what bounds the burst to zero. A plain policy *deny* on the internal
 policy that doesn't know the descriptor — the load-bearing budget signal is the
 `HaltError`, on bareguard's existing contract). The same point is where a Family-A
 batch-spawn should be gated when that path adds an explicit pre-wave check (step 7).
+
+**Empirically confirmed (2026-06-29).** Guards 1–4 bounding the *Family-A model-driven*
+runaway (the open-cost path, no pre-wave checkpoint — it relies on the per-tool-call
+`policy` + per-round `onLlmResult` on the shared gate) is no longer just design:
+`poc/rlm-defer2c-governed-bound.mjs` (live gpt-4o-mini) ran the 9-way
+over-decomposition that burns 43–117 calls ungoverned under a wired `Gate`
+(`budget.maxCostUsd $0.01` + `limits.maxTurns 8`) and got **4–5 calls → clean
+`{incomplete}`, 3/3 runs**, window held ~700 tok (below the 8k SLM budget) — no
+uncaught throw, no faked pass. The "no second guard layer; bareguard is the bound"
+stance is therefore measured, not asserted (full numbers in §11.1 #2 / §11.2).
 
 ## 7. Verification model
 
