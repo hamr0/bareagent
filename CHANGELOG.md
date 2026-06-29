@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **Deferred-item learning POC — `poc/rlm-defer2c-governed-bound.mjs`: the gate-bounds-the-runaway claim, now PROVEN.** Both open RLM deferrals (history-compaction caveat (a); cost/burst "open by design — run with a gate") rested on one ASSERTED-but-unrun claim: that wiring bareguard converts the weak-model Family-A runaway into a clean `{incomplete}` rather than a burn. This POC runs it live (gpt-4o-mini, the weak SLM target): over the SAME 9-way over-decomposition that burned **43–117 calls / peak ≤18982 tok ungoverned** (§11.1 baseline, not re-run — it times out, which is the point), a wired `Gate` (`budget.maxCostUsd $0.01` + `limits.maxTurns 8`, shared across the tree via `ctx.policy`/`ctx.onLlmResult`) bounded **3/3 runs to 4–5 calls, peak ~545–738 tok, ~$0.011, clean `{incomplete}`** — no uncaught throw, no faked pass, window held well below the 8k SLM budget because the gate stops the tree before it grows. The POC is able-to-fail (a per-run wall-clock guard turns an *unbounded* governed run into a visible falsification, not a hang). **Learnings recorded in `RLM_PRD.md` §11.1 #2 + §11.2:** history-compaction deferral is SAFE as documented (governance is a real first-line bound, `fit(history)` is an optional graceful-continuation enhancement, never a correctness need); the cost/burst *brake* is real and measured, not just warned about. Docs/POC only — no `src/` change.
+
 ## [0.20.0] — 2026-06-29
 
 ### Changed

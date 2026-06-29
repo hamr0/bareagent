@@ -999,6 +999,17 @@ consumed instead: litectx memory/handles, `Loop`, `Evaluator`, bareguard.
   "graceful continuation on small models" use case. Recommended order if pursued:
   (a) confirm bareguard caps bound it cleanly; (b) a weak-model spawn discipline; (c)
   `fit(history)` for graceful survival. Tracked as a real follow-on, not a closed deferral.
+- *Caveat (a) now PROVEN — `poc/rlm-defer2c-governed-bound.mjs` (live gpt-4o-mini, 2026-06-29).*
+  The first caveat was an assertion ("with bareguard wired the caps trip first"); it is now
+  measured. Wiring a real `Gate` (`budget.maxCostUsd $0.01` + `limits.maxTurns 8`, shared across
+  the tree via `ctx.policy`/`ctx.onLlmResult`) over the SAME 9-way over-decomposition that burned
+  43–117 calls ungoverned: **3/3 governed runs halted at 4–5 calls, peak window ~545–738 tok
+  (never near 8k), cost ~$0.011, in a clean `{incomplete}`** — no uncaught throw, no faked pass,
+  window bounded BELOW the SLM budget *because* the gate stops the tree before it grows. So the
+  history-compaction deferral is **SAFE as documented**: governance is a real first-line bound
+  that converts the runaway into honest non-convergence, NOT a correctness hole. `fit(history)`
+  remains an **optional graceful-CONTINUATION** enhancement (compact + keep going instead of
+  halt-incomplete), never a correctness need — the deferral rests on proven ground now.
 
 **#3 — Calibration (auto-tune scan `window`) → RULED OUT (triangulated; no knee reproducible).**
 - *What we have:* fixed `window=8` (the AG-News-calibrated recall knee). *What it adds:*
@@ -1036,7 +1047,11 @@ consumed instead: litectx memory/handles, `Loop`, `Evaluator`, bareguard.
   gate. **Run with bareguard (or any token/USD cap).** The local brake without a gate is
   `maxDepth:1` (flat fan-out). Forced `fanout`/`partition` ARE bounded (deterministic count +
   concurrency cap + pre-wave checkpoint); the open path is the model-driven default. This is
-  a deliberate design stance, restated here so it is not mistaken for "resolved."
+  a deliberate design stance, restated here so it is not mistaken for "resolved." **The other
+  half of the stance — "run with a gate and the burn is bounded" — is now PROVEN** (not just the
+  warning): `poc/rlm-defer2c-governed-bound.mjs` (see §11.1 #2) shows a wired bareguard `Gate` cuts
+  the ungoverned 43–117-call runaway to **4–5 calls in a clean `{incomplete}`** on the live weak
+  model. The cost is open; the *brake* is real and measured.
 
 **Tracked follow-on (real, unresolved — see §11.1 #2).**
 - **History-compaction (`fit(history)`) is NOT closed.** The node-window overflow
