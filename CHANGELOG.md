@@ -4,6 +4,14 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-06-29
+
+### Fixed
+
+- **Integration guide completeness — `bareagent.context.md` now covers the native Gemini provider + an Evaluator/refine wiring section (last-5-release gaps).** An audit of the AI-assistant-facing integration guide (which ships in the npm tarball) against the last five releases found two features that shipped back in **0.17.0** but never reached the guide: the native **`GeminiProvider`** (absent from Provider options) and **`Evaluator` + `refine`** (only a decision-table row, no wiring section like every other major component). Added both, grounded in `src/provider-gemini.js` / `src/evaluator.js` / `src/refine.js` — every documented symbol verified to resolve (`Evaluator`/`refine` from `bare-agent`, `Gemini` from `bare-agent/providers`, default model `gemini-2.5-flash`). The new section covers the three criteria types (predicate / rubric / agentic), the tri-state `Verdict`, the isolated adversarial grader, `contract`, and the `refine` loop. Docs only.
+- **`opts.persona` security guardrail note.** A security scan of the 0.21.0 recurse surface flagged that `opts.persona` is prepended *ahead* of the decomposition policy, so a hostile persona could override it (and any safety framing) for every worker. It is a deliberate system-prompt seam — added a guardrail note (JSDoc `recurse.js` + integration guide) that `persona` is **caller-trusted input only**, never untrusted / end-user data. No behavior change.
+- **`workerPersonaPrefix` computes `persona.trim()` once** (review nit) — cosmetic, behavior identical.
+
 ## [0.21.0] — 2026-06-29
 
 ### Added
