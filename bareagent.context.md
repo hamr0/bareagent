@@ -34,6 +34,8 @@ Eight entry points:
 | Size a goal before planning (no LLM) | assessComplexity — `needsPlanning` gates a Planner pass |
 | Kill a spawned child that hangs silently | createSpawnTool / spawnChild `{ idleTimeoutMs }` |
 | Execute a step DAG with parallelism | runPlan + executeFn |
+| Decompose a hard task into a verified tree (RLM) | recurse — decompose → fan-out → verify → synthesize in one call (**wire a gate**, cost is open by design) |
+| Count / answer "how many / all" over a corpus, honestly | recurse(task, ctx, `{ corpus, retrieval: 'scan' }`) — scans every slice, CODE-counts |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |
 | Require human approval before dangerous actions | Checkpoint |
@@ -598,6 +600,62 @@ const results = await runPlan(steps, async (step) => {
 });
 // results: [{ id: 's1', status: 'done', result: '...' }, { id: 's2', status: 'failed', error: '...' }, ...]
 ```
+
+## Wiring with recurse (RLM — decompose → fan-out → verify → synthesize)
+
+`recurse(task, ctx, opts)` is the **Recursive Language Models** primitive (v0.20.0): one import that decomposes a hard task into fresh-context workers, verifies against a setpoint, and synthesizes one result. It is **thin glue composed around `Loop`/`Planner`/`runPlan`/`Evaluator`/`spawn`** — not a new engine, never imported by `loop.js`. Returns `{ result, verdict, receipts }` on convergence, or `{ incomplete, best, missingSlices, receipts }` on guard exhaustion / a dead worker — **never a fabricated success** (RC-9).
+
+> **⚠️ Cost is open by DESIGN — wire a gate.** `recurse()` adds NO intrinsic total-work cap. On the **Family-A default** (model-driven) a node can spawn up to ~100 children per level, each recursing to `opts.maxDepth` (default 3) — so token/$ spend compounds and is bounded **only by your gate**, not by recurse. A live POC saw a weak model do 40–117 calls in one run. **Always wire bareguard** (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces depth/budget/call caps and turns a runaway into a clean `{ incomplete }` (proven: a wired `Gate` cut a 43–117-call runaway to 4–5 calls). The local brake without a gate is `opts.maxDepth: 1` (flat, no nesting). The forced modes (`mode:'fanout'`/`'partition'`) ARE bounded (deterministic count + concurrency cap).
+
+```javascript
+const { recurse, wireGate } = require('bare-agent');
+const { Gate } = require('bareguard');
+
+// ALWAYS run governed for real work — the gate is the total-work bound.
+const gate = new Gate({ budget: { maxCostUsd: 0.50 }, limits: { maxTurns: 30, maxDepth: 3 }, humanChannel: async () => ({ decision: 'deny' }) });
+await gate.init();
+const { policy, onLlmResult } = wireGate(gate);
+
+// ctx = runtime wiring threaded down the whole tree; opts = policy knobs.
+const ctx = { provider, policy, onLlmResult };     // policy + onLlmResult = the gate over every node + the verifier
+const out = await recurse('Audit this 2000-line module for security bugs and rank them', ctx, { maxDepth: 3 });
+
+if (out.incomplete) {
+  console.warn('did not converge:', out.missingSlices, '— best partial:', out.best);  // honest, never a faked pass
+} else {
+  console.log(out.result, out.verdict);            // the synthesized answer + the verifier's gap report
+}
+console.log(out.receipts.spawned.length);          // RC-10 audit tree: parent→child lineage, per-node tokens/verdict
+```
+
+**Control families (how the tree is shaped):**
+
+- **Family A — model-driven (default).** The worker is handed an in-process `spawn_child` tool and *decides* whether to split. `assessComplexity` is a **hint, not a gate** (only `simple → single-shot`, and the non-overridable `critical → force adversarial verify` safety floor). Nothing extra to set.
+- **Family B — forced fan-out (opt-in).** `{ count: N }` → exactly N independent parallel workers via `Planner`→`runPlan`; or `{ mode: 'fanout' }` → count derived from the complexity tier (medium/complex/critical → 2/4/6). Deterministic + concurrency-capped.
+- **`{ mode: 'partition', corpus, workerBudget }`** — data-driven WIDTH: measure the corpus, split into `max(count floor, ⌈size/workerBudget⌉)` parallel scan-workers, union-count. A pre-wave `recurse_partition` policy checkpoint fires before any worker spends.
+
+**Retrieval over a corpus** (`opts.corpus = {id,text}[]` or an async `() => Promise<Slice[]>`, e.g. `litectxCorpus(litectx, {kind})`). Context reaches a worker as a HANDLE routed by question shape:
+
+| `retrieval` | For | Note |
+|---|---|---|
+| `'scan'` *(default when `corpus` present)* | "how many / all / count" | scans every slice, LLM-judges, **CODE-counts** the union — the only path that can't undercount; `window` 8, `passes` 2 |
+| `'search'` | find a needle | litectx `recall` tool (needs `ctx.litectx`), embeddings on — **cannot count** |
+| `'exact'` | rule / exact-term match | code-side AND-filter, embeddings off |
+| `'tools'` | mixed task (needle *and* count) | offers `scan_count` + `search_memory` + `exact_match`; worker picks per sub-query by tool description |
+
+A completeness guard **upgrades** a `'search'` on a "how many / all" ask to `'scan'` (upgrade-only, never a silent downgrade). Aggregation is **always code**, never a model-stated number.
+
+```javascript
+// Honest count over a corpus — scans every slice, code-counts the matches.
+const { result } = await recurse(
+  'How many of these support tickets are billing disputes?',
+  { provider, policy },                            // still wire the gate
+  { corpus: tickets /* {id,text}[] */, retrieval: 'scan' },
+);
+console.log(result.count, result.matchedIds);      // a code-derived count + the ids that back it
+```
+
+**Synthesis (`opts.synthesize`):** a **function** (deterministic code-reduce over child `results` — use for arithmetic/aggregation; LLM arithmetic over partials carried ~10–15% error), or `'concat'` (lossless no-LLM join), or `'merge'` (isolated Loop-driven subjective merge). Default = the parent model's own closing-turn synthesis. **`opts.contract`** = a definition-of-done the verifier grades against (instead of the loose task); **`opts.evaluate`** overrides the verifier. Exported helpers for the per-query face: `buildScanTool`, `buildSearchTool`, `buildExactTool`, `litectxCorpus`.
 
 ## Provider options
 
