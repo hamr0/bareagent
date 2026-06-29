@@ -140,6 +140,9 @@ function forChild(opts) {
  *   (preserved by `forChild` — a durable worker stance, unlike the top-only `contract`/`evaluate`). Deliberately
  *   NOT applied to the isolated verifier (would defeat the anti-sycophancy isolation, A1) nor the deterministic
  *   scan judge. Absent/blank ⇒ the worker prompt is byte-identical to pre-0.21 (backward-compatible).
+ *   **SECURITY:** this is a PRIVILEGED system-prompt seam — treat `persona` like a system prompt. Do NOT pass
+ *   untrusted / end-user-controlled text here; a hostile persona is prepended ahead of the decomposition policy
+ *   and can override it (and any safety framing) for every worker in the tree. Caller-trusted input only.
  * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
  *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
  * @property {string} [contract] - Definition of done (A3). When present, the verifier grades against THIS,
