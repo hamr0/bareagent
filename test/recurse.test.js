@@ -356,6 +356,136 @@ describe('recurse — worker persona seam (Gap 3 / 0.21.0)', () => {
   });
 });
 
+describe('recurse — working-context thread (BA-9 / relayfact F19)', () => {
+  const CONTEXT = 'CONTEXT::project-root=/abs/proj'; // newline-free + greppable so substring checks bite
+  const BLOCK = 'Working context (read-only):';
+
+  it('opts.context is PREPENDED to the top worker USER message as a Working-context block (so a worker can locate its artifact)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: CONTEXT });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.ok(topCall, 'a top Family-A worker call exists');
+    const user = lastUser(topCall.messages);
+    assert.ok(user.includes(BLOCK), 'the working-context block header is present on the worker task message');
+    assert.ok(user.includes(CONTEXT), 'the caller context string is present');
+    // mutation: the block must come BEFORE the task text (prepend), and the task itself must still be there
+    assert.ok(user.indexOf(CONTEXT) < user.indexOf(COMPLEX_TASK), 'context is prepended ahead of the task');
+    assert.ok(user.includes(COMPLEX_TASK), 'the original task is preserved, not replaced');
+  });
+
+  it('context CARRIES DOWN to a spawned child (forChild preserves it — durable run-state, like persona)', async () => {
+    const sp = scriptedProvider(decomposingHandler({ subtask: 'child leaf body' }));
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: CONTEXT });
+    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('child leaf body'));
+    assert.ok(childCalls.length >= 1, 'the child worker ran');
+    // mutation: if forChild stripped context, the child task message would lack it
+    assert.ok(childCalls.every(c => lastUser(c.messages).includes(CONTEXT)), 'the context carries into the child window');
+  });
+
+  it('no context ⇒ the worker task message is byte-identical to the task (backward-compatible)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.equal(lastUser(topCall.messages), COMPLEX_TASK, 'default task message = the raw task, no block');
+  });
+
+  it('a blank/whitespace context is treated as ABSENT (no empty block added)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: '   ' });
+    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
+    assert.equal(lastUser(topCall.messages), COMPLEX_TASK, 'a blank context adds nothing');
+  });
+
+  it('Family-B: context is forwarded to the Planner as `info` so the slices it writes are path-aware', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2, context: CONTEXT });
+    const planner = sp.calls.find(c => isPlanner(c.messages));
+    assert.ok(planner, 'a planning call was made');
+    // planner.js pushes the info as a `Context: <info>` user message — the context must reach it
+    assert.ok(JSON.stringify(planner.messages).includes(CONTEXT), 'the planner sees the working-context as info');
+  });
+
+  it('context IS shown to the isolated verifier (neutral facts, NOT a stance — unlike persona)', async () => {
+    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'breach contained' }));
+    await recurse(CRITICAL_TASK, { provider: sp.provider }, { context: CONTEXT });
+    const verifyCall = sp.calls.find(c => isVerify(c.messages));
+    assert.ok(verifyCall, 'a verify call must exist (critical task forces it)');
+    // mutation: the grader's GOAL must carry the context (an agentic critic needs the path to exercise the artifact)
+    assert.ok(JSON.stringify(verifyCall.messages).includes(CONTEXT), 'the verifier sees the working-context');
+  });
+});
+
+describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)', () => {
+  // A leaf worker that returns a BROKEN answer first and a FIXED one once it sees the fed-back gap (unless
+  // recoverOnRetry:false → always broken). The retry is detected by the injected "previous attempt FAILED" text.
+  const refineLeafHandler = ({ recoverOnRetry = true } = {}) => (messages) => {
+    const user = lastUser(messages);
+    if (recoverOnRetry && user.includes('previous attempt FAILED')) return { text: 'here is the FIXED answer' };
+    return { text: 'broken answer' };
+  };
+  // Deterministic sensor (a Verdict): passes only when the result contains FIXED; greppable critique.
+  const PASS_ON_FIXED = (result) => (String(result).includes('FIXED')
+    ? { status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] }
+    : { status: 'needs_revision', pass: false, score: 0, critique: 'GAP::must contain FIXED', suggestions: [] });
+  const ALWAYS_PASS = () => ({ status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] });
+
+  it('a definite leaf with a failing sensor RETRIES and recovers (fresh feedback)', async () => {
+    const sp = scriptedProvider(refineLeafHandler());
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.ok(String(out.result).includes('FIXED'), 'the recovered result is returned');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor finally passed');
+    assert.ok(out.receipts.refineLeaf.iterations >= 2, 'it took at least one retry to recover');
+  });
+
+  it('retry temperature ESCALATES 0.2→0.7→1.0 (the live-validated requirement)', async () => {
+    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false })); // always broken → exhausts iterations
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    const temps = sp.calls.map(c => c.options && c.options.temperature);
+    assert.deepEqual(temps.slice(0, 3), [0.2, 0.7, 1.0], 'each retry raises the temperature');
+  });
+
+  it('the sensor GAP is fed FRESH into the retry message (anti-anchoring, D6/A1)', async () => {
+    const sp = scriptedProvider(refineLeafHandler());
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    const retry = sp.calls.find(c => lastUser(c.messages).includes('previous attempt FAILED'));
+    assert.ok(retry, 'a retry attempt ran');
+    assert.ok(lastUser(retry.messages).includes('GAP::must contain FIXED'), 'the sensor critique is carried into the retry');
+  });
+
+  it('honest non-recovery: a never-passing sensor returns the result with passed=false (never a faked pass)', async () => {
+    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 2 } });
+    assert.equal(out.receipts.refineLeaf.passed, false, 'non-recovery is reported, not hidden');
+    assert.equal(out.receipts.refineLeaf.iterations, 2, 'bounded by maxIterations');
+    assert.equal(out.verdict.pass, false, 'the sensor failure surfaces as the node verdict');
+    assert.equal(out.incomplete, undefined, 'a sensor miss is not a halt/dead-worker incomplete — a result exists');
+  });
+
+  it('does NOT engage on a node that can spawn (an orchestrator is not a leaf)', async () => {
+    const sp = scriptedProvider(decomposingHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { refineLeaf: { sensor: ALWAYS_PASS } });
+    assert.equal(out.receipts.refineLeaf, undefined, 'the spawning top node is not refined');
+    assert.ok(out.receipts.spawned.length >= 1, 'it still decomposed normally');
+  });
+
+  it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {
+    const sp = scriptedProvider(refineLeafHandler());
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
+    assert.equal(out.receipts.refineLeaf, undefined, 'no refine bookkeeping without the opt-in');
+    assert.equal(out.result, 'broken answer', 'the single-shot (unrefined) answer stands');
+  });
+
+  it('a governance HaltError during a refine attempt → clean incomplete (RC-9), never a thrown run', async () => {
+    // Realistic gate path: bareguard's budget halt surfaces via onLlmResult throwing HaltError (the BA1 path),
+    // which the Loop converts to out.error 'halt:<rule>' → the refine attempt re-throws → clean incomplete.
+    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
+    const ctx = { provider: sp.provider, onLlmResult: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } };
+    const out = await recurse(SIMPLE_TASK, ctx, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, true, 'a halt mid-refine is an honest incomplete');
+    assert.equal(out.receipts.halted, true, 'the halt is recorded on the node');
+  });
+});
+
 describe('recurse — topology knob & capability-scrub (RC-11 / RC-12 / NB-4)', () => {
   it('RC-11: maxDepth=1 ⇒ flat fan-out — the child is offered NO spawn tool (no nesting)', async () => {
     const sp = scriptedProvider(decomposingHandler({ subtask: 'leaf subtask' }));

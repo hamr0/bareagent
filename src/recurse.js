@@ -28,6 +28,7 @@ const { Evaluator } = require('./evaluator');
 const { Planner } = require('./planner');
 const { runPlan } = require('./run-plan');
 const { assessComplexity, isCritical } = require('./complexity');
+const { refine } = require('./refine');
 const { HaltError } = require('./errors');
 const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
 const { synthesize } = require('./recurse-synthesize');
@@ -51,6 +52,11 @@ const DEFAULT_FANOUT_CONCURRENCY = 4;
 // many parallel scan-workers a measured corpus needs. A calibratable knob (the §9.1 algorithm; corpus-specific),
 // not a discovered constant — overridable via `opts.workerBudget`. 100 items ≈ a worker doing ~25 scan windows.
 const DEFAULT_WORKER_BUDGET = 100;
+// BA-8 leaf-refine: temperature ESCALATES per retry. The live POC (poc/ba8-leaf-refine.mjs) found that at a flat
+// low temperature a weak model regenerates byte-identical wrong code and IGNORES even crisp deterministic
+// feedback (0/5 recovery); recovery only appears once retries are given room to vary (0/5 → 2-3/5). So escalation
+// is a DESIGN REQUIREMENT of the seam, not a tuning nicety. Overridable via `opts.refineLeaf.temperatures`.
+const DEFAULT_REFINE_TEMPS = [0.2, 0.7, 1.0];
 
 /**
  * Split an array into EXACTLY `n` contiguous, near-equal chunks (the data-partition for the §11 width path).
@@ -83,6 +89,23 @@ function workerPersonaPrefix(persona) {
 }
 
 /**
+ * BA-9 (relayfact F19): prepend the caller's read-only working-context blob to a worker's task message, so a
+ * sliced child can LOCATE its artifact (absolute paths / cwd) — the concrete context the Planner otherwise
+ * strips when it paraphrases the parent goal into child subtasks. Distinct from `persona`: persona is a STANCE
+ * on the SYSTEM prompt (a privileged seam); context is neutral run-state FACTS on the USER message (the form
+ * the live POC `poc/ba9-context-thread.mjs` validated: no-context 0/3 → context 3/3 on a weak model). Absent/
+ * blank ⇒ the task message is byte-identical to pre-BA-9 (backward-compatible). Carries down the tree via
+ * `forChild` (a child of a worker rooted at `/proj` is still rooted at `/proj`), like `persona`.
+ * @param {string} task
+ * @param {unknown} context
+ * @returns {string}
+ */
+function withContext(task, context) {
+  const c = typeof context === 'string' ? context.trim() : '';
+  return c ? `Working context (read-only):\n${c}\n\n${task}` : task;
+}
+
+/**
  * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
  * the WHOLE task's final answer; a child grading its own slice against the whole definition-of-done is wasted
  * (the verdict is never read by the parent) AND misapplied (a slice isn't expected to satisfy the whole DoD).
@@ -91,9 +114,10 @@ function workerPersonaPrefix(persona) {
  * answered over the parent's corpus; a child has its own subtask and must not re-scan the parent's full corpus
  * (that would fan a whole-corpus count out under every child). The `critical → force-verify` SAFETY FLOOR is
  * unaffected — it keys on the task text via `isCritical`, not the contract, so a critical child still
- * self-verifies. Handle tools (`opts.tools`), `synthesize`, `maxDepth`, and **`persona`** carry down — the
- * persona is a DURABLE worker stance (a child of a "senior security engineer" is still one), unlike the
- * top-only `contract`/`evaluate` setpoint. It rides through the `...opts` spread (not in the strip list).
+ * self-verifies. Handle tools (`opts.tools`), `synthesize`, `maxDepth`, **`persona`**, and **`context`** (BA-9)
+ * carry down — the persona is a DURABLE worker stance (a child of a "senior security engineer" is still one)
+ * and the context is durable run-state (a child rooted at `/proj` is still rooted at `/proj`), unlike the
+ * top-only `contract`/`evaluate` setpoint. They ride through the `...opts` spread (not in the strip list).
  * @param {RecurseOptions} opts
  * @returns {RecurseOptions}
  */
@@ -173,8 +197,32 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   **SECURITY:** this is a PRIVILEGED system-prompt seam — treat `persona` like a system prompt. Do NOT pass
  *   untrusted / end-user-controlled text here; a hostile persona is prepended ahead of the decomposition policy
  *   and can override it (and any safety framing) for every worker in the tree. Caller-trusted input only.
+ * @property {string} [context] - (BA-9 / relayfact F19) An optional caller-supplied READ-ONLY working-context
+ *   blob (e.g. "project root: /abs/path\nfiles are relative to it") prepended to EVERY worker's task message as
+ *   a `Working context:` block, so a sliced child can LOCATE its artifact — the concrete context (absolute
+ *   paths / cwd) the Planner strips when it paraphrases the parent goal into child subtasks. CARRIES DOWN the
+ *   tree (preserved by `forChild`, like `persona`) and, when forced fan-out plans, is forwarded as the Planner's
+ *   `info` so the slices themselves are path-aware. Also shown to the verifier (neutral FACTS, not a stance, so
+ *   no anti-sycophancy concern — and an agentic critic needs the path to exercise the artifact). Distinct from
+ *   `persona`: persona is a privileged SYSTEM-prompt stance; context is run-state facts on the USER message.
+ *   Absent/blank ⇒ byte-identical to pre-BA-9 (backward-compatible). Validated live (`poc/ba9-context-thread.mjs`:
+ *   a weak model went 0/3 → 3/3 at locating an unguessable file once the root was threaded).
  * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
  *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
+ * @property {{sensor: (result: any, ctx: {task: string, context: string|undefined, contract: string|null}) => (Verdict|Promise<Verdict>), maxIterations?: number, temperatures?: number[]}} [refineLeaf]
+ *   (Opt-in, BA-8 / relayfact F17) Turn a DEFINITE LEAF (a node that is offered no `spawn_child` — `simple`
+ *   tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass, so a failed
+ *   slice can self-correct. `sensor` is a DETERMINISTIC close (test/compile/lint — NOT a model judge, R-S8) that
+ *   returns a `Verdict`; on a non-pass its `critique` (the GAP, not the transcript) is fed FRESH into the next
+ *   attempt (D6/A1 anti-anchoring) and the **retry temperature ESCALATES** (`temperatures`, default
+ *   `[0.2,0.7,1.0]`) — the live-validated requirement that lets a weak model escape a repeat-the-same-mistake rut
+ *   (`poc/ba8-leaf-refine.mjs`: 0/5 → 2-3/5; flat temp recovers 0/5). `maxIterations` defaults to
+ *   `temperatures.length`; the REAL bound is bareguard (each attempt is gate-checked + metered). CARRIES DOWN the
+ *   tree (preserved by `forChild`), so it engages at the leaves of a Family-A decomposition. Recovery is PARTIAL
+ *   (a stubborn blind spot may persist) — `receipts.refineLeaf.passed` reports honestly. Does NOT apply to a node
+ *   that delegates (its children + the tree verify own quality), nor to the scan/fanout/partition dispatch paths.
+ *   Absent ⇒ a leaf is a single pass (byte-identical to pre-BA-8). An error-keyed `recall` is the CALLER's tool
+ *   (`opts.tools`) keyed off the fed-back critique — bareagent stays litectx-agnostic.
  * @property {string} [contract] - Definition of done (A3). When present, the verifier grades against THIS,
  *   not the loose task, and verification always runs.
  * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate]
@@ -234,6 +282,9 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {boolean} incomplete
  * @property {boolean} halted
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
+ * @property {{iterations: number, passed: boolean, temperatures: number[]}} [refineLeaf] - (BA-8) when this leaf
+ *   ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally passed
+ *   (false = honest non-recovery, not a faked success).
  * @property {string|null} model
  * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
  *   or null/absent for a plain reasoning node.
@@ -401,6 +452,15 @@ async function recurse(task, ctx = {}, opts = {}) {
     if (Array.isArray(opts.corpus)) retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
   }
   const handleTools = [...(Array.isArray(opts.tools) ? opts.tools : []), ...retrievalTools];
+
+  // BA-8 (opt-in): a DEFINITE leaf (no spawn offered — `simple` tier or at `maxDepth`) with a caller sensor runs
+  // as a bounded refine-with-escalation loop instead of a single pass, so a failed slice self-corrects. Gating on
+  // `!canSpawn` keeps it predictable (a node that may delegate is an orchestrator, not a leaf) and means the seam
+  // engages exactly at the leaves of a Family-A tree (it carries down via forChild). A no-op when unset.
+  if (!canSpawn && opts.refineLeaf && typeof opts.refineLeaf.sensor === 'function') {
+    return recurseRefineLeaf(task, ctx, opts, { provider, system, handleTools, depth, critical, node, sensor: opts.refineLeaf.sensor });
+  }
+
   // NB-3: collect each child's declared RESULT value (copy-on-return: the value, never its transcript) so the
   // reducer can aggregate them. Step-3's seam handed the receipts only, so a code-reduce could not see what to
   // combine — this closes that gap and is what Family B (step 5) will reduce over `runPlan` results[].
@@ -421,7 +481,8 @@ async function recurse(task, ctx = {}, opts = {}) {
   // Fresh message array = a true fresh window (RC-2 copy-on-return, IN side): the worker sees ONLY its task,
   // never a parent transcript. `ctx.depth` is threaded so bareguard's policy can enforce the depth cap (§6).
   const out = await loop.run(
-    [{ role: 'user', content: task }],
+    // BA-9: prepend the caller's read-only working-context (paths/cwd) so this worker can locate its artifact.
+    [{ role: 'user', content: withContext(task, opts.context) }],
     tools,
     // auditSafeCtx: the run ctx reaches the gate as `_ctx`; strip the key-bearing provider (F16/BA-1). The
     // worker Loop already has `provider` as a constructor option, so stripping it from the run ctx is invisible
@@ -501,6 +562,86 @@ async function recurse(task, ctx = {}, opts = {}) {
       return { incomplete: true, best: result, receipts: node };
     }
     throw err;
+  }
+}
+
+/**
+ * BA-8 leaf-refine — run a DEFINITE leaf as a bounded generate→sense→regenerate loop (relayfact F17). Reuses the
+ * existing `refine.js` primitive (the Outcomes iterate→grade→revise port): each attempt is a FRESH leaf Loop
+ * (fresh window = fresh-feedback, D6/A1) seeded with the working-context'd task + (on a retry) the prior GAP, run
+ * at an ESCALATING temperature — the live-validated requirement that lets a weak model escape a repeat-the-same-
+ * mistake rut (a flat temperature recovered 0/5 in `poc/ba8-leaf-refine.mjs`). The `sensor` is the caller's
+ * DETERMINISTIC close (test/compile/lint, not a model judge). Governance is bareguard's: every attempt is gate-
+ * checked (`ctx.policy`) and metered (`onLlmResult`); a HaltError mid-loop is a clean `{incomplete}`. Honest
+ * non-recovery is reported (`receipts.refineLeaf.passed=false`), never a faked pass. An optional rubric `verify`
+ * still runs on top when a `contract`/`evaluate`/critical applies (the sensor gates retries; the rubric grades).
+ * @param {string} task
+ * @param {RecurseCtx} ctx
+ * @param {RecurseOptions} opts
+ * @param {{provider: Provider, system: string, handleTools: ToolDef[], depth: number, critical: boolean, node: RecurseNode, sensor: Function}} state
+ * @returns {Promise<RecurseResult>}
+ */
+async function recurseRefineLeaf(task, ctx, opts, state) {
+  const { provider, system, handleTools, depth, critical, node, sensor } = state;
+  node.model = provider.model || null;
+  const cfg = /** @type {{maxIterations?: number, temperatures?: number[]}} */ (opts.refineLeaf || {});
+  const temps = Array.isArray(cfg.temperatures) && cfg.temperatures.length ? cfg.temperatures : DEFAULT_REFINE_TEMPS;
+  const maxIterations = Number.isInteger(cfg.maxIterations) && /** @type {number} */ (cfg.maxIterations) > 0
+    ? /** @type {number} */ (cfg.maxIterations) : temps.length;
+
+  let lastTokens = null;
+  // One attempt = a fresh leaf Loop (no spawn tool: a retry is a direct correction, not a re-decomposition) at the
+  // iteration's temperature, with the GAP fed forward as fresh feedback. A governance halt → throw so refine stops.
+  const attempt = async ({ iteration, critique }) => {
+    const temperature = temps[Math.min(iteration, temps.length - 1)];
+    const loop = new Loop({
+      provider, system,
+      policy: ctx.policy || undefined,
+      onLlmResult: ctx.onLlmResult || undefined,
+      stream: ctx.stream || undefined,
+      throwOnError: false,
+    });
+    const base = withContext(task, opts.context);
+    const userText = critique
+      ? `${base}\n\nYour previous attempt FAILED these checks:\n${critique}\n\nReturn a corrected result that passes ALL of them.`
+      : base;
+    const out = await loop.run([{ role: 'user', content: userText }], handleTools, { ctx: auditSafeCtx(ctx, { depth }), temperature });
+    lastTokens = out.metrics ? out.metrics.tokens : lastTokens;
+    if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError('refine-leaf attempt halted', { rule: out.error.slice('halt:'.length) });
+    if (out.error) throw new Error(out.error); // a non-halt worker fault → honest incomplete
+    return out.text;
+  };
+
+  try {
+    const outcome = await refine({
+      attempt,
+      evaluate: (result, c) => sensor(result, { task, context: opts.context, contract: c.contract }),
+      contract: typeof opts.contract === 'string' ? opts.contract : undefined,
+      maxIterations,
+    });
+    node.tokens = lastTokens;
+    node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: temps.slice(0, outcome.iterations) };
+    const result = outcome.result;
+
+    // Optional rubric layer on top of the deterministic sensor (RC-7): forced for critical, or a contract/override.
+    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
+    if (wantVerify) {
+      const verdict = await verify(task, result, ctx, opts);
+      node.verdict = verdict;
+      return { result, verdict, receipts: node };
+    }
+    // No rubric layer ⇒ the sensor's final verdict IS the node verdict (a non-pass is surfaced, not hidden).
+    node.verdict = outcome.verdict || null;
+    return { result, verdict: outcome.verdict || null, receipts: node };
+  } catch (err) {
+    if (err instanceof HaltError) {
+      node.halted = true;
+      node.incomplete = true;
+      return { incomplete: true, best: null, receipts: node };
+    }
+    node.tokens = lastTokens;
+    node.incomplete = true;
+    return { incomplete: true, best: null, receipts: node };
   }
 }
 
@@ -747,7 +888,10 @@ async function recurseFanout(task, ctx, opts, state) {
     const planner = new Planner({ provider, onLlmResult: /** @type {any} */ (ctx.onLlmResult) || undefined });
     let steps;
     try {
-      steps = await planner.plan(task, { count });
+      // BA-9: forward the working-context as the Planner's `info` so the slices it writes are path-aware (a
+      // child still also receives `opts.context` directly via `forChild` — this just improves the split).
+      const planContext = typeof opts.context === 'string' && opts.context.trim() ? { count, info: opts.context } : { count };
+      steps = await planner.plan(task, planContext);
     } catch (err) {
       if (err instanceof HaltError) throw err;
       node.incomplete = true;
@@ -928,6 +1072,9 @@ function buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults) {
  */
 function verify(task, result, ctx, opts) {
   const contract = typeof opts.contract === 'string' ? opts.contract : null;
+  // BA-9: the verifier sees the working-context too — neutral facts (not a stance, so no anti-sycophancy risk),
+  // and an agentic critic needs the path to exercise the artifact. A caller `evaluate` gets the RAW task (it owns
+  // its own context); only the default isolated grader is contextualized.
   if (typeof opts.evaluate === 'function') {
     return Promise.resolve(opts.evaluate(result, { contract, task }));
   }
@@ -937,7 +1084,7 @@ function verify(task, result, ctx, opts) {
     ? 'Judge whether the result satisfies the definition of done. Be strict and adversarial; cite the specific gap on any shortfall.'
     : 'Judge whether the result fully and correctly answers the goal. Be strict and adversarial; cite the specific gap on any shortfall.';
   return evaluator.evaluate(
-    task,
+    withContext(task, opts.context),
     result,
     { rubric, contract: contract || undefined },
     { onLlmResult: /** @type {any} */ (ctx.onLlmResult), policy: ctx.policy },
