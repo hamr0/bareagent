@@ -207,6 +207,9 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   `persona`: persona is a privileged SYSTEM-prompt stance; context is run-state facts on the USER message.
  *   Absent/blank ⇒ byte-identical to pre-BA-9 (backward-compatible). Validated live (`poc/ba9-context-thread.mjs`:
  *   a weak model went 0/3 → 3/3 at locating an unguessable file once the root was threaded).
+ *   **SECURITY:** this becomes part of every worker's prompt (and the verifier's) — lower-privilege than
+ *   `persona` (the USER message, not the SYSTEM prompt) but still a prompt-injection surface. Intended for
+ *   TRUSTED run-state (paths/cwd); do NOT pass untrusted / end-user-controlled text here.
  * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
  *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
  * @property {{sensor: (result: any, ctx: {task: string, context: string|undefined, contract: string|null}) => (Verdict|Promise<Verdict>), maxIterations?: number, temperatures?: number[]}} [refineLeaf]
@@ -634,12 +637,12 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     node.verdict = outcome.verdict || null;
     return { result, verdict: outcome.verdict || null, receipts: node };
   } catch (err) {
+    node.tokens = lastTokens; // record whatever attempts DID spend, on both the halt and fault paths
     if (err instanceof HaltError) {
       node.halted = true;
       node.incomplete = true;
       return { incomplete: true, best: null, receipts: node };
     }
-    node.tokens = lastTokens;
     node.incomplete = true;
     return { incomplete: true, best: null, receipts: node };
   }
