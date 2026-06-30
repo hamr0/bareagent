@@ -592,7 +592,17 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
   const maxIterations = Number.isInteger(cfg.maxIterations) && /** @type {number} */ (cfg.maxIterations) > 0
     ? /** @type {number} */ (cfg.maxIterations) : temps.length;
 
-  let lastTokens = null;
+  // A refine leaf runs N Loops, so its receipts.tokens SUMS every attempt's spend (not just the last) — the
+  // honest cost of the node. The 4-tier tokens object (`{input,output,cacheCreation,cacheRead}`, loop.js) is flat
+  // numeric, so we accrue field-wise (robust to extra/renamed numeric fields). The gate already sees each attempt
+  // via onLlmResult independently; this is the receipts mirror. Stays null until an attempt produces metrics.
+  /** @type {Record<string, number>|null} */
+  let tokensSum = null;
+  const accrueTokens = (/** @type {any} */ t) => {
+    if (!t || typeof t !== 'object') return;
+    tokensSum = tokensSum || {};
+    for (const [k, v] of Object.entries(t)) if (typeof v === 'number') tokensSum[k] = (tokensSum[k] || 0) + v;
+  };
   // One attempt = a fresh leaf Loop (no spawn tool: a retry is a direct correction, not a re-decomposition) at the
   // iteration's temperature, with the GAP fed forward as fresh feedback. A governance halt → throw so refine stops.
   const attempt = async ({ iteration, critique }) => {
@@ -609,7 +619,7 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       ? `${base}\n\nYour previous attempt FAILED these checks:\n${critique}\n\nReturn a corrected result that passes ALL of them.`
       : base;
     const out = await loop.run([{ role: 'user', content: userText }], handleTools, { ctx: auditSafeCtx(ctx, { depth }), temperature });
-    lastTokens = out.metrics ? out.metrics.tokens : lastTokens;
+    accrueTokens(out.metrics ? out.metrics.tokens : null);
     if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError('refine-leaf attempt halted', { rule: out.error.slice('halt:'.length) });
     if (out.error) throw new Error(out.error); // a non-halt worker fault → honest incomplete
     return out.text;
@@ -622,7 +632,7 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       contract: typeof opts.contract === 'string' ? opts.contract : undefined,
       maxIterations,
     });
-    node.tokens = lastTokens;
+    node.tokens = tokensSum;
     node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: temps.slice(0, outcome.iterations) };
     const result = outcome.result;
 
@@ -637,7 +647,7 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     node.verdict = outcome.verdict || null;
     return { result, verdict: outcome.verdict || null, receipts: node };
   } catch (err) {
-    node.tokens = lastTokens; // record whatever attempts DID spend, on both the halt and fault paths
+    node.tokens = tokensSum; // record whatever attempts DID spend, on both the halt and fault paths
     if (err instanceof HaltError) {
       node.halted = true;
       node.incomplete = true;

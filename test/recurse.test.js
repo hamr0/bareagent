@@ -461,6 +461,19 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
     assert.equal(out.incomplete, undefined, 'a sensor miss is not a halt/dead-worker incomplete — a result exists');
   });
 
+  it('receipts.tokens SUMS spend across all refine attempts, not just the last', async () => {
+    // Same scripted per-call usage; a 3-attempt leaf must report 3× a 1-attempt leaf's tokens (last-only would tie).
+    const one = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
+    const a = await recurse(SIMPLE_TASK, { provider: one.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 1 } });
+    const three = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
+    const b = await recurse(SIMPLE_TASK, { provider: three.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
+    assert.equal(a.receipts.refineLeaf.iterations, 1);
+    assert.equal(b.receipts.refineLeaf.iterations, 3);
+    assert.ok(a.receipts.tokens.input > 0, 'a single attempt recorded some input tokens');
+    assert.equal(b.receipts.tokens.input, a.receipts.tokens.input * 3, 'three attempts sum to 3× one attempt (summed, not last-only)');
+    assert.equal(b.receipts.tokens.output, a.receipts.tokens.output * 3, 'output tokens sum too');
+  });
+
   it('does NOT engage on a node that can spawn (an orchestrator is not a leaf)', async () => {
     const sp = scriptedProvider(decomposingHandler());
     const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { refineLeaf: { sensor: ALWAYS_PASS } });
