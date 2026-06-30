@@ -1172,6 +1172,33 @@ doc/example fixes. All validated with run-it-don't-assert POCs (no handwaving):
 - **Docs shipped WITH the code:** CHANGELOG `[Unreleased]` + README + this PRD + `bareagent.context.md`
   in the same change (the round-1 lesson: the integration guide is a shipped surface too).
 
+**Found POST-RELEASE (relayfact adopter round 3, 2026-06-30) → shipped in `0.23.0`.** Two 🟠 enhancement asks
+(`UPSTREAM-FIXES.md` BA-8/BA-9), both validated against `0.22.0` source (premises confirmed — neither buildable
+by the consumer), both **thin glue over existing primitives** (not a new engine), both POC-first with able-to-fail
+spikes before any `src/recurse.js` edit:
+- **(BA-9/F19) the Planner strips concrete context, so a sliced worker can't locate its artifact.** It paraphrases
+  the goal into child subtasks and drops absolute paths/cwd — observed live in probe-04 (workers guessed
+  `.`/`~`/`/tmp`, all denied). **Added `opts.context`** — a read-only blob prepended to every worker's task
+  message (+ Planner `info` + the verifier), carrying down via `forChild` like `persona` but distinct (persona =
+  privileged SYSTEM stance; context = USER-message run-state facts, so callers stop laundering cwd through
+  `persona`). **POC** `poc/ba9-context-thread.mjs` (real model, able-to-fail): an unguessable random-temp-dir file
+  + a scope-gated read tool — **no-context 0/3** (reproduces probe-04) **→ context 3/3**. +6 mutation-proven tests.
+- **(BA-8/F17) a leaf is single-pass — a failed slice can't self-correct, and `forChild` strips the top
+  `evaluate`/`contract`, so a consumer can only retry the WHOLE tree.** **Added `opts.refineLeaf`** (opt-in): a
+  definite leaf (`!canSpawn`) becomes a bounded generate→sense→regenerate loop reusing `refine.js`; a caller
+  DETERMINISTIC `sensor` (test/compile/lint, not a model judge) feeds the gap FRESH into the next attempt with
+  **escalating temperature**. Gate-bounded per attempt; honest non-recovery (`receipts.refineLeaf.passed`),
+  `receipts.tokens` sums attempts; the error-keyed `recall` stays the caller's `opts.tools` (litectx-agnostic).
+  **POC, and the temperature finding is load-bearing:** `poc/ba8-leaf-refine.mjs` measured **0/5** recovery at a
+  *flat* temperature (a weak model regenerates byte-identical wrong code and ignores even crisp deterministic
+  feedback — nearly mis-called "BA-8 invalid") → **2-3/5** once retries escalate (`[0.2,0.7,1.0]`). Recovery is
+  PARTIAL by nature (a stubborn blind spot persists). +7 mutation-proven tests. **Lesson:** *don't trust a
+  degenerate number; debug the harness* fired twice (a sensor-extractor bug + the temperature artifact).
+- **Verified-shipped-vs-POC** through the real `recurse()` (`poc/ba89-shipped-smoke.mjs`, gpt-4o-mini): BA-9 leaf
+  located+read the file via threaded context; BA-8 refine ran + recovered. Then `/diff-review` + `/security` on
+  the branch (no handwaving): closed a `context` prompt-injection caveat gap + a halt-path token-receipts gap;
+  confirmed the BA-1 key-strip holds on the new path and POCs aren't shipped. Full suite **710 pass / 0 fail**.
+
 ---
 
 ## Source & cross-refs

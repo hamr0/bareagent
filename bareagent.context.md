@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.22.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
+> v0.23.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -37,6 +37,8 @@ Eight entry points:
 | Decompose a hard task into a verified tree (RLM) | recurse — decompose → fan-out → verify → synthesize in one call (**wire a gate**, cost is open by design) |
 | Count / answer "how many / all" over a corpus, honestly | recurse(task, ctx, `{ corpus, retrieval: 'scan' }`) — scans every slice, CODE-counts |
 | Give recurse workers a persona/role (senior-dev stance) | recurse(task, ctx, `{ persona }`) — prepended to every worker, carries down the tree; not applied to the verifier |
+| Tell recurse workers WHERE they are (paths/cwd) so a slice can find its file | recurse(task, ctx, `{ context }`) — read-only blob on every worker's task message + the Planner + verifier; carries down (facts, not a stance) |
+| Let a recurse LEAF retry its own failure with a deterministic check | recurse(task, ctx, `{ refineLeaf: { sensor } }`) — leaf becomes a bounded generate→sense→regenerate loop; your sensor (test/compile/lint), gap fed back, escalating temperature |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |
 | Require human approval before dangerous actions | Checkpoint |
@@ -669,7 +671,18 @@ const out = await recurse('Audit auth.js, billing.js, gateway.js for authz bugs'
 });
 ```
 
-**What a delegated child inherits (important — the setpoint is the TOP node's job):** when a worker delegates with `spawn_child`, the child runs a **fresh `recurse`** that inherits `tools`, `synthesize`, `maxDepth`, and `persona` — but the parent's **`contract`/`evaluate` are stripped** (and the forced `count`/`mode` + the corpus `retrieval` knobs). A slice is not graded against the *whole*-task definition-of-done (that verdict is the top node's, and a slice satisfying the whole DoD is the wrong question); only the top `recurse` verifies the synthesized result. The non-overridable `critical → force-verify` safety floor still fires per node (it keys on the task text, not the contract). So: set `contract`/`evaluate` once at the top; they do not — and should not — re-run per intermediate node.
+**Worker context (`opts.context`, v0.23.0):** a read-only working-context string (paths/cwd) PREPENDED to every worker's TASK message as a `Working context:` block — so a sliced child can **locate its artifact** (the Planner paraphrases the goal into subtasks and drops absolute paths; without this, workers guess `.`/`~`/`/tmp` and get denied). Forwarded to the Planner as `info` (path-aware slices) and shown to the verifier too (neutral FACTS, not a stance — distinct from `persona`, which is a privileged SYSTEM-prompt stance). Carries down the tree. **Security:** it still becomes part of the prompt, so pass caller-trusted run-state only, never untrusted/end-user text (lower-privilege than `persona` — user message, not system — but still an injection surface). Absent ⇒ the task message is unchanged.
+
+**Leaf self-correction (`opts.refineLeaf`, v0.23.0, opt-in):** turn a **definite leaf** (a node offered no `spawn_child` — `simple` tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass: `{ sensor, maxIterations?, temperatures? }`. `sensor(result, { task, context, contract }) → Verdict` is YOUR **deterministic** close (test/compile/lint — not a model judge); on a non-pass its `critique` (the gap, not the transcript) is fed FRESH into the next attempt and the **retry temperature ESCALATES** (default `[0.2, 0.7, 1.0]` — load-bearing: a weak model at a flat temperature regenerates identical wrong code and ignores even crisp feedback). Each attempt is gate-checked + metered; a HaltError mid-loop → clean `{ incomplete }`; honest non-recovery → `receipts.refineLeaf.passed === false` (never a faked pass); `receipts.tokens` sums all attempts. The error-keyed `recall` stays YOUR tool (`opts.tools`), keyed off the fed-back critique — bareagent stays litectx-agnostic. Carries down (engages at the leaves). Absent ⇒ a leaf is a single pass.
+
+```javascript
+const out = await recurse('Fix the failing function in calc.js', ctx, {
+  context: `project root: ${process.cwd()}\nresolve relative paths against it`,
+  refineLeaf: { sensor: (code) => runTestsAndGrade(code) },   // your deterministic test/compile close
+});
+```
+
+**What a delegated child inherits (important — the setpoint is the TOP node's job):** when a worker delegates with `spawn_child`, the child runs a **fresh `recurse`** that inherits `tools`, `synthesize`, `maxDepth`, `persona`, `context`, and `refineLeaf` — but the parent's **`contract`/`evaluate` are stripped** (and the forced `count`/`mode` + the corpus `retrieval` knobs). A slice is not graded against the *whole*-task definition-of-done (that verdict is the top node's, and a slice satisfying the whole DoD is the wrong question); only the top `recurse` verifies the synthesized result. The non-overridable `critical → force-verify` safety floor still fires per node (it keys on the task text, not the contract). So: set `contract`/`evaluate` once at the top; they do not — and should not — re-run per intermediate node.
 
 ## Wiring with Evaluator + refine (output-side verification)
 

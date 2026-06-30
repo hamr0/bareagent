@@ -4,6 +4,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-06-30
+
 ### Added
 
 - **`recurse({ context })` — thread a read-only working-context blob to every worker (relayfact F19/BA-9).** The Planner paraphrases the parent goal into child subtasks and **drops the concrete context** (absolute paths / cwd), so a sliced worker couldn't locate its artifact — observed live in relayfact probe-04, where workers guessed `.`/`~`/`/tmp` and were all denied. `opts.context` (a string, e.g. `"project root: /abs/path\nresolve relative paths against it"`) is now prepended to **every worker's task message** as a `Working context (read-only):` block, **forwarded to the Planner as `info`** so forced-fan-out slices are path-aware, and **shown to the isolated verifier** (neutral run-state FACTS, not a stance — no anti-sycophancy concern, and an agentic critic needs the path to exercise the artifact). It **carries down the tree** via `forChild` (a child rooted at `/proj` stays rooted at `/proj`), exactly like `persona` — but distinct from it: persona is a privileged SYSTEM-prompt stance, context is run-state facts on the USER message, so callers no longer have to launder the working dir through `persona` (the documented relayfact workaround). **POC-first** (`poc/ba9-context-thread.mjs`, real model, able-to-fail): a weak model went **0/3 → 3/3** at locating an unguessable random-temp-dir file once the root was threaded (no-context arm reproduces probe-04; context arm reads the absolute path first try). Absent/blank ⇒ byte-identical to before (backward-compatible). `src/recurse.js`, `test/recurse.test.js` (+6, mutation-proven).
