@@ -245,3 +245,124 @@ describe('Anthropic cacheSystem opt-in (cache_control on the system prompt)', ()
     server.close();
   });
 });
+
+// BA-10: a model that rejects a non-default `temperature` (400) must not fail the whole call — the
+// provider drops the temperature, retries once, and reports `temperatureDropped`. This drives each
+// provider's REAL generate() over the wire, proving the strip finds the temperature at that provider's
+// own body location (flat for OpenAI/Anthropic, nested under generationConfig/options for Gemini/Ollama).
+//
+// The server 400s the FIRST request (its body carries "temperature") and 200s the retry — so a passing
+// test also proves the retry body no longer carries a temperature at all.
+function tempRejectServer(okBody, errBody) {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    let chunks = '';
+    req.on('data', d => (chunks += d));
+    req.on('end', () => {
+      received.push({ url: req.url, body: chunks ? JSON.parse(chunks) : null });
+      if (/temperature/.test(chunks)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(errBody));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(okBody));
+      }
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ server, received, url: `http://127.0.0.1:${server.address().port}` })));
+}
+
+// The deprecated-message shape each provider's _request reads: OpenAI/Anthropic/Gemini use error.message,
+// Ollama uses a bare `error` string.
+const DEPRECATED_NESTED = { error: { message: '`temperature` is deprecated for this model.' } };
+const DEPRECATED_STRING = { error: '`temperature` is deprecated for this model.' };
+
+const DEGRADE_CASES = [
+  {
+    name: 'OpenAI',
+    make: (url) => new OpenAIProvider({ apiKey: 'x', baseUrl: url }),
+    ok: { model: 'm', choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+    errBody: DEPRECATED_NESTED,
+    tempInBody: (b) => b.temperature,
+  },
+  {
+    name: 'Anthropic',
+    make: (url) => new AnthropicProvider({ apiKey: 'x', baseUrl: url }),
+    ok: { model: 'm', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+    errBody: DEPRECATED_NESTED,
+    tempInBody: (b) => b.temperature,
+  },
+  {
+    name: 'Gemini',
+    make: (url) => new GeminiProvider({ apiKey: 'x', baseUrl: url, model: 'gemini-2.5-flash' }),
+    ok: { modelVersion: 'm', candidates: [{ content: { parts: [{ text: 'ok' }] } }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } },
+    errBody: DEPRECATED_NESTED,
+    tempInBody: (b) => b.generationConfig && b.generationConfig.temperature,
+  },
+  {
+    name: 'Ollama',
+    make: (url) => new OllamaProvider({ url }),
+    ok: { model: 'm', message: { content: 'ok' }, prompt_eval_count: 1, eval_count: 1 },
+    errBody: DEPRECATED_STRING,
+    tempInBody: (b) => b.options && b.options.temperature,
+  },
+];
+
+describe('BA-10 — temperature graceful degradation', () => {
+  for (const c of DEGRADE_CASES) {
+    it(`${c.name}: drops temperature + retries once, reports temperatureDropped and omits it on retry`, async () => {
+      const { server, url, received } = await tempRejectServer(c.ok, c.errBody);
+      const warns = [];
+      const orig = console.warn;
+      console.warn = (m) => warns.push(m);
+      try {
+        const r = await c.make(url).generate([{ role: 'user', content: 'hi' }], [], { temperature: 0.2 });
+        assert.equal(r.temperatureDropped, true, `${c.name}: result must flag the drop`);
+        assert.equal(r.text, 'ok', `${c.name}: recovered response body`);
+        assert.equal(received.length, 2, `${c.name}: exactly one retry`);
+        assert.ok(c.tempInBody(received[0].body) != null, `${c.name}: first request carried the temperature`);
+        assert.equal(c.tempInBody(received[1].body) == null, true, `${c.name}: retry request dropped the temperature`);
+        assert.equal(warns.length, 1, `${c.name}: warned exactly once`);
+      } finally {
+        console.warn = orig;
+        server.close();
+      }
+    });
+  }
+
+  it('warns only ONCE per provider instance across multiple generate calls (no per-attempt spam)', async () => {
+    const { server, url } = await tempRejectServer(
+      { model: 'm', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+      DEPRECATED_NESTED,
+    );
+    const warns = [];
+    const orig = console.warn;
+    console.warn = (m) => warns.push(m);
+    try {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url });
+      await p.generate([{ role: 'user', content: 'a' }], [], { temperature: 0.2 });
+      await p.generate([{ role: 'user', content: 'b' }], [], { temperature: 0.7 });
+      assert.equal(warns.length, 1, 'the degrade warning is emitted once per instance, not per attempt');
+    } finally {
+      console.warn = orig;
+      server.close();
+    }
+  });
+
+  it('does NOT degrade a request that sent no temperature (leaves other 400s alone)', async () => {
+    // A no-temperature call that 400s for another reason must surface as an error, not silently retry.
+    const server = http.createServer((req, res) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'messages: required' } }));
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}`;
+    await assert.rejects(
+      new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []),
+      /messages: required/,
+    );
+    server.close();
+  });
+});

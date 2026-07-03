@@ -2,6 +2,7 @@
 
 const http = require('http');
 const { ProviderError } = require('./errors');
+const { requestWithTemperatureFallback } = require('./provider-temperature');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -48,7 +49,14 @@ class OllamaProvider {
       }));
     }
 
-    const data = await this._request('/api/chat', body);
+    // BA-10: graceful degrade if a model rejects a non-default `temperature` (Ollama nests it under
+    // `options`). Keyed off the API error text, so dormant on models that accept temperature.
+    const { data, temperatureDropped } = await requestWithTemperatureFallback({
+      request: () => this._request('/api/chat', body),
+      hadTemperature: () => body.options?.temperature != null,
+      stripTemperature: () => { if (body.options) delete body.options.temperature; },
+      warnOnce: () => this._warnTemperatureDropped(),
+    });
     const msg = data.message || {};
 
     return {
@@ -65,7 +73,15 @@ class OllamaProvider {
         inputTokens: data.prompt_eval_count || 0,
         outputTokens: data.eval_count || 0,
       },
+      ...(temperatureDropped && { temperatureDropped: true }),
     };
+  }
+
+  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped() {
+    if (this._warnedTempDropped) return;
+    this._warnedTempDropped = true;
+    console.warn(`[OllamaProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

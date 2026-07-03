@@ -42,7 +42,7 @@ function scriptedProvider(handler, { model = 'stub-model', name = 'stub' } = {})
           options,
         });
         const r = (await handler(messages, tools, options, calls.length - 1)) || {};
-        return { text: r.text || '', toolCalls: r.toolCalls || [], usage: r.usage || { inputTokens: 5, outputTokens: 3 }, model };
+        return { text: r.text || '', toolCalls: r.toolCalls || [], usage: r.usage || { inputTokens: 5, outputTokens: 3 }, model, ...(r.temperatureDropped && { temperatureDropped: true }) };
       },
     },
   };
@@ -479,6 +479,37 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
     const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { refineLeaf: { sensor: ALWAYS_PASS } });
     assert.equal(out.receipts.refineLeaf, undefined, 'the spawning top node is not refined');
     assert.ok(out.receipts.spawned.length >= 1, 'it still decomposed normally');
+  });
+
+  // BA-10: on a temperature-fixed model the provider drops the escalating temperature and the leaf runs at
+  // the model's default. The seam must (a) still run — sonnet's whole leaf-refine collapsed to `incomplete`
+  // before the provider fix — and (b) report the EFFECTIVE temps (null = dropped), never claim the ignored ones.
+  const tempFixedHandler = ({ recoverOnRetry = true } = {}) => (messages, tools, options) => {
+    const user = lastUser(messages);
+    const text = (recoverOnRetry && user.includes('previous attempt FAILED')) ? 'here is the FIXED answer' : 'broken answer';
+    // Simulate a model that rejected the requested temperature and ran at its default (provider dropped it).
+    return { text, temperatureDropped: options && options.temperature != null };
+  };
+
+  it('a temperature-fixed model still runs the leaf loop (BA-10: no collapse to incomplete)', async () => {
+    const sp = scriptedProvider(tempFixedHandler());
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, undefined, 'the leaf ran — the sensor was reached (pre-fix this was incomplete)');
+    assert.ok(String(out.result).includes('FIXED'), 'it recovered via the fed-back gap');
+    assert.equal(out.receipts.refineLeaf.passed, true);
+  });
+
+  it('honest receipt: a dropped temperature is recorded as null (not the ignored requested temp)', async () => {
+    const sp = scriptedProvider(tempFixedHandler({ recoverOnRetry: false })); // exhaust so we see every attempt
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
+    // The model requested 0.2/0.7/1.0 but ran at default each time → the receipt must NOT claim [0.2,0.7,1.0].
+    assert.deepEqual(out.receipts.refineLeaf.temperatures, [null, null, null], 'effective temps: every attempt dropped');
+  });
+
+  it('a temperature-ACCEPTING model records the requested temps (control — effective == requested)', async () => {
+    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false })); // never sets temperatureDropped
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
+    assert.deepEqual(out.receipts.refineLeaf.temperatures, [0.2, 0.7, 1.0], 'accepting model → receipt is the requested escalation, byte-identical to before');
   });
 
   it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {

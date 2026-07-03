@@ -3,6 +3,7 @@
 const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
+const { requestWithTemperatureFallback } = require('./provider-temperature');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -103,7 +104,14 @@ class GeminiProvider {
     if (options.temperature != null) genConfig.temperature = options.temperature;
     if (Object.keys(genConfig).length) body.generationConfig = genConfig;
 
-    const data = await this._request(`/models/${this.model}:generateContent`, body);
+    // BA-10: graceful degrade if a model rejects a non-default `temperature` (Gemini nests it under
+    // generationConfig). Keyed off the API error text, so dormant on models that accept temperature.
+    const { data, temperatureDropped } = await requestWithTemperatureFallback({
+      request: () => this._request(`/models/${this.model}:generateContent`, body),
+      hadTemperature: () => body.generationConfig?.temperature != null,
+      stripTemperature: () => { if (body.generationConfig) delete body.generationConfig.temperature; },
+      warnOnce: () => this._warnTemperatureDropped(),
+    });
 
     let text = '';
     /** @type {ToolCall[]} */
@@ -123,7 +131,15 @@ class GeminiProvider {
       toolCalls,
       model: data.modelVersion || this.model,
       usage: this._normalizeUsage(data.usageMetadata),
+      ...(temperatureDropped && { temperatureDropped: true }),
     };
+  }
+
+  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped() {
+    if (this._warnedTempDropped) return;
+    this._warnedTempDropped = true;
+    console.warn(`[GeminiProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

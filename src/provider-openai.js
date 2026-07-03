@@ -3,6 +3,7 @@
 const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
+const { requestWithTemperatureFallback } = require('./provider-temperature');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -61,7 +62,14 @@ class OpenAIProvider {
       }));
     }
 
-    const data = await this._request('/chat/completions', body);
+    // BA-10: newer models (o1/gpt-5-class) reject a non-default `temperature` with a 400 — drop it and
+    // retry once. `temperatureDropped` flows back so an upstream receipt can report the effective value.
+    const { data, temperatureDropped } = await requestWithTemperatureFallback({
+      request: () => this._request('/chat/completions', body),
+      hadTemperature: () => body.temperature != null,
+      stripTemperature: () => { delete body.temperature; },
+      warnOnce: () => this._warnTemperatureDropped(),
+    });
     const choice = data.choices[0];
     const msg = choice.message;
 
@@ -74,7 +82,15 @@ class OpenAIProvider {
       })),
       model: data.model || this.model,
       usage: this._normalizeUsage(data.usage),
+      ...(temperatureDropped && { temperatureDropped: true }),
     };
+  }
+
+  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped() {
+    if (this._warnedTempDropped) return;
+    this._warnedTempDropped = true;
+    console.warn(`[OpenAIProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

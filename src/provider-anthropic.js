@@ -3,6 +3,7 @@
 const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
+const { requestWithTemperatureFallback } = require('./provider-temperature');
 
 /** @param {string} hostname @returns {boolean} */
 function isLoopbackHost(hostname) {
@@ -91,7 +92,15 @@ class AnthropicProvider {
       }));
     }
 
-    const data = await this._request(body);
+    // BA-10: some models (e.g. claude-sonnet-5) reject a non-default `temperature` with a 400 — drop it
+    // and retry once rather than let the whole call fail. `temperatureDropped` flows back so an upstream
+    // receipt (recurse's refineLeaf) can report the effective temperature, not the one the model ignored.
+    const { data, temperatureDropped } = await requestWithTemperatureFallback({
+      request: () => this._request(body),
+      hadTemperature: () => body.temperature != null,
+      stripTemperature: () => { delete body.temperature; },
+      warnOnce: () => this._warnTemperatureDropped(),
+    });
 
     let text = '';
     /** @type {import('../types').ToolCall[]} */
@@ -115,7 +124,15 @@ class AnthropicProvider {
         cacheReadTokens: data.usage?.cache_read_input_tokens || 0,
         cacheCreationTokens: data.usage?.cache_creation_input_tokens || 0,
       },
+      ...(temperatureDropped && { temperatureDropped: true }),
     };
+  }
+
+  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped() {
+    if (this._warnedTempDropped) return;
+    this._warnedTempDropped = true;
+    console.warn(`[AnthropicProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

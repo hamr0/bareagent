@@ -56,6 +56,10 @@ const DEFAULT_WORKER_BUDGET = 100;
 // low temperature a weak model regenerates byte-identical wrong code and IGNORES even crisp deterministic
 // feedback (0/5 recovery); recovery only appears once retries are given room to vary (0/5 → 2-3/5). So escalation
 // is a DESIGN REQUIREMENT of the seam, not a tuning nicety. Overridable via `opts.refineLeaf.temperatures`.
+// SCOPE (BA-10): this holds for models that ACCEPT `temperature`. On a temperature-fixed model (e.g.
+// claude-sonnet-5 — the provider drops the param, `receipts.refineLeaf.temperatures` records `null`), the
+// escalation lever is inert and the fed-back gap `critique` carries recovery alone (an empirical question the
+// live run answers). The critique is the primary correction lever; temperature is a secondary diversity lever.
 const DEFAULT_REFINE_TEMPS = [0.2, 0.7, 1.0];
 
 /**
@@ -217,9 +221,11 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass, so a failed
  *   slice can self-correct. `sensor` is a DETERMINISTIC close (test/compile/lint — NOT a model judge, R-S8) that
  *   returns a `Verdict`; on a non-pass its `critique` (the GAP, not the transcript) is fed FRESH into the next
- *   attempt (D6/A1 anti-anchoring) and the **retry temperature ESCALATES** (`temperatures`, default
- *   `[0.2,0.7,1.0]`) — the live-validated requirement that lets a weak model escape a repeat-the-same-mistake rut
- *   (`poc/ba8-leaf-refine.mjs`: 0/5 → 2-3/5; flat temp recovers 0/5). `maxIterations` defaults to
+ *   attempt (D6/A1 anti-anchoring) and, on models that ACCEPT `temperature`, the **retry temperature ESCALATES**
+ *   (`temperatures`, default `[0.2,0.7,1.0]`) — the live-validated lever that lets a weak model escape a
+ *   repeat-the-same-mistake rut (`poc/ba8-leaf-refine.mjs`: 0/5 → 2-3/5; flat temp recovers 0/5). On a
+ *   temperature-fixed model (BA-10) the provider drops the param, `receipts.refineLeaf.temperatures` records
+ *   `null`, and the fed-back gap critique carries recovery alone. `maxIterations` defaults to
  *   `temperatures.length`; the REAL bound is bareguard (each attempt is gate-checked + metered). CARRIES DOWN the
  *   tree (preserved by `forChild`), so it engages at the leaves of a Family-A decomposition. Recovery is PARTIAL
  *   (a stubborn blind spot may persist) — `receipts.refineLeaf.passed` reports honestly. Does NOT apply to a node
@@ -285,9 +291,10 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {boolean} incomplete
  * @property {boolean} halted
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
- * @property {{iterations: number, passed: boolean, temperatures: number[]}} [refineLeaf] - (BA-8) when this leaf
- *   ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally passed
- *   (false = honest non-recovery, not a faked success).
+ * @property {{iterations: number, passed: boolean, temperatures: (number|null)[]}} [refineLeaf] - (BA-8) when this
+ *   leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
+ *   passed (false = honest non-recovery, not a faked success). `temperatures` are the EFFECTIVE per-attempt temps
+ *   (BA-10): a `null` marks an attempt the model ran at its DEFAULT because it rejected the requested temperature.
  * @property {string|null} model
  * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
  *   or null/absent for a plain reasoning node.
@@ -603,6 +610,12 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     tokensSum = tokensSum || {};
     for (const [k, v] of Object.entries(t)) if (typeof v === 'number') tokensSum[k] = (tokensSum[k] || 0) + v;
   };
+  // BA-10 honest receipt: the EFFECTIVE temperature per attempt. A model that rejects a non-default
+  // `temperature` (400, unsupported/deprecated) runs at its DEFAULT — the provider drops it and the Loop
+  // surfaces `temperatureDropped`. Recording the requested temp would claim a value the model ignored, so
+  // a dropped attempt is stored as `null` ("provider default"). Indexed by iteration (refine calls once each).
+  /** @type {(number|null)[]} */
+  const effectiveTemps = [];
   // One attempt = a fresh leaf Loop (no spawn tool: a retry is a direct correction, not a re-decomposition) at the
   // iteration's temperature, with the GAP fed forward as fresh feedback. A governance halt → throw so refine stops.
   const attempt = async ({ iteration, critique }) => {
@@ -619,6 +632,10 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       ? `${base}\n\nYour previous attempt FAILED these checks:\n${critique}\n\nReturn a corrected result that passes ALL of them.`
       : base;
     const out = await loop.run([{ role: 'user', content: userText }], handleTools, { ctx: auditSafeCtx(ctx, { depth }), temperature });
+    // `temperatureDropped` is set on the Loop result only when the model rejected the requested temperature
+    // (BA-10); it's absent on the error/halt return shapes, so read it through a narrow cast.
+    const dropped = /** @type {{temperatureDropped?: boolean}} */ (out).temperatureDropped;
+    effectiveTemps[iteration] = dropped ? null : temperature;
     accrueTokens(out.metrics ? out.metrics.tokens : null);
     if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError('refine-leaf attempt halted', { rule: out.error.slice('halt:'.length) });
     if (out.error) throw new Error(out.error); // a non-halt worker fault → honest incomplete
@@ -633,7 +650,10 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       maxIterations,
     });
     node.tokens = tokensSum;
-    node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: temps.slice(0, outcome.iterations) };
+    // `temperatures` = the EFFECTIVE temps (BA-10): a `null` marks an attempt whose requested temperature the
+    // model rejected and ran at its default — so the receipt never claims a value the model ignored. On a
+    // temperature-accepting model this equals the requested `temps.slice(0, iterations)` (byte-identical receipt).
+    node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: effectiveTemps.slice(0, outcome.iterations) };
     const result = outcome.result;
 
     // Optional rubric layer on top of the deterministic sensor (RC-7): forced for critical, or a contract/override.

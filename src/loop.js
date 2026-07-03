@@ -294,7 +294,7 @@ class Loop {
    *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
    *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -356,6 +356,10 @@ class Loop {
 
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
+    // BA-10: sticky across rounds — true if ANY round's `temperature` was dropped by the model (400,
+    // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
+    // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
+    let temperatureDropped = false;
 
     // The meter (Feature 3): bareagent is the canonical run counter. Accumulates across rounds and is
     // returned as `result.metrics`. `tokens` is CUMULATIVE over all four tiers (fixes the last-round-only
@@ -583,6 +587,7 @@ class Loop {
       }
 
       lastUsage = result.usage || lastUsage;
+      if (result.temperatureDropped) temperatureDropped = true;
       // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
       // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
       // pressure on the NEXT round's trim. Symmetric with lending ctx.summarize; the Loop stays unaware of
@@ -642,7 +647,7 @@ class Loop {
           try { await flush(msgs, ctx); }
           catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
         }
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics() };
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       // Execute tool calls
@@ -863,7 +868,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });

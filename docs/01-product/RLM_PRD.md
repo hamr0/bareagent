@@ -1199,6 +1199,39 @@ spikes before any `src/recurse.js` edit:
   the branch (no handwaving): closed a `context` prompt-injection caveat gap + a halt-path token-receipts gap;
   confirmed the BA-1 key-strip holds on the new path and POCs aren't shipped. Full suite **710 pass / 0 fail**.
 
+**Found POST-RELEASE (relayfact adopter round 4, 2026-07-03) → fixed under `[Unreleased]`.** One 🔴 blocking
+finding surfaced when relayfact first ran BA-8's leaf-refine on its **production** model (`claude-sonnet-5`), a
+model the all-`haiku` toy fixtures never exercised (`UPSTREAM-FIXES.md` BA-10 / `FINDINGS.md` F34).
+
+- **(BA-10/F34) BA-8's escalating `temperature` is REJECTED by newer models, collapsing the whole leaf-refine to
+  `incomplete` — sensor never called, zero LLM calls.** `claude-sonnet-5` (and OpenAI o1/gpt-5-class) return a
+  `400` for ANY non-default `temperature`; every provider forwarded it unconditionally, so `refineLeaf`'s first
+  attempt (`temp=0.2`) threw → the Loop captured it → the refine wrapper caught it → `node.incomplete`. The
+  failure LOOKED like "the model couldn't do it" when no attempt was ever made (bisected live: a tools-only
+  worker runs fine on sonnet; adding `refineLeaf` is what breaks it — same config works on `claude-haiku-4-5`).
+  **Fix (bareagent side, provider — one shared helper, model-agnostic):** all four providers now detect a `400`
+  whose message names `temperature` as unsupported/deprecated AND a temperature was actually sent, **drop it,
+  warn once, retry once** — keyed off the API error TEXT, never a model list. A genuine out-of-range 400 is NOT
+  degraded (re-throws; dropping it would mask a caller bug). `receipts.refineLeaf.temperatures` now records the
+  **EFFECTIVE** temps (`null` = the model ran at its default), so the receipt never claims a value the model
+  ignored — a new `GenerateResult.temperatureDropped` flag threads provider→Loop→recurse.
+- **The secondary correction to BA-8's doctrine:** BA-8's note "temperature escalation is a design REQUIREMENT"
+  was measured with the retry prompt held CONSTANT (temperature the only diversity source). But `refineLeaf`
+  feeds a **gap critique** forward every iteration, so the prompt already changes each retry — the critique is
+  the PRIMARY correction lever; temperature is a SECONDARY diversity lever. The claim is now **scoped to models
+  that accept `temperature`**; on a temperature-fixed model the escalation lever is inert and the critique
+  carries recovery alone. That was an open empirical question — **answered by the live run** (below).
+- **POC-first + verified-shipped-vs-spec, LIVE on the production model** (the toy fixtures caused the miss, so a
+  real-model run was mandatory): `poc/ba10-temp-degrade.mjs` confirmed the sonnet 400 message contains
+  `temperature` and that omitting it recovers; `poc/ba10-verify-shipped.mjs` then drove the REAL `recurse()` on
+  `claude-sonnet-5` — the leaf **ran** (iterations=2, not `incomplete`), temps recorded `[null,null]`, warned
+  once, and **recovered via the gap critique alone** (`passed=true`) — the F34 empirical answer: flat-temp +
+  gap-critique DOES converge on sonnet. Control on `claude-haiku-4-5` recorded the requested `[0.2,0.7]`
+  escalation. Then `/diff-review` + `/security` on the branch (no handwaving): fixed a per-instance warning
+  wording nit and a **confirmed ReDoS** — an unbounded `.*` in the error-classification regex went quadratic on
+  a long provider/proxy-supplied message (reproduced live: it hung); bounded to linear + a regression test.
+  +20 mutation-proven tests, full suite **731 pass / 0 fail**.
+
 ---
 
 ## Source & cross-refs

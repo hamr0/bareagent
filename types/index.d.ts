@@ -80,6 +80,12 @@ export interface GenerateResult {
   usage: Usage;
   /** Model id the response was produced by; preferred over Provider.model for cost accounting. */
   model?: string | null;
+  /**
+   * True when the requested `temperature` was rejected by the model (400, unsupported/deprecated) and
+   * the request was retried without it (BA-10). The response was produced at the model's DEFAULT
+   * temperature, not the one requested — callers reporting an effective temperature must honor this.
+   */
+  temperatureDropped?: boolean;
 }
 
 /** A conversation message in OpenAI chat format. */
