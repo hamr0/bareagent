@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.24.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
+> v0.25.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -378,6 +378,8 @@ if (result.error?.startsWith('halt:')) {
 **Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). It also fires for the out-of-band `ctx.summarize` call (R-C6) tagged `kind:'summarize'`; main-loop rounds carry `kind:'turn'` — so summary-window tokens count against the budget too, and a consumer can tell the two apart. `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
 
 Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
+
+**Deny-spin short-circuit (`maxConsecutiveDenials`, default 3, v0.25+).** A *non-halt* deny (a `policy` verdict that isn't `true` — e.g. a `humanChannel: deny`, an allowlist miss, a `content`/`fs.writeScope` block) is **advisory**: it's fed back to the model as a tool result so the model can pivot to a different allowed tool. But a model that keeps retrying the *same* denied action would otherwise spin every round until your `budget.maxCostUsd` finally halts it — burning the whole cap with no progress (this bit a coding agent whose write kept tripping `content.askPatterns`). The Loop now counts **consecutive** denials (any allowed call resets the streak, preserving the pivot) and short-circuits at `maxConsecutiveDenials` with `result.error === 'denied:<tool>'` (a clean return, transcript sealed — never a throw). Check `result.error?.startsWith('denied:')` to distinguish a governance block from a completed run; set `maxConsecutiveDenials: 0` (or `Infinity`) on `new Loop({...})` to restore the pure-advisory behavior. Under `recurse`, a short-circuited worker returns a **labeled** `{ incomplete: true, blocker: 'governance-deny' }` (and `receipts.blocker`) so you can widen scope / re-gate / escalate rather than read it as a model failure.
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
 

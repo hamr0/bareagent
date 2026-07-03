@@ -49,6 +49,13 @@ const { ToolError, HaltError } = require('./errors');
  *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
  *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget.
  * @property {Function} [onToolResult]
+ * @property {number} [maxConsecutiveDenials] - BA-11 safety net (default 3). Short-circuit the run when
+ *   `policy` denies this many tool calls IN A ROW with no allowed call in between — a governance deny is
+ *   not a recoverable tool error, so a model that keeps retrying variants of a denied action would
+ *   otherwise burn the budget to the cap without progress (probe-16: 16 calls, sensor never reached). Any
+ *   tool call that PASSES policy resets the streak, preserving allowlist-safe pivoting (deny X → allow Y).
+ *   The run returns cleanly with `error: 'denied:<tool>'` (mirrors the halt return; never throws even under
+ *   throwOnError). Set `0` or `Infinity` to disable (restores pre-BA-11 advisory-deny behavior).
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
  */
 
@@ -212,6 +219,13 @@ class Loop {
       throw new Error('[Loop] options.policy must be a function (toolName, args, ctx) => true | string');
     }
     this.policy = options.policy || null;
+    // BA-11 deny-spin guard. Default 3; 0/Infinity/non-finite disables (restores advisory-deny behavior).
+    // Validated only if provided so an explicit 0 is honored as "off" (Infinity also disables).
+    if (options.maxConsecutiveDenials != null
+        && (typeof options.maxConsecutiveDenials !== 'number' || options.maxConsecutiveDenials < 0 || Number.isNaN(options.maxConsecutiveDenials))) {
+      throw new Error('[Loop] options.maxConsecutiveDenials must be a non-negative number (0 or Infinity disables)');
+    }
+    this.maxConsecutiveDenials = options.maxConsecutiveDenials != null ? options.maxConsecutiveDenials : 3;
     if (options.assemble != null && typeof options.assemble !== 'function') {
       throw new Error('[Loop] options.assemble must be a function (msgs, info) => msgs');
     }
@@ -360,6 +374,9 @@ class Loop {
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
     let temperatureDropped = false;
+    // BA-11: consecutive policy-deny counter (reset by any tool call that PASSES policy). When it reaches
+    // this.maxConsecutiveDenials the run short-circuits cleanly — see the deny block below.
+    let consecutiveDenials = 0;
 
     // The meter (Feature 3): bareagent is the canonical run counter. Accumulates across rounds and is
     // returned as `result.metrics`. `tokens` is CUMULATIVE over all four tiers (fixes the last-round-only
@@ -731,9 +748,29 @@ class Loop {
               : `[Loop] Tool "${tc.name}" denied by policy`;
             msgs.push({ role: 'tool', tool_call_id: tc.id, content: reason });
             this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, denied: true, reason } });
+            // BA-11: a governance deny is not a recoverable tool error. Count consecutive denials; when the
+            // model keeps retrying denied actions (proven live: 8 in a row before giving up) short-circuit the
+            // run rather than let it burn the budget to the cap. The streak resets on any ALLOWED tool call
+            // (below), so a legit deny-then-pivot (deny X → allow Y) never trips this. 0/Infinity disables.
+            consecutiveDenials += 1;
+            if (this.maxConsecutiveDenials > 0 && Number.isFinite(this.maxConsecutiveDenials)
+                && consecutiveDenials >= this.maxConsecutiveDenials) {
+              const denyTag = `denied:${tc.name}`;
+              // Pair any still-dangling tool_calls from this round so the returned transcript stays
+              // provider-valid (same seal the halt path uses), then exit cleanly — no throw even under
+              // throwOnError, mirroring the governance-halt contract.
+              sealDanglingToolCalls(msgs, denyTag);
+              this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
+              this._safeEmit({ type: 'loop:done', data: { text: '', denied: true, rule: denyTag, cost: totalCost } });
+              return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics() };
+            }
             continue;
           }
         }
+
+        // BA-11: reaching here means this tool call PASSED policy (or there is no policy) — progress, so the
+        // consecutive-deny streak resets. A single deny followed by an allowed call never trips the guard.
+        consecutiveDenials = 0;
 
         const toolStartedAt = Date.now();
         let toolResult;
