@@ -290,6 +290,8 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {Verdict|null} verdict
  * @property {boolean} incomplete
  * @property {boolean} halted
+ * @property {string} [blocker] - (BA-11) set to `'governance-deny'` when this node stopped because its Loop
+ *   short-circuited a consecutive-policy-deny spin (not a model failure). Mirrors `RecurseResult.blocker`.
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
  * @property {{iterations: number, passed: boolean, temperatures: (number|null)[]}} [refineLeaf] - (BA-8) when this
  *   leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
@@ -316,6 +318,9 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {any} [best] - The best partial answer when `incomplete` (RC-9).
  * @property {string[]} [missingSlices] - When `incomplete` because a child failed: the sub-task(s) that came
  *   back incomplete (§9 scenario 1) — the anti-survivor-sum signal, not a quiet undercount.
+ * @property {string} [blocker] - Present when `incomplete` for a specific, actionable reason. `'governance-deny'`
+ *   (BA-11): the worker's Loop short-circuited after N consecutive policy denials rather than burn to the
+ *   budget cap — the caller can widen scope / re-gate / escalate instead of reading it as a model failure.
  * @property {RecurseNode} receipts - The audit node for this call (RC-10).
  */
 
@@ -510,6 +515,15 @@ async function recurse(task, ctx = {}, opts = {}) {
     node.incomplete = true;
     return { incomplete: true, best: out.text || null, receipts: node };
   }
+  // BA-11: a deny-spin short-circuit. The Loop stopped the worker after N consecutive governance denials
+  // (a governance deny is not a recoverable tool error — retrying variants would burn to the budget cap;
+  // probe-16: 16 calls, sensor never reached → incomplete). Surface it as a clean, LABELED incomplete so a
+  // caller can tell a governance block apart from a model failure and act (widen scope, re-gate, escalate).
+  if (typeof out.error === 'string' && out.error.startsWith('denied:')) {
+    node.incomplete = true;
+    node.blocker = 'governance-deny';
+    return { incomplete: true, best: out.text || null, blocker: 'governance-deny', receipts: node };
+  }
   if (out.error) {
     node.incomplete = true;
     return { incomplete: true, best: out.text || null, receipts: node };
@@ -672,6 +686,13 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       node.halted = true;
       node.incomplete = true;
       return { incomplete: true, best: null, receipts: node };
+    }
+    // BA-11: a deny-spin inside a refine attempt (the Loop short-circuited after N consecutive governance
+    // denials, rethrown at recurse.js as `denied:<tool>`) is a LABELED governance block, not a model fault.
+    if (typeof err?.message === 'string' && err.message.startsWith('denied:')) {
+      node.incomplete = true;
+      node.blocker = 'governance-deny';
+      return { incomplete: true, best: null, blocker: 'governance-deny', receipts: node };
     }
     node.incomplete = true;
     return { incomplete: true, best: null, receipts: node };

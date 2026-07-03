@@ -1269,3 +1269,48 @@ describe('recurse — no API key leaks into the audited ctx (F16 / BA-1)', () =>
     assert.equal(fanoutCtx.depth >= 0, true, 'depth is still threaded for the gate');
   });
 });
+
+describe('recurse — governance deny-spin short-circuit (BA-11 / relayfact F35)', () => {
+  // A worker that KEEPS calling a tool the policy denies (the probe-16 pathology: the model retries variants of
+  // a governance-denied write, believing a rephrase will pass). The Loop's deny-spin guard (default 3) stops it;
+  // recurse surfaces a LABELED incomplete so a caller can tell a governance block from a model failure.
+  const editTool = { name: 'edit', description: 'edit a file', execute: async () => 'edited' };
+  const alwaysEdit = (m, t, o, i) => ({ toolCalls: [{ id: 'e' + i, name: 'edit', arguments: { n: i } }] });
+  const denyEdit = (tool) => (tool === 'edit' ? '[deny: fs.writeScope] out of scope' : true);
+
+  it('a single-shot worker spinning on a policy deny → {incomplete, blocker:"governance-deny"} (not a burn to the cap)', async () => {
+    const sp = scriptedProvider(alwaysEdit);
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool] });
+    assert.equal(out.incomplete, true, 'a denied spin is honest non-convergence, never a faked pass');
+    assert.equal(out.blocker, 'governance-deny', 'labeled so the caller can widen scope / re-gate / escalate');
+    assert.equal(out.receipts.blocker, 'governance-deny', 'the audit node carries the blocker too');
+    assert.equal(sp.calls.length, 3, 'the worker Loop stopped at the 3rd consecutive denial (the default guard)');
+  });
+
+  it('a refineLeaf attempt spinning on a policy deny → {incomplete, blocker:"governance-deny"} (sensor never reached)', async () => {
+    const sp = scriptedProvider(alwaysEdit);
+    // A sensor that would never pass — but the point is the spin throws BEFORE the sensor is ever consulted.
+    let sensorCalls = 0;
+    const sensor = () => { sensorCalls++; return { status: 'needs_revision', pass: false, score: 0, critique: 'x', suggestions: [] }; };
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool], refineLeaf: { sensor } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, 'governance-deny');
+    assert.equal(out.receipts.blocker, 'governance-deny');
+    assert.equal(sensorCalls, 0, 'the deterministic close never ran — the attempt short-circuited on the deny');
+  });
+
+  it('a legit deny→pivot inside a worker does NOT short-circuit (allowlist-safe; the default guard is not trigger-happy)', async () => {
+    // The worker is denied `edit` once, then calls an ALLOWED tool, then answers. 1 denial < 3 → no blocker.
+    const okTool = { name: 'note', description: 'jot a note', execute: async () => 'noted' };
+    const pivotHandler = (messages, tools, o, i) => {
+      if (i === 0) return { toolCalls: [{ id: 'e0', name: 'edit', arguments: {} }] };      // denied
+      if (i === 1) return { toolCalls: [{ id: 'n1', name: 'note', arguments: {} }] };      // allowed → reset
+      return { text: 'done despite the one deny' };
+    };
+    const sp = scriptedProvider(pivotHandler);
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool, okTool] });
+    assert.equal(out.incomplete, undefined, 'a single deny then a pivot is not a spin — the worker converges');
+    assert.equal(out.blocker, undefined);
+    assert.ok(String(out.result).includes('done'), 'the worker completed normally');
+  });
+});

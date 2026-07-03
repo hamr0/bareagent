@@ -1232,6 +1232,31 @@ model the all-`haiku` toy fixtures never exercised (`UPSTREAM-FIXES.md` BA-10 / 
   a long provider/proxy-supplied message (reproduced live: it hung); bounded to linear + a regression test.
   +20 mutation-proven tests, full suite **731 pass / 0 fail**.
 
+**Found POST-RELEASE (relayfact adopter round 5, 2026-07-03) → fixed under `[Unreleased]`.** One 🟠 robustness
+finding, surfaced by BG-3's attribution correction (bareguard is stateless per `check()`; the retry loop is
+bareagent's) (`UPSTREAM-FIXES.md` BA-11 / `FINDINGS.md` F35).
+
+- **(BA-11/F35) a governance-deny SPIN burns the budget to the cap instead of short-circuiting.** A non-halt
+  policy deny is fed back to the model as an advisory tool result (so an allowlist deny lets the model pivot to
+  a different allowed tool). But when the *same* action keeps getting denied — e.g. a write that repeatedly
+  trips `content.askPatterns`, an auto-denied `humanChannel` — the model retries variants every round and the
+  worker Loop (esp. under `refineLeaf`) spins until `budget.maxCostUsd` finally halts it, with the deterministic
+  **sensor never reached** (relayfact probe-16: 16 calls → \$1, the fix never written, surfaced as a bare
+  `incomplete`). **Fix (bareagent side, Loop — one place):** `new Loop({ maxConsecutiveDenials })` (default 3)
+  counts *consecutive* policy denials, reset by any allowed call (so a legit deny→pivot never trips it), and
+  short-circuits at the threshold with a clean `error:'denied:<tool>'` return (transcript sealed; never a throw;
+  `0`/`Infinity` disables). `recurse` maps a short-circuited worker to a **labeled** `{ incomplete,
+  blocker:'governance-deny' }` (plain-worker + `refineLeaf` paths + `receipts.blocker`) so a caller distinguishes
+  a governance block (widen scope / re-gate / escalate) from a model failure.
+- **POC-first corrected the design.** The naive rule "reset on ANY successful tool call" would be defeated if a
+  model interleaved a successful read between denied writes — so a live spike (`poc/ba11-deny-spin.mjs`, real
+  haiku) drove the pathology first: a *terminal* deny made the model give up after 2 tries, but a
+  **retry-inviting** deny (the probe-16 shape) spun **8 consecutive** denied writes with **zero interleaving** —
+  proving consecutive-counting is sufficient and that threshold 3 fires on the spin without false-firing the
+  healthy 2-then-giveup. Verified-shipped through the real `recurse()` on haiku (`poc/ba11-verify-shipped.mjs`:
+  `incomplete`, `blocker:'governance-deny'`, stopped at 3 denials + 1 read — no burn). +10 mutation-proven tests
+  (threshold off-by-one, streak reset, blocker label), full suite **741 pass / 0 fail / 2 skipped**.
+
 ---
 
 ## Source & cross-refs

@@ -993,3 +993,86 @@ describe('Loop — HaltError from a tool body (execute seam consistency)', () =>
     assert.equal(result.text, 'recovered');
   });
 });
+
+// BA-11: the deny-spin guard. A governance deny (policy verdict !== true, not a HaltError) is fed back to the
+// model as a tool result; a model that keeps retrying variants of a denied action would otherwise burn the
+// budget to the cap without progress (probe-16: 16 calls, sensor never reached). The Loop counts CONSECUTIVE
+// denials (reset by any allowed call) and short-circuits at maxConsecutiveDenials. Validated live in
+// poc/ba11-deny-spin.mjs: haiku retried a denied write 8× in a row before giving up.
+describe('Loop — BA-11 deny-spin guard', () => {
+  const denyTool = { name: 'blocked', description: 'always denied', execute: async () => 'should never run' };
+  const okTool = { name: 'allowed', description: 'always allowed', execute: async () => 'ok' };
+  // A provider whose response is a function of the round index, so it can emit an UNBOUNDED retry stream.
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+  const callBlocked = (i) => ({ text: '', toolCalls: [{ id: 'c' + i, name: 'blocked', arguments: { n: i } }], usage: { inputTokens: 1, outputTokens: 1 } });
+  const callAllowed = (i) => ({ text: '', toolCalls: [{ id: 'a' + i, name: 'allowed', arguments: {} }], usage: { inputTokens: 1, outputTokens: 1 } });
+  const finalText = (t) => ({ text: t, toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } });
+  const denyBlocked = async (name) => (name === 'blocked' ? '[deny: test.scope] blocked out of scope' : true);
+
+  it('short-circuits after N consecutive denials (default 3) — clean return, not a throw', async () => {
+    let calls = 0;
+    const provider = scripted((i) => { calls = i; return callBlocked(i); }); // ALWAYS retries the denied tool
+    const loop = new Loop({ provider, policy: denyBlocked, throwOnError: true });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [denyTool]);
+    assert.equal(result.error, 'denied:blocked', 'error tags the denied tool');
+    assert.equal(result.text, '');
+    // Fired at 3, so the provider was called exactly 3 times — NOT the HARD_ROUND_LIMIT(100) spin.
+    assert.equal(calls, 3, 'stopped at the 3rd consecutive denial, no burn to the round cap');
+  });
+
+  it('an allowed call RESETS the streak — a legit deny→pivot never trips the guard (allowlist-safe)', async () => {
+    // Pattern: deny, deny, ALLOW (reset), deny, deny, done. Max consecutive = 2 < 3 → guard must NOT fire,
+    // even though there are 4 total denials. This is the property that makes "reset on progress" correct.
+    const script = [callBlocked, callBlocked, callAllowed, callBlocked, callBlocked, () => finalText('done')];
+    const provider = scripted((i) => script[Math.min(i - 1, script.length - 1)](i));
+    const loop = new Loop({ provider, policy: denyBlocked });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [denyTool, okTool]);
+    assert.equal(result.error, null, 'the pivot reset the streak — no governance short-circuit');
+    assert.equal(result.text, 'done');
+  });
+
+  it('a custom threshold is honored', async () => {
+    let calls = 0;
+    const provider = scripted((i) => { calls = i; return callBlocked(i); });
+    const result = await new Loop({ provider, policy: denyBlocked, maxConsecutiveDenials: 5 })
+      .run([{ role: 'user', content: 'go' }], [denyTool]);
+    assert.equal(result.error, 'denied:blocked');
+    assert.equal(calls, 5, 'fired at the custom threshold of 5');
+  });
+
+  it('maxConsecutiveDenials:0 DISABLES the guard (advisory-deny behavior preserved)', async () => {
+    // 5 denials then the model gives up on its own. With the guard OFF, all 5 denials flow through and the
+    // final text is returned (pre-BA-11 behavior) — the guard never fires.
+    const script = [callBlocked, callBlocked, callBlocked, callBlocked, callBlocked, () => finalText('gave up')];
+    const provider = scripted((i) => script[Math.min(i - 1, script.length - 1)](i));
+    const result = await new Loop({ provider, policy: denyBlocked, maxConsecutiveDenials: 0 })
+      .run([{ role: 'user', content: 'go' }], [denyTool]);
+    assert.equal(result.error, null, '0 disables the guard');
+    assert.equal(result.text, 'gave up');
+  });
+
+  it('maxConsecutiveDenials:Infinity DISABLES the guard', async () => {
+    const script = [callBlocked, callBlocked, callBlocked, callBlocked, () => finalText('gave up')];
+    const provider = scripted((i) => script[Math.min(i - 1, script.length - 1)](i));
+    const result = await new Loop({ provider, policy: denyBlocked, maxConsecutiveDenials: Infinity })
+      .run([{ role: 'user', content: 'go' }], [denyTool]);
+    assert.equal(result.error, null, 'Infinity disables the guard');
+    assert.equal(result.text, 'gave up');
+  });
+
+  it('rejects an invalid maxConsecutiveDenials', () => {
+    const provider = scripted(() => finalText('x'));
+    assert.throws(() => new Loop({ provider, maxConsecutiveDenials: -1 }), /non-negative number/);
+    assert.throws(() => new Loop({ provider, maxConsecutiveDenials: 'x' }), /non-negative number/);
+    assert.throws(() => new Loop({ provider, maxConsecutiveDenials: NaN }), /non-negative number/);
+  });
+
+  it('leaves the returned transcript provider-valid (every tool_call paired) when it fires', async () => {
+    // The short-circuit seals dangling tool_calls (same as the halt path) so msgs can be fed back to a provider.
+    const provider = scripted((i) => callBlocked(i));
+    const result = await new Loop({ provider, policy: denyBlocked }).run([{ role: 'user', content: 'go' }], [denyTool]);
+    const toolCallIds = result.msgs.filter(m => m.role === 'assistant' && Array.isArray(m.tool_calls)).flatMap(m => m.tool_calls.map(tc => tc.id));
+    const toolResultIds = new Set(result.msgs.filter(m => m.role === 'tool').map(m => m.tool_call_id));
+    for (const id of toolCallIds) assert.ok(toolResultIds.has(id), `tool_call ${id} has a paired result`);
+  });
+});
