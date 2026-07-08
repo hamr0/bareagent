@@ -16,6 +16,7 @@ const { ProviderError } = require('./errors');
  * @property {number} [timeout=30000] - Timeout in milliseconds.
  * @property {string} [systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
  * @property {(chunk: string) => void} [onChunk] - Called with each stdout chunk as it streams.
+ * @property {'claude-json'|((stdout: string) => Partial<GenerateResult>)} [parse] - Opt-in structured-output parser for stdout. Default (unset) returns stdout verbatim as `text` with zero usage (no behavior change). `'claude-json'` is a shipped preset for `claude -p --output-format json`: it maps the CLI's result envelope onto `GenerateResult` (text←`result`, usage←`usage.*`, model←first `modelUsage` key, costUsd←`total_cost_usd`) and throws `ProviderError` on malformed JSON or an error envelope (`is_error`/non-success subtype). A function is the CLI-agnostic escape hatch: it receives trimmed stdout and returns a partial `GenerateResult` (merged over defaults); throw to signal a parse failure.
  */
 
 class CLIPipeProvider {
@@ -33,6 +34,10 @@ class CLIPipeProvider {
     this.timeout = options.timeout ?? 30000;
     this.systemPromptFlag = options.systemPromptFlag || null;
     this.onChunk = options.onChunk || null;
+    if (options.parse != null && options.parse !== 'claude-json' && typeof options.parse !== 'function') {
+      throw new Error("[CLIPipeProvider] options.parse must be 'claude-json' or a function");
+    }
+    this.parse = options.parse || null;
   }
 
   /**
@@ -61,12 +66,75 @@ class CLIPipeProvider {
     }
 
     const prompt = this._formatPrompt(promptMessages);
-    const text = await this._spawn(prompt, extraArgs);
+    const stdout = await this._spawn(prompt, extraArgs);
+
+    if (this.parse === 'claude-json') return this._parseClaudeJson(stdout);
+    if (typeof this.parse === 'function') {
+      const partial = this.parse(stdout) || {};
+      return {
+        text: '',
+        toolCalls: [],
+        ...partial,
+        usage: { inputTokens: 0, outputTokens: 0, ...(partial.usage || {}) },
+      };
+    }
     return {
-      text,
+      text: stdout,
       toolCalls: [],
       usage: { inputTokens: 0, outputTokens: 0 },
     };
+  }
+
+  /**
+   * Map the `claude -p --output-format json` result envelope onto a normalized GenerateResult.
+   * The caller explicitly opted into structured output, so a malformed or error envelope is a LOUD
+   * ProviderError — never a silent fall-back to raw text.
+   * @param {string} stdout - Trimmed stdout from the CLI.
+   * @returns {GenerateResult}
+   * @throws {ProviderError} On non-JSON stdout, or an error envelope (`is_error` / non-success subtype).
+   */
+  _parseClaudeJson(stdout) {
+    let obj;
+    try {
+      obj = JSON.parse(stdout);
+    } catch (_) {
+      const preview = stdout.length > 200 ? `${stdout.slice(0, 200)}…` : stdout;
+      throw new ProviderError(`[CLIPipeProvider] parse:'claude-json' expected JSON on stdout, got: ${preview}`, /** @type {any} */ ({ status: 0 }));
+    }
+    if (!obj || typeof obj !== 'object') {
+      throw new ProviderError(`[CLIPipeProvider] parse:'claude-json' expected a JSON object, got ${obj === null ? 'null' : typeof obj}`, /** @type {any} */ ({ status: 0 }));
+    }
+    if (obj.is_error === true || obj.subtype !== 'success') {
+      const detail = typeof obj.result === 'string' ? obj.result : JSON.stringify(obj.result ?? null);
+      throw new ProviderError(`[CLIPipeProvider] claude CLI reported failure (subtype='${obj.subtype}'): ${detail}`, /** @type {any} */ ({ status: 0 }));
+    }
+
+    const u = (obj.usage && typeof obj.usage === 'object') ? obj.usage : {};
+    /** @type {import('../types').Usage} */
+    const usage = {
+      inputTokens: Number(u.input_tokens) || 0,
+      outputTokens: Number(u.output_tokens) || 0,
+    };
+    // Absent cache tiers mean the model didn't cache — omit rather than emit a synthetic 0 (per Usage docs).
+    if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
+    if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
+
+    // `modelUsage` is an object keyed by model id (e.g. {"claude-opus-4-8[1m]": {...}}) — take the first key.
+    const model = (obj.modelUsage && typeof obj.modelUsage === 'object')
+      ? (Object.keys(obj.modelUsage)[0] ?? null)
+      : null;
+
+    /** @type {GenerateResult} */
+    const result = {
+      text: typeof obj.result === 'string' ? obj.result : '',
+      toolCalls: [],
+      usage,
+      model,
+    };
+    // The CLI's own price is authoritative (subscription runs report an equivalent cost even at $0
+    // marginal) — feeds bareguard's USD axis with no local rate table. Only a finite number counts.
+    if (Number.isFinite(obj.total_cost_usd)) result.costUsd = obj.total_cost_usd;
+    return result;
   }
 
   /**
