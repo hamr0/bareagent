@@ -113,6 +113,10 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 | `[CLIPipeProvider] process exited with code N: ...` | CLI tool returned non-zero exit | Check stderr output (included in error message). May be bad args or tool-specific error |
 | `[CLIPipeProvider] timed out after Nms` | CLI tool didn't produce output within timeout | Increase `timeout` in constructor. Default is 30000ms |
 | `[CLIPipeProvider] process produced no output` | CLI tool exited 0 but wrote nothing to stdout | Check the command actually produces output for the given input |
+| `[CLIPipeProvider] options.parse must be 'claude-json' or a function` | Constructor `parse` option is neither the `'claude-json'` preset nor a function | Pass `parse: 'claude-json'` or a `(stdout) => Partial<GenerateResult>` function |
+| `[CLIPipeProvider] parse:'claude-json' expected JSON on stdout, got: ...` | `parse: 'claude-json'` set but stdout wasn't valid JSON | Ensure the command emits JSON (e.g. `claude -p --output-format json`); loud by design — no silent raw-text fall-back |
+| `[CLIPipeProvider] parse:'claude-json' expected a JSON object, got ...` | stdout parsed to a non-object (string/number/array/null) | The command must emit a single JSON result object, not a bare scalar |
+| `[CLIPipeProvider] claude CLI reported failure (subtype='...'): ...` | Envelope had `is_error: true` or a non-`success` subtype | Inspect the CLI's own error (carried in the message); the run failed upstream, not in the provider |
 
 **systemPromptFlag behavior:** When `systemPromptFlag` is set (e.g. `'--system'`), system messages are extracted from the messages array, joined with `\n\n`, and passed as a CLI argument (`[flag, content]`) appended after `this.args`. Non-system messages are formatted normally via `_formatPrompt()` and piped to stdin. If no system messages are present, the flag is not added. This prevents `_formatPrompt()` from flattening structured system prompts into `System: ...` plaintext, which breaks tools like `claude --print` that expect system content via a dedicated flag.
 
