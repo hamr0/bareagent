@@ -184,3 +184,129 @@ describe('CLIPipeProvider', () => {
     assert.equal(result.text, 'hello_from_env');
   });
 });
+
+describe("CLIPipeProvider parse:'claude-json' (A1 — structured CLI output)", () => {
+  // Real envelope captured live from `claude -p "say OK" --output-format json` (2026-07-08).
+  const SUCCESS = JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false,
+    result: 'OK',
+    total_cost_usd: 0.0494985,
+    usage: {
+      input_tokens: 4522, output_tokens: 4,
+      cache_read_input_tokens: 15197, cache_creation_input_tokens: 1919,
+    },
+    modelUsage: { 'claude-opus-4-8[1m]': { inputTokens: 4522, costUSD: 0.0494985 } },
+    session_id: 'abc', stop_reason: 'end_turn', num_turns: 1,
+  });
+
+  it('constructor rejects an invalid parse option', () => {
+    assert.throws(() => new CLIPipeProvider({ command: 'claude', parse: 'toml' }),
+      { message: /parse must be 'claude-json' or a function/ });
+    assert.throws(() => new CLIPipeProvider({ command: 'claude', parse: 42 }),
+      { message: /parse must be 'claude-json' or a function/ });
+    // Valid forms do not throw.
+    assert.doesNotThrow(() => new CLIPipeProvider({ command: 'claude', parse: 'claude-json' }));
+    assert.doesNotThrow(() => new CLIPipeProvider({ command: 'claude', parse: (s) => ({ text: s }) }));
+  });
+
+  it('maps a success envelope onto GenerateResult (text/usage/model/costUsd)', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    const r = provider._parseClaudeJson(SUCCESS);
+    assert.equal(r.text, 'OK');                       // text ← result, NOT the raw JSON envelope
+    assert.deepEqual(r.toolCalls, []);
+    assert.equal(r.usage.inputTokens, 4522);
+    assert.equal(r.usage.outputTokens, 4);
+    assert.equal(r.usage.cacheReadTokens, 15197);
+    assert.equal(r.usage.cacheCreationTokens, 1919);
+    assert.equal(r.model, 'claude-opus-4-8[1m]');     // first modelUsage key
+    assert.equal(r.costUsd, 0.0494985);               // authoritative CLI price
+  });
+
+  it('omits absent cache tiers and nulls a missing model', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    const r = provider._parseClaudeJson(JSON.stringify({
+      subtype: 'success', is_error: false, result: 'hi',
+      usage: { input_tokens: 10, output_tokens: 2 },
+    }));
+    assert.equal(r.usage.inputTokens, 10);
+    assert.ok(!('cacheReadTokens' in r.usage), 'absent cache_read → omitted, not a synthetic 0');
+    assert.ok(!('cacheCreationTokens' in r.usage), 'absent cache_creation → omitted');
+    assert.equal(r.model, null);                      // no modelUsage → null
+    assert.ok(!('costUsd' in r), 'no total_cost_usd → costUsd omitted (falls back to estimateCost)');
+  });
+
+  it('preserves an authoritative costUsd of 0 (priced, not omitted)', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    const r = provider._parseClaudeJson(JSON.stringify({
+      subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+    assert.equal(r.costUsd, 0);                        // 0 is a valid priced value (marginal-$0 run)
+  });
+
+  it('throws ProviderError on malformed JSON (never silent raw-text fallback)', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    assert.throws(() => provider._parseClaudeJson('not json at all'),
+      { name: 'ProviderError', message: /expected JSON on stdout/ });
+  });
+
+  it('throws ProviderError on non-object JSON', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    assert.throws(() => provider._parseClaudeJson('"a bare string"'),
+      { name: 'ProviderError', message: /expected a JSON object/ });
+  });
+
+  it('throws ProviderError on an is_error envelope', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    assert.throws(() => provider._parseClaudeJson(JSON.stringify({
+      subtype: 'error_during_execution', is_error: true, result: 'boom',
+    })), { name: 'ProviderError', message: /reported failure.*boom/ });
+  });
+
+  it('throws ProviderError on a non-success subtype', () => {
+    const provider = new CLIPipeProvider({ command: 'claude', parse: 'claude-json' });
+    assert.throws(() => provider._parseClaudeJson(JSON.stringify({
+      subtype: 'error_max_turns', is_error: false, result: null,
+    })), { name: 'ProviderError', message: /error_max_turns/ });
+  });
+
+  it("routes through generate() end-to-end when parse:'claude-json'", async () => {
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'process.stdout.write(process.env.ENVELOPE)'],
+      env: { ...process.env, ENVELOPE: SUCCESS },
+      parse: 'claude-json',
+    });
+    const r = await provider.generate([{ role: 'user', content: 'hi' }]);
+    assert.equal(r.text, 'OK');
+    assert.equal(r.usage.inputTokens, 4522);
+    assert.equal(r.costUsd, 0.0494985);
+    assert.equal(r.model, 'claude-opus-4-8[1m]');
+  });
+
+  it('a function parser merges its partial over defaults', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'echo',
+      args: ['raw-output'],
+      parse: (stdout) => ({ text: stdout.toUpperCase(), usage: { inputTokens: 7 } }),
+    });
+    const r = await provider.generate([{ role: 'user', content: 'hi' }]);
+    assert.equal(r.text, 'RAW-OUTPUT');
+    assert.deepEqual(r.toolCalls, []);                 // default filled in
+    assert.equal(r.usage.inputTokens, 7);              // partial usage honored
+    assert.equal(r.usage.outputTokens, 0);             // required field defaulted
+  });
+
+  it('default (no parse) is byte-identical to today — raw JSON stays text, usage 0', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'process.stdout.write(process.env.ENVELOPE)'],
+      env: { ...process.env, ENVELOPE: SUCCESS },
+    });
+    const r = await provider.generate([{ role: 'user', content: 'hi' }]);
+    assert.equal(r.text, SUCCESS);                     // raw envelope returned verbatim, NOT parsed
+    assert.equal(r.usage.inputTokens, 0);
+    assert.equal(r.usage.outputTokens, 0);
+    assert.ok(!('costUsd' in r));
+  });
+});

@@ -86,6 +86,14 @@ export interface GenerateResult {
    * temperature, not the one requested — callers reporting an effective temperature must honor this.
    */
   temperatureDropped?: boolean;
+  /**
+   * Authoritative per-call cost in USD, reported by the provider itself — e.g. CLIPipeProvider
+   * `parse:'claude-json'` surfacing the claude CLI's own `total_cost_usd`, a real price with no local
+   * rate table. When a FINITE number the Loop prefers it over `estimateCost` and treats the round as
+   * priced (feeding bareguard's USD budget axis). `0` is a valid priced value (a subscription/marginal-$0
+   * run) — distinct from omitted/null, which means "couldn't price" and falls back to the rate table.
+   */
+  costUsd?: number;
 }
 
 /** A conversation message in OpenAI chat format. */

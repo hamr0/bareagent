@@ -153,6 +153,23 @@ function estimateCost(model, usage) {
   return Number.isFinite(cost) ? cost : null;
 }
 
+/**
+ * Resolve the priced USD for a round. A provider MAY report its own authoritative `costUsd` on the
+ * GenerateResult (e.g. CLIPipeProvider `parse:'claude-json'` surfacing the claude CLI's own
+ * `total_cost_usd` — a real price with NO local rate table). When present as a FINITE number it wins
+ * over the rate-table estimate — including `0`, a valid priced value (a subscription/marginal-$0 run),
+ * which stays 'priced', never demoted to the null/unpriced sentinel. A non-finite provider cost
+ * (±Inf/NaN) is NOT a price → fall through to estimateCost (same couldn't-price guard as above).
+ * @param {any} result - the GenerateResult from provider.generate()
+ * @param {string|null} model
+ * @param {Usage|null} usage
+ * @returns {number|null}
+ */
+function resolveRoundCost(result, model, usage) {
+  if (result && Number.isFinite(result.costUsd)) return result.costUsd;
+  return estimateCost(model, usage);
+}
+
 // R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
 const DEFAULT_SUMMARY_INSTRUCTION =
   'You are a precise conversation summarizer. Produce a concise, factual summary of the following ' +
@@ -472,7 +489,7 @@ class Loop {
         const result = await loop.provider.generate(prompt, [], { temperature: 0, ...genOpts });
         const usage = (result && result.usage) || null;
         const model = (result && result.model) || loop.provider.model || null;
-        const cost = estimateCost(model, usage);
+        const cost = resolveRoundCost(result, model, usage);
         if (cost !== null) { totalCost += cost; pricedAny = true; }
         addUsage(usage); // summarize tokens are real spend → count them in the cumulative meter
         metrics.context.summaries++; // §3.6 CE-activity rollup
@@ -616,7 +633,7 @@ class Loop {
       // Prefer the model the response reports (robust when provider.model is absent or varies per
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;
-      const roundCost = estimateCost(model, lastUsage);
+      const roundCost = resolveRoundCost(result, model, lastUsage);
       if (roundCost !== null) totalCost += roundCost;
 
       // Meter this round: count the turn, accumulate the four token tiers, and classify pricing —

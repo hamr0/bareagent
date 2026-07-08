@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.25.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
+> v0.26.0 | Node.js >= 18 | zero required deps (`bareguard ^0.9.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -59,6 +59,7 @@ Eight entry points:
 | Catch typed errors programmatically | ProviderError, ToolError, TimeoutError, CircuitOpenError |
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
+| Get real usage + cost from a CLI provider | CLIPipeProvider({ parse: 'claude-json' }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
@@ -739,9 +740,11 @@ new Ollama({ model: 'llama3.2', url: 'http://localhost:11434' })
 // CLIPipe — pipe prompts to any CLI tool via stdin/stdout
 new CLIPipe({ command: 'claude', args: ['--print'], systemPromptFlag: '--system-prompt', timeout: 30000 })
 new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
+// CLIPipe structured output (v0.26.0+) — map a CLI's JSON envelope to real usage + cost
+new CLIPipe({ command: 'claude', args: ['-p', '--output-format', 'json'], parse: 'claude-json' })
 ```
 
-All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model? }`. The optional `model` (v0.16.1+) is the id the response was produced by — Loop prefers it over `provider.model` for cost accounting. CLIPipe always returns `toolCalls: []` and zero usage (CLI tools don't report tokens), and omits `model`.
+All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model?, costUsd? }`. The optional `model` (v0.16.1+) is the id the response was produced by — Loop prefers it over `provider.model` for cost accounting. By default CLIPipe returns `toolCalls: []` and zero usage (CLI tools don't report tokens) and omits `model`. **Structured output (v0.26.0+):** set `parse: 'claude-json'` (a preset for `claude -p --output-format json`) — or a `(stdout) => Partial<GenerateResult>` function for any other CLI — and CLIPipe maps the CLI's JSON envelope onto real `usage`, `model`, and `costUsd`, throwing `ProviderError` on a malformed/error envelope (never a silent raw-text fall-back). `costUsd` (optional `GenerateResult` field) is an **authoritative** per-call price the provider reports itself; when finite the Loop prefers it over the internal rate-table `estimateCost`, so a CLI-piped run enforces a bareguard USD cap with no local pricing table (a `0` counts as priced, distinct from null/unpriced). `toolCalls` stays `[]` regardless (CLIPipe is tool-free).
 
 **Temperature graceful degradation (BA-10).** Newer models reject ANY non-default `temperature` with a `400` (`claude-sonnet-5`: `` `temperature` is deprecated for this model. ``; OpenAI o1/gpt-5-class: `Unsupported value: 'temperature' … Only the default (1) …`). All four providers detect that specific 400 (message names `temperature` as unsupported/deprecated AND a temperature was sent), **drop the param, warn once per instance, and retry once** — so a call that would otherwise throw succeeds at the model's default temperature. Keyed off the API error text, not a model list. A genuine out-of-range 400 is NOT degraded (it re-throws — dropping it would mask a caller bug). When a drop happens the result carries `temperatureDropped: true` (an optional `GenerateResult`/`Loop.run` field) so a caller can report the effective temperature — `recurse`'s `refineLeaf` uses it for an honest receipt. Dormant on models that accept temperature (byte-identical to before).
 

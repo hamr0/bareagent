@@ -1076,3 +1076,49 @@ describe('Loop — BA-11 deny-spin guard', () => {
     for (const id of toolCallIds) assert.ok(toolResultIds.has(id), `tool_call ${id} has a paired result`);
   });
 });
+
+describe('A1 — provider-supplied costUsd (CLI authoritative price)', () => {
+  it('prefers result.costUsd over estimateCost and forwards it as priced', async () => {
+    const events = [];
+    // No model → estimateCost would return null (unpriced). The provider's own costUsd must win.
+    const provider = {
+      model: null,
+      async generate() {
+        return { text: 'done', toolCalls: [], usage: { inputTokens: 100, outputTokens: 5 }, costUsd: 0.0495 };
+      },
+    };
+    const loop = new Loop({ provider, onLlmResult: (e) => { events.push(e); } });
+    const result = await loop.run([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.cost, 0.0495, 'authoritative CLI cost accumulates into totalCost');
+    assert.equal(result.metrics.costUsd, 0.0495);
+    assert.equal(result.metrics.unpricedRounds, 0, 'a provider-priced round is NOT unpriced');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].costUsd, 0.0495);
+    assert.equal(events[0].pricing, 'priced');
+  });
+
+  it('treats a provider costUsd of 0 as priced (not the null/unpriced sentinel)', async () => {
+    const provider = {
+      model: null,
+      async generate() {
+        return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 };
+      },
+    };
+    const result = await new Loop({ provider }).run([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.metrics.costUsd, 0, 'a real $0 round is priced 0, never null');
+    assert.equal(result.metrics.unpricedRounds, 0);
+  });
+
+  it('falls back to estimateCost when costUsd is absent or non-finite', async () => {
+    // Non-finite provider cost is NOT a price → estimateCost path → null (no model) → unpriced.
+    const provider = {
+      model: null,
+      async generate() {
+        return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, costUsd: NaN };
+      },
+    };
+    const result = await new Loop({ provider }).run([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.metrics.costUsd, null, 'NaN cost falls through, not treated as priced');
+    assert.equal(result.metrics.unpricedRounds, 1);
+  });
+});
