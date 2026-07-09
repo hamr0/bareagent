@@ -29,3 +29,8 @@ poc/assess-*.mjs
 
 # RLM step-8 e2e dataset (fetched on demand, not committed)
 agnews.csv
+
+# Agent / IDE scratch — never commit (per hamr0 LIBRARY_CONVENTIONS §7)
+.claude/
+.litectx/
+.idea/
