@@ -165,38 +165,64 @@ class CLIPipeProvider {
 
       let stdout = '';
       let stderr = '';
-      let killed = false;
 
-      child.stdout.on('data', d => { stdout += d; this.onChunk?.(d.toString()); });
-      child.stderr.on('data', d => { stderr += d; });
+      // Settle exactly once, no matter which combination of events fires. 'close' can be
+      // withheld indefinitely when the CLI spawns a grandchild that inherits its stdio pipes
+      // (the child exits, but the pipes stay open) — observed live as a generate() promise
+      // that never settled. Every path below funnels through settle().
+      let settled = false;
+      /** @type {NodeJS.Timeout[]} */
+      const timers = [];
+      const later = (fn, ms) => { timers.push(setTimeout(fn, ms)); };
+      const settle = (/** @type {Error|null} */ err, text = '') => {
+        if (settled) return;
+        settled = true;
+        for (const t of timers) clearTimeout(t);
+        if (err) reject(err); else resolve(text);
+      };
 
-      child.on('error', err => {
-        reject(new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`, /** @type {any} */ ({ status: 0 })));
-      });
-
-      child.on('close', code => {
-        if (killed) return; // timeout already rejected
+      const finish = (/** @type {number|null} */ code) => {
         if (code !== 0) {
-          return reject(new ProviderError(`[CLIPipeProvider] process exited with code ${code}: ${stderr.trim()}`, /** @type {any} */ ({ status: code })));
+          // The claude CLI reports errors on STDOUT (a JSON envelope) with stderr often
+          // empty — fall back to a stdout tail so the operator never sees a blank reason.
+          const detail = stderr.trim() || (stdout.trim() ? `(stderr empty) stdout: ${stdout.trim().slice(-400)}` : '');
+          return settle(new ProviderError(`[CLIPipeProvider] process exited with code ${code}: ${detail}`, /** @type {any} */ ({ status: code })));
         }
         const text = stdout.trim();
         if (!text) {
-          return reject(new ProviderError('[CLIPipeProvider] process produced no output', /** @type {any} */ ({ status: 0 })));
+          return settle(new ProviderError('[CLIPipeProvider] process produced no output', /** @type {any} */ ({ status: 0 })));
         }
-        resolve(text);
+        settle(null, text);
+      };
+
+      child.stdout.on('data', d => {
+        stdout += d;
+        try {
+          this.onChunk?.(d.toString());
+        } catch (err) {
+          // an observer callback must fail the call loudly, never crash the host process
+          settle(new ProviderError(`[CLIPipeProvider] onChunk callback threw: ${/** @type {Error} */ (err).message}`, /** @type {any} */ ({ status: 0 })));
+        }
+      });
+      child.stderr.on('data', d => { stderr += d; });
+
+      child.on('error', err => {
+        settle(new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${err.message}`, /** @type {any} */ ({ status: 0 })));
       });
 
-      // Timeout handling
-      const timer = setTimeout(() => {
-        killed = true;
-        child.kill('SIGTERM');
-        setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch (_) {}
-        }, 1000);
-        reject(new ProviderError(`[CLIPipeProvider] timed out after ${this.timeout}ms`, /** @type {any} */ ({ status: 0 })));
-      }, this.timeout);
+      // Primary completion path: all stdio drained.
+      child.on('close', code => finish(code));
 
-      child.on('close', () => clearTimeout(timer));
+      // Fallback: the process exited but 'close' is being held open by inherited pipes.
+      // Give real drainage a short grace, then finish with what has arrived — a bounded
+      // wait, never a hang.
+      child.on('exit', code => later(() => finish(code), 2000));
+
+      later(() => {
+        child.kill('SIGTERM');
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 1000).unref?.();
+        settle(new ProviderError(`[CLIPipeProvider] timed out after ${this.timeout}ms`, /** @type {any} */ ({ status: 0 })));
+      }, this.timeout);
 
       // Write prompt to stdin — catch errors silently (process may exit early)
       child.stdin.on('error', () => {});

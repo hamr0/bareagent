@@ -110,7 +110,8 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 |-------|------|-----|
 | `[CLIPipeProvider] requires command` | Constructor called without `command` | Pass a command: `new CLIPipeProvider({ command: 'claude', args: ['--print'] })` |
 | `[CLIPipeProvider] failed to spawn: ...` | CLI binary not found or not executable (ENOENT, EACCES) | Check that the command is installed and in PATH |
-| `[CLIPipeProvider] process exited with code N: ...` | CLI tool returned non-zero exit | Check stderr output (included in error message). May be bad args or tool-specific error |
+| `[CLIPipeProvider] process exited with code N: ...` | CLI tool returned non-zero exit | Check the error detail: stderr, or when stderr is empty a stdout tail (CLIs like `claude -p` report errors as JSON on stdout). May be bad args or tool-specific error |
+| `[CLIPipeProvider] onChunk callback threw: ...` | Your `onChunk` observer raised | Fix the observer; the call fails loudly instead of crashing the host process |
 | `[CLIPipeProvider] timed out after Nms` | CLI tool didn't produce output within timeout | Increase `timeout` in constructor. Default is 30000ms |
 | `[CLIPipeProvider] process produced no output` | CLI tool exited 0 but wrote nothing to stdout | Check the command actually produces output for the given input |
 | `[CLIPipeProvider] options.parse must be 'claude-json' or a function` | Constructor `parse` option is neither the `'claude-json'` preset nor a function | Pass `parse: 'claude-json'` or a `(stdout) => Partial<GenerateResult>` function |

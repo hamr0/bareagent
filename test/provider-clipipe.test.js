@@ -65,6 +65,51 @@ describe('CLIPipeProvider', () => {
     );
   });
 
+  it('non-zero exit with empty stderr reports a stdout tail, never a blank reason', async () => {
+    // the claude CLI reports errors as a JSON envelope on STDOUT with stderr empty —
+    // the old message ended at "code 1:" and the operator saw nothing actionable
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'process.stdout.write(JSON.stringify({is_error:true,result:"usage limit"}));process.exit(1)'],
+    });
+    await assert.rejects(
+      () => provider.generate([{ role: 'user', content: 'hi' }]),
+      { message: /exited with code 1: \(stderr empty\) stdout: .*usage limit/ }
+    );
+  });
+
+  it('settles when a grandchild holds the stdio pipes open after the child exits', async () => {
+    // regression: 'close' never fires while an inherited pipe is held by a grandchild —
+    // the old implementation hung until (at best) the caller timeout. The 'exit' grace
+    // path must resolve with the output that arrived, well before the 15s timeout.
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', `
+        const { spawn } = require('child_process');
+        spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 8000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+        process.stdout.write('done before exit');
+        process.exit(0);
+      `],
+      timeout: 15000,
+    });
+    const started = Date.now();
+    const result = await provider.generate([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.text, 'done before exit');
+    assert.ok(Date.now() - started < 6000, 'must settle via the exit-grace path, not the timeout');
+  });
+
+  it('a throwing onChunk rejects the call instead of crashing the process', async () => {
+    const provider = new CLIPipeProvider({
+      command: 'node',
+      args: ['-e', 'process.stdout.write("hi")'],
+      onChunk: () => { throw new Error('observer bug'); },
+    });
+    await assert.rejects(
+      () => provider.generate([{ role: 'user', content: 'hi' }]),
+      { message: /onChunk callback threw: observer bug/ }
+    );
+  });
+
   it('throws on timeout', async () => {
     const provider = new CLIPipeProvider({
       command: 'node',

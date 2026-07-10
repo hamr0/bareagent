@@ -4,6 +4,21 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CLIPipeProvider._spawn` is now settle-guaranteed (adaptlearn F13/F15 addenda).** Two field
+  failures from live cohort runs: (1) a `generate()` promise that never settled — `'close'` is
+  withheld indefinitely when the CLI spawns a grandchild that inherits its stdio pipes (child
+  exits, pipes stay open), defeating the caller's try/catch; now every path funnels through a
+  single idempotent `settle()`, with an `'exit'`-event fallback that finishes after a 2s
+  drainage grace instead of hanging. (2) Blank error reasons — the non-zero-exit message quoted
+  only `stderr`, but `claude -p` reports errors as a JSON envelope on **stdout**; the message
+  now falls back to a stdout tail (`(stderr empty) stdout: ...`) so the operator always sees
+  something actionable. Also: a throwing `onChunk` observer now rejects the call with
+  `ProviderError` instead of crashing the host process. `src/provider-clipipe.js`,
+  `test/provider-clipipe.test.js` (+3: grandchild-held pipes settle via the grace path,
+  stdout-tail error detail, throwing observer), `docs/02-features/errors.md`.
+
 ## [0.26.0] — 2026-07-08
 
 ### Added
