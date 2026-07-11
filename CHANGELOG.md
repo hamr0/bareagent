@@ -4,8 +4,18 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.26.1] — 2026-07-11
+
 ### Fixed
 
+- **`bareguard` peer range unstuck: `^0.9.0` → `>=0.9.0 <0.13.0` (bareloop F1).** The
+  peerOptional range predated three bareguard minors, so a consumer installing
+  `bare-agent` next to a current `bareguard@0.12.x` hit a hard `ERESOLVE` — pushing
+  consumers toward `--legacy-peer-deps`, the exact local-shim the suite's
+  fix-and-consume rule exists to prevent. The upper bound is evidence, not hope: the
+  full suite (758 tests, including the `wireGate` adapter) runs green against
+  bareguard 0.12.0, which also carried adaptlearn's live cohorts. devDependency
+  updated to match so CI tests against what consumers actually resolve.
 - **`CLIPipeProvider._spawn` is now settle-guaranteed (adaptlearn F13/F15 addenda).** Two field
   failures from live cohort runs: (1) a `generate()` promise that never settled — `'close'` is
   withheld indefinitely when the CLI spawns a grandchild that inherits its stdio pipes (child
