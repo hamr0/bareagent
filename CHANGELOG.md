@@ -4,6 +4,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.26.2] — 2026-07-11
+
+### Fixed
+
+- **`GateDecision.reason` type admits `null` (bareguard Decision parity).** The `@property` typed `reason` as `string`, but bareguard's `Decision` emits `null` when a verdict carries no human-readable reason — so a strict-null consumer typechecking against the adapter's shape saw a false non-null guarantee. Widened to `string | null`. Purely a type-contract fix: all three runtime consumers already guard it (`decision.reason || <fallback>` at `bareguard-adapter.js:129`, the ternary at `:282`, and `err.decision?.reason ?? null` in `loop.js`), so there is no behavior change. `src/bareguard-adapter.js`.
+
 ## [0.26.1] — 2026-07-11
 
 ### Fixed
