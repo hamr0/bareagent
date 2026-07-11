@@ -21,7 +21,7 @@ const { HaltError } = require('./errors');
  * @property {string} [outcome] - 'allow' when permitted.
  * @property {string} [severity] - 'halt' for halt-severity denials.
  * @property {string} [rule] - The matched rule name.
- * @property {string} [reason] - Human-readable reason.
+ * @property {string | null} [reason] - Human-readable reason (bareguard's Decision emits null when absent).
  * @property {Record<string, any>} [context] - Arbitrary structured context.
  */
 
