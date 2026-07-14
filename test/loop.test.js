@@ -1254,3 +1254,84 @@ describe('Loop — stop() exit hygiene (seal marker + residual harvest)', () => 
     assert.equal(result.text, 'work');
   });
 });
+
+describe('Loop — BA-6: a TRUNCATED round must never read as a completed one', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  // AC-2: the core defect. A round the API cut off at the cap returned error:null — a clean finish.
+  it('stopReason max_tokens with NO tool calls returns error:truncated:max_tokens, not error:null', async () => {
+    const provider = scripted(() => ({ text: 'partial essay about the his', toolCalls: [], stopReason: 'max_tokens', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'write 2000 words' }]);
+    assert.equal(result.error, 'truncated:max_tokens', 'a truncation is NOT a clean finish');
+    assert.equal(result.text, 'partial essay about the his', 'BA-5: the partial work is preserved, never discarded');
+  });
+
+  // AC-3 (NEGATIVE CONTROL): without this, a fix that errors on EVERY zero-tool-call round would pass —
+  // and would break every consumer's happy path. Proves the check reads the flag, not the weather.
+  it('NEGATIVE CONTROL: stopReason end_turn with no tool calls STILL returns a clean finish', async () => {
+    const provider = scripted(() => ({ text: 'the answer is 42', toolCalls: [], stopReason: 'end_turn', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null, 'a real finish must stay a clean finish');
+    assert.equal(result.text, 'the answer is 42');
+  });
+
+  // AC-4 (NEGATIVE CONTROL): providers that report nothing (CLIPipe) or an unmapped value must behave
+  // EXACTLY as they did pre-BA-6. A wrong/absent mapping degrades to the status quo, not to a false error.
+  it('NEGATIVE CONTROL: a provider that reports NO stopReason behaves exactly as today', async () => {
+    const provider = scripted(() => ({ text: 'done', toolCalls: [], usage })); // no stopReason field at all
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null, 'absent stopReason must not invent a truncation');
+    assert.equal(result.text, 'done');
+  });
+
+  // AC-5 (INVERTED by the POC): a truncated round's tool calls were cut off mid-generation, so their
+  // arguments are missing keys. Executing one is the BA-4 file-zeroing mechanism. A COMPLETE call always
+  // arrives tagged 'tool_use', never 'max_tokens' — so refusing here discards nothing legitimate.
+  it('REFUSES to execute the tool calls of a truncated round (the BA-4 root cause)', async () => {
+    let executed = false;
+    // The exact BA-4 shape: shell_write truncated mid-generation, `content` never arrived.
+    const provider = scripted(() => ({
+      text: '', stopReason: 'max_tokens', usage,
+      toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: '/tmp/store.js' } }], // no `content`!
+    }));
+    const writeTool = { name: 'shell_write', description: 'writes', execute: async () => { executed = true; return 'wrote'; } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'rewrite it' }], [writeTool]);
+    assert.equal(executed, false, 'a half-generated tool call must NEVER reach the tool');
+    assert.equal(result.error, 'truncated:max_tokens');
+  });
+
+  // The transcript must stay wire-valid: a tool_call we refuse to run must not be left orphaned
+  // (a tool_call with no tool_result is a 400 on Anthropic).
+  it('seals the transcript without orphaning the refused tool call', async () => {
+    const provider = scripted(() => ({
+      text: 'I will now write the file', stopReason: 'max_tokens', usage,
+      toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: '/tmp/x' } }],
+    }));
+    const writeTool = { name: 'shell_write', description: 'writes', execute: async () => 'wrote' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [writeTool]);
+    const assistantTurns = result.msgs.filter((m) => m.role === 'assistant');
+    assert.ok(assistantTurns.every((m) => !m.tool_calls), 'no tool_call may be pushed — it would have no tool_result');
+    assert.equal(result.msgs.filter((m) => m.role === 'tool').length, 0, 'and no orphan tool result');
+  });
+
+  // pause_turn is a RESUMABLE server-tool state, and context_exceeded is a different failure.
+  // Folding either into the truncation check would break flows that are working as designed.
+  it('does NOT treat pause_turn or refusal as a truncation', async () => {
+    for (const stopReason of ['pause_turn', 'refusal', 'stop_sequence']) {
+      const provider = scripted(() => ({ text: 'x', toolCalls: [], stopReason, usage }));
+      const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+      assert.equal(result.error, null, `${stopReason} is not an output-cap truncation`);
+    }
+  });
+
+  // The tokens were really spent. A truncation the gate can't see is a budget hole.
+  it('METERS the truncated round before returning (the gate must see the spend)', async () => {
+    const seen = [];
+    const provider = scripted(() => ({ text: 'partial', toolCalls: [], stopReason: 'max_tokens', usage: { inputTokens: 10, outputTokens: 99 } }));
+    const result = await new Loop({ provider, throwOnError: true, onLlmResult: (r) => seen.push(r) })
+      .run([{ role: 'user', content: 'go' }]);
+    assert.equal(seen.length, 1, 'the truncated round still forwards its usage to the gate');
+    assert.equal(result.metrics.tokens.output, 99, 'and is counted by the meter');
+  });
+});

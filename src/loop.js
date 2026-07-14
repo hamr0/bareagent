@@ -1,6 +1,7 @@
 'use strict';
 
 const { ToolError, HaltError } = require('./errors');
+const { isTruncated } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Provider} Provider */
 /** @typedef {import('../types').Message} Message */
@@ -693,6 +694,32 @@ class Loop {
           if (err instanceof HaltError) throw err;
           this._reportError('onLlmResult', err, { round });
         }
+      }
+
+      // BA-6: the API CUT THIS ROUND OFF at the output cap. It is NOT a finished turn, and it must not
+      // reach the "no tool calls ⇒ final answer" rule below — that rule is what laundered a truncation
+      // into a clean `error: null` completion, indistinguishable from a model that chose to stop.
+      //
+      // Placed AFTER metering (the tokens were really spent — the gate must see them) and BEFORE tool
+      // execution, which is the load-bearing half: a truncated round's tool calls were cut off
+      // mid-generation, so their arguments are missing keys. Executing one is exactly how BA-4 emptied a
+      // 1789-line file (`shell_write` reached the fs with no `content`). A COMPLETE call always arrives
+      // tagged 'tool_use', never 'max_tokens' (measured on the real API, poc/ba6-stop-reason-mapping.mjs),
+      // so refusing here discards nothing legitimate and closes the data-loss path for EVERY tool.
+      //
+      // We report; the caller decides. No auto-retry at a bigger cap: that doubles spend against a budget
+      // the gate is enforcing, and the right recovery (raise the cap? split the task? shorten it?) is the
+      // caller's call, not the library's. `lastText` (BA-5) preserves the partial work either way.
+      if (isTruncated(result.stopReason)) {
+        const dropped = (result.toolCalls || []).length;
+        // Seal the transcript with the partial text only. Deliberately NOT the tool_calls: pushing a call
+        // we refuse to execute would orphan it (a tool_call with no tool_result is a wire-invalid
+        // transcript on Anthropic). Empty text pushes nothing — a bare empty assistant turn is also invalid.
+        if (typeof result.text === 'string' && result.text.trim() !== '') {
+          msgs.push({ role: 'assistant', content: result.text });
+        }
+        this._safeEmit({ type: 'loop:done', data: { text: lastText, truncated: true, droppedToolCalls: dropped, cost: totalCost } });
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: 'truncated:max_tokens', msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       // No tool calls — LLM gave a final text response

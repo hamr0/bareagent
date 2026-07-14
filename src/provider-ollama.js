@@ -3,6 +3,7 @@
 const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
+const { normalizeStopReason } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -69,6 +70,10 @@ class OllamaProvider {
           : tc.function.arguments,
       })),
       model: data.model || this.model,
+      // BA-6: `length` ⇒ cut off at num_predict. NOT probed live (no local daemon at build time) —
+      // documented mapping; unknown ⇒ null ⇒ today's behavior. Lifecycle values (`load`/`unload`) are
+      // deliberately unmapped rather than forced into the vocabulary.
+      stopReason: normalizeStopReason(data.done_reason, 'ollama'),
       usage: {
         inputTokens: data.prompt_eval_count || 0,
         outputTokens: data.eval_count || 0,

@@ -81,6 +81,23 @@ export interface GenerateResult {
   /** Model id the response was produced by; preferred over Provider.model for cost accounting. */
   model?: string | null;
   /**
+   * Why generation ended, normalized across providers (BA-6). Before this, no provider read its native
+   * finish-reason field, so a round the API CUT OFF at the token cap was indistinguishable from one the
+   * model chose to end — and the Loop, whose rule is "no tool calls ⇒ final answer", returned the
+   * truncation as a clean finish with `error: null`.
+   *
+   * - `'end_turn'` — the model finished on its own. The only clean finish.
+   * - `'max_tokens'` — CUT OFF at the output cap. The Loop returns `error: 'truncated:max_tokens'`
+   *   (preserving the partial text) and REFUSES to execute any tool call the round carries: a complete
+   *   call always arrives as `'tool_use'`, so one riding a `'max_tokens'` round was cut off
+   *   mid-generation with arguments missing — the BA-4 file-zeroing mechanism.
+   * - `'tool_use'` — stopped to call a tool, and the call is COMPLETE.
+   * - `'stop_sequence'` / `'refusal'` / `'pause_turn'` / `'context_exceeded'` — reported, not acted on.
+   * - `null` — the provider didn't report one (e.g. CLIPipe) or the value is unrecognized. Reproduces
+   *   pre-BA-6 behavior exactly, so an unmapped provider degrades to the status quo.
+   */
+  stopReason?: string | null;
+  /**
    * True when the requested `temperature` was rejected by the model (400, unsupported/deprecated) and
    * the request was retried without it (BA-10). The response was produced at the model's DEFAULT
    * temperature, not the one requested — callers reporting an effective temperature must honor this.

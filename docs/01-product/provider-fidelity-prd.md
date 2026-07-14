@@ -34,7 +34,7 @@ This section exists so that a future contributor cannot quietly re-sell BA-7 as 
 |---|------|----------|--------|
 | **BA-4** | `shell_write` zeroes a file when `content` is missing | CRITICAL | ✅ **SHIPPED** (this branch) |
 | **BA-5** | Bounds discard the model's text (+ BA-3 `stop()` sub-case) | HIGH | ✅ **SHIPPED** (this branch) |
-| **BA-6** | A truncated round reads as a clean finish | **CRITICAL** | 🔴 OPEN — F1 |
+| **BA-6** | A truncated round reads as a clean finish | **CRITICAL** | ✅ **SHIPPED** (this branch) — and it closes BA-4's ROOT cause: a truncated round's tool calls are now refused, never executed |
 | **BA-7** | Thinking blocks neither requested nor preserved | HIGH (protocol) | 🔴 OPEN — F2 |
 | **BA-12** | A repeated tool ERROR spins unbounded | MEDIUM | 🔴 OPEN — F3 (found by our own smoke) |
 | **BA-1** | Anthropic transcript is re-bought every round (no cache breakpoint) | HIGH ($) | 🔴 OPEN — F4 |
@@ -88,8 +88,9 @@ bareloop measured the harsher variant independently: `max_tokens=4096 → stop_r
 2. A scripted Loop whose provider returns `{text: 'partial', toolCalls: [], stopReason: 'max_tokens'}` returns **`error: 'truncated:max_tokens'`** and `text: 'partial'` — **NOT** `error: null`.
 3. **Negative control:** the same response with `stopReason: 'end_turn'` returns `error: null` — proving the check reads the flag, not the weather.
 4. **Negative control 2:** a provider that reports no `stopReason` at all (`null`) behaves exactly as today — no false truncation errors for OpenAI-compatible or CLI providers that omit it.
-5. A `max_tokens` truncation that *does* carry tool calls still executes them (Anthropic can truncate after emitting a complete `tool_use`) — we do not drop work that arrived intact.
+5. ~~A `max_tokens` truncation that *does* carry tool calls still executes them — we do not drop work that arrived intact.~~ **INVERTED by measurement (`poc/ba6-stop-reason-mapping.mjs`), and this is the most important thing the POC bought.** The premise was false: **a complete tool call is *always* tagged `tool_use`, never `max_tokens`.** Anthropic returned a complete `tool_use` even at a 1024-token cap; OpenAI 400s rather than emit a call it cannot finish. So no work "arrives intact" on a truncated round — a tool call riding one was **cut off mid-generation, with arguments missing keys**, which is *precisely* how BA-4's worker emptied a 1789-line file (`shell_write` with no `content`). **Corrected criterion: the Loop MUST NOT execute the tool calls of a `max_tokens` round.** Refusing costs nothing legitimate and closes BA-4's root cause at the protocol layer, for every tool. *(Lesson: the spec was written from a source-read; the wire disproved it. bareloop's own BA-4 report contained the disproof and neither of us saw it.)*
 6. **Live, on `claude-sonnet-5`:** the §1.2 reproduction (`max_tokens: 1024`, reasoning-heavy prompt) now returns `error: 'truncated:max_tokens'` instead of `error: null`.
+7. **Deliberately NOT truncations:** `pause_turn` (a *resumable* server-side-tool state), `refusal`, `stop_sequence`, `context_exceeded`. Erroring on `pause_turn` would break server-tool flows that are working as designed.
 
 ---
 
@@ -114,7 +115,9 @@ Carry provider-native content through the transcript instead of flattening it:
 - `GenerateResult` gains `raw` (the provider's own content blocks, opaque to the Loop).
 - The Loop stores that blob on the assistant message it pushes (an opaque passthrough field — the Loop MUST NOT interpret it).
 - `_toAnthropicMessage` replays those blocks **verbatim, signature intact**, ahead of the reconstructed `text`/`tool_use` blocks.
-- `AnthropicProvider` gains opt-in `thinking: {type: 'enabled', budget_tokens: N}` — mirroring `cacheSystem`'s opt-in shape.
+- `AnthropicProvider` gains an opt-in `thinking` option — mirroring `cacheSystem`'s opt-in shape.
+
+> **⚠️ CORRECTION (2026-07-14).** An earlier draft of this line specified `thinking: {type: 'enabled', budget_tokens: N}`. **That shape is REJECTED with a 400** on `claude-sonnet-5` and Opus 4.7/4.8 — `budget_tokens` was removed from the API. The correct opt-in is **`thinking: {type: 'adaptive'}`**, with depth controlled by `output_config.effort` (`low`…`max`), and `display: 'summarized'` if the reasoning is to be surfaced (the default is `'omitted'`, which returns thinking blocks with **empty text**). bareloop's original ask had this right; the error was introduced when this PRD rewrote it. Whoever builds BA-7 must verify against the live API before coding — a recalled schema is not a source.
 
 **Provider-agnostic by construction:** `raw` is an opaque passthrough. No other provider reads it; the Loop never inspects it. This is the only shape that doesn't leak Anthropic into the core.
 
@@ -197,7 +200,13 @@ A rolling `cache_control: {type:'ephemeral'}` breakpoint on the last content blo
 
 ---
 
-## 5. Open decisions — need sign-off before build
+## 5. Decisions — SIGNED OFF (hamr, 2026-07-14)
+
+All four resolved to the recommended option. **D1:** keep `max_tokens` at 4096; make truncation loud (shipped in BA-6) and document raising it — a silent cost increase is the same class of sin as a silent truncation. **D2:** identical-repeated-call detection for the BA-12 spin guard (narrowest; won't break a model legitimately recovering from an error). **D3:** BA-1 message caching ships **opt-in** (`cacheMessages`) for one minor, then flips to default-ON once we have our own measurement — default-ON changes every adopter's wire format on the strength of one upstream report. **D4:** build order **BA-6 → BA-1 → BA-12 → BA-7**.
+
+*Original table retained below for the reasoning.*
+
+## 5a. Open decisions (as put to sign-off)
 
 | # | Decision | Recommendation |
 |---|---|---|

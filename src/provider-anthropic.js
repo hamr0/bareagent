@@ -4,6 +4,7 @@ const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
+const { normalizeStopReason } = require('./provider-stop-reason');
 
 /** @param {string} hostname @returns {boolean} */
 function isLoopbackHost(hostname) {
@@ -116,6 +117,10 @@ class AnthropicProvider {
       text,
       toolCalls,
       model: data.model || this.model,
+      // BA-6: why generation ended. `max_tokens` here means the API CUT THIS ROUND OFF — the Loop must
+      // not read it as a finished turn, and must not execute any tool call it carries (a complete call
+      // arrives as `tool_use`; one riding a `max_tokens` round was cut off mid-generation).
+      stopReason: normalizeStopReason(data.stop_reason, 'anthropic'),
       // Anthropic's `input_tokens` is ALREADY the uncached remainder (cached tokens are reported
       // separately, not folded in — verified live), so no subtraction here, unlike OpenAI/Gemini.
       usage: {

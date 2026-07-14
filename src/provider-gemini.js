@@ -4,6 +4,7 @@ const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
+const { normalizeStopReason } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -130,6 +131,11 @@ class GeminiProvider {
       text,
       toolCalls,
       model: data.modelVersion || this.model,
+      // BA-6: `MAX_TOKENS` ⇒ cut off at the output cap. NOT probed live (no key at build time) — mapped
+      // from the documented vocabulary, and an unrecognized value falls through to `null`, which
+      // reproduces today's behavior exactly. A wrong guess degrades to the status quo, never to a
+      // false truncation on a healthy run. Verify live before release.
+      stopReason: normalizeStopReason(data.candidates?.[0]?.finishReason, 'gemini'),
       usage: this._normalizeUsage(data.usageMetadata),
       ...(temperatureDropped && { temperatureDropped: true }),
     };
