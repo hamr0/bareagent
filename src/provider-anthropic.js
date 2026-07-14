@@ -23,6 +23,9 @@ function isLoopbackHost(hostname) {
  * @property {string} [baseUrl='https://api.anthropic.com/v1'] - API base (override for proxies/gateways; the request posts to `${baseUrl}/messages`).
  * @property {boolean} [cacheSystem=false] - Opt-in prompt caching: send the system prompt with a `cache_control` breakpoint so Anthropic caches it. Anthropic does NOT auto-cache, so without this its cache tiers are always 0. Overridable per call via `generate(..., { cacheSystem })`. NOTE: on its own this rarely helps a tool loop — Anthropic's minimum cacheable prefix is 1024–4096 tokens (model-dependent) and a typical system persona is a few hundred, so it silently never caches. The transcript is where a tool loop's tokens actually live — see `cacheMessages`.
  * @property {boolean} [cacheMessages=false] - Opt-in TRANSCRIPT caching (BA-1): roll a `cache_control` breakpoint onto the last content block of the last message, so Anthropic caches the whole conversation prefix and the loop stops re-buying it at full price every round. In a tool loop the transcript IS the tool results (file bodies from `shell_read`) and it always ENDS on one, which `_toAnthropicMessage` rebuilds from scratch — so no caller-side seam (`assemble` included) can reach it, and this has to live in the provider. Measured on `claude-sonnet-5` with a ~15k-token tool-result transcript (`poc/ba1-message-caching.mjs`): steady state **$0.0753 → $0.0110 per round, 6.8x cheaper**; round 1 pays a 1.25x cache WRITE once. Off by default — it changes the wire format, so adopters opt in. Overridable per call via `generate(..., { cacheMessages })`. **Interaction:** a destructive `trim`/stash fold that rewrites the transcript PREFIX invalidates the cache (the prefix is the cache key), so a fold must keep the head stable or you re-pay the write premium every round for nothing.
+ * @property {any} [thinking] - Opt-in extended thinking (BA-7), forwarded to `body.thinking` VERBATIM and unvalidated — e.g. `{ type: 'adaptive' }`, or `{ type: 'adaptive', display: 'summarized' }` to surface the reasoning (the default `display` is `'omitted'`). Deliberately opaque: this parameter has already broken once (`budget_tokens` was removed and now 400s on `claude-sonnet-5` / Opus 4.7+), and a library that reshapes it would need a release every time the API moves. Overridable per call via `generate(..., { thinking })`; pass `null` there to suppress an instance default.
+ *
+ *   **MEASURED CAVEAT — this option does not "turn thinking on".** On `claude-sonnet-5` adaptive thinking is ALREADY the default: sending this changed the observed thinking rate not at all (2/10 rounds with it vs 3/10 without — `poc/ba7-adaptive-default.mjs`). Its real use is pinning the mode and reaching `display`/`effort`. The change that mattered is that thinking blocks are now PRESERVED and replayed (see `Message.providerBlocks`), which happens whether or not you ever set this.
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
  */
 
@@ -41,6 +44,12 @@ class AnthropicProvider {
     // cache_read/cache_creation tiers are always 0). Default off keeps requests byte-identical to before.
     this.cacheSystem = options.cacheSystem === true;
     this.cacheMessages = options.cacheMessages === true;
+    // BA-7: forwarded to `body.thinking` VERBATIM — deliberately unvalidated and un-reshaped. This
+    // parameter has already broken once (`budget_tokens` was removed and now 400s on sonnet-5 /
+    // Opus 4.7+; `{type:'adaptive'}` replaced it). A library that parses it would have to ship a
+    // release every time Anthropic moves; passing it through means the caller can always express
+    // the current API. Omit it to keep today's body byte-identical.
+    this.thinking = options.thinking != null ? options.thinking : null;
     // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
     this.exposeErrorBody = options.exposeErrorBody === true;
   }
@@ -114,6 +123,14 @@ class AnthropicProvider {
       ...(system && { system }),
       ...(options.temperature != null && { temperature: options.temperature }),
     };
+
+    // BA-7 (b). Measured caveat, and it matters: on `claude-sonnet-5` adaptive thinking is ALREADY
+    // the default — sending this changed the thinking rate not at all (2/10 vs 3/10 rounds,
+    // `poc/ba7-adaptive-default.mjs`). So this option does NOT "turn thinking on"; it lets you pin
+    // the mode and reach `display`/`effort`. The fix that actually mattered is the preservation
+    // above, which applies whether or not you ever set this.
+    const thinking = options.thinking !== undefined ? options.thinking : this.thinking;
+    if (thinking) body.thinking = thinking;
     if (tools.length > 0) {
       body.tools = tools.map(t => ({
         name: t.name,
@@ -135,11 +152,18 @@ class AnthropicProvider {
     let text = '';
     /** @type {import('../types').ToolCall[]} */
     const toolCalls = [];
+    // BA-7: everything that is NOT text/tool_use is a block our normalized {text, toolCalls} shape
+    // cannot express — today that means `thinking` and `redacted_thinking`. We used to drop these on
+    // the floor. Anthropic's contract is that they are echoed back UNCHANGED (signature included) when
+    // continuing a tool-use conversation, so they are collected OPAQUELY here: whatever the block is,
+    // we keep its bytes. Deliberately not a `block.type === 'thinking'` check — a future block type
+    // would be silently dropped again, which is the exact bug being fixed.
+    /** @type {any[]} */
+    const nativeBlocks = [];
     for (const block of data.content) {
       if (block.type === 'text') text += block.text;
-      if (block.type === 'tool_use') {
-        toolCalls.push({ id: block.id, name: block.name, arguments: block.input });
-      }
+      else if (block.type === 'tool_use') toolCalls.push({ id: block.id, name: block.name, arguments: block.input });
+      else nativeBlocks.push(block);
     }
 
     return {
@@ -150,6 +174,12 @@ class AnthropicProvider {
       // not read it as a finished turn, and must not execute any tool call it carries (a complete call
       // arrives as `tool_use`; one riding a `max_tokens` round was cut off mid-generation).
       stopReason: normalizeStopReason(data.stop_reason, 'anthropic'),
+      // BA-7: the opaque blocks, tagged so they can only ever be replayed to the model that signed
+      // them. A thinking `signature` is model-bound; on a mismatch we drop them and degrade to the
+      // pre-BA-7 behavior (a lossy request that still succeeds) rather than risk a 400.
+      ...(nativeBlocks.length > 0 && {
+        providerBlocks: { provider: 'anthropic', model: this.model, blocks: nativeBlocks },
+      }),
       // Anthropic's `input_tokens` is ALREADY the uncached remainder (cached tokens are reported
       // separately, not folded in — verified live), so no subtraction here, unlike OpenAI/Gemini.
       usage: {
@@ -167,6 +197,29 @@ class AnthropicProvider {
     if (this._warnedTempDropped) return;
     this._warnedTempDropped = true;
     console.warn(`[AnthropicProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  }
+
+  /**
+   * BA-7: the provider-native blocks to replay at the FRONT of an assistant turn's content, or `[]`.
+   *
+   * Only ever returns blocks this model itself produced. The tag carries `this.model` (the CONFIGURED
+   * id, not the response's resolved one — those can differ by date suffix, and a mismatch there would
+   * silently disable preservation, which is the very bug class BA-7 exists to close).
+   *
+   * Front, because Anthropic requires `thinking` to lead the content array — the verbatim order we
+   * measured a successful round-trip on (`poc/ba7-thinking-contract.mjs`, R3).
+   *
+   * @param {Message} msg
+   * @returns {any[]}
+   */
+  _nativeBlocks(msg) {
+    const pb = /** @type {any} */ (msg).providerBlocks;
+    if (!pb || pb.provider !== 'anthropic' || !Array.isArray(pb.blocks) || pb.blocks.length === 0) return [];
+    // A thinking signature is bound to the model that issued it. Swap models mid-transcript and these
+    // blocks are not ours to replay: drop them (lossy but valid) rather than send a signature this
+    // model will reject.
+    if (pb.model !== this.model) return [];
+    return pb.blocks;
   }
 
   /**
@@ -189,6 +242,11 @@ class AnthropicProvider {
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
       /** @type {any[]} */
       const content = [];
+      // BA-7: thinking blocks lead, then text, then tool_use — this is THE turn the contract is about
+      // (continuing a tool-use conversation). Note the normalized `content`/`tool_calls` stay the
+      // source of truth: we replay only the opaque blocks, never a cached copy of the text, so a
+      // `trim`/`assemble` seam that rewrites this message is not silently undone.
+      content.push(...this._nativeBlocks(msg));
       if (msg.content) content.push({ type: 'text', text: msg.content });
       for (const tc of msg.tool_calls) {
         content.push({
@@ -201,6 +259,16 @@ class AnthropicProvider {
         });
       }
       return { role: 'assistant', content };
+    }
+    // A tool-call-free assistant turn can still carry thinking (a final answer, or an earlier turn a
+    // caller replays into a fresh run). Same rule: native blocks lead.
+    if (msg.role === 'assistant') {
+      const native = this._nativeBlocks(msg);
+      if (native.length > 0) {
+        const content = [...native];
+        if (msg.content) content.push({ type: 'text', text: msg.content });
+        return { role: 'assistant', content };
+      }
     }
     return { role: msg.role, content: msg.content };
   }

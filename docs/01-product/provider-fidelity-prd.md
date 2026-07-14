@@ -1,6 +1,6 @@
 # bareagent — Provider Fidelity & Honest Termination PRD
 
-**Status:** IN PROGRESS (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12.** **OPEN: BA-7** (last, per D4 — the only item with a measured ZERO benefit; see §0).
+**Status:** ALL ASKS SHIPPED (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12, BA-7.** Remaining before release: live-probe the Gemini/Ollama `stopReason` maps (documented, not measured — they degrade to `null`/status-quo if wrong).
 **Owner:** hamr0
 **Source:** bareloop's round-4 isolation study (`/home/hamr/Documents/PycharmProjects/bareloop/docs/UPSTREAM-FIXES.md`) + this repo's own live verify-shipped runs.
 **Language:** Node.js (JS + JSDoc), CJS surface. No new deps.
@@ -35,7 +35,7 @@ This section exists so that a future contributor cannot quietly re-sell BA-7 as 
 | **BA-4** | `shell_write` zeroes a file when `content` is missing | CRITICAL | ✅ **SHIPPED** (this branch) |
 | **BA-5** | Bounds discard the model's text (+ BA-3 `stop()` sub-case) | HIGH | ✅ **SHIPPED** (this branch) |
 | **BA-6** | A truncated round reads as a clean finish | **CRITICAL** | ✅ **SHIPPED** (this branch) — and it closes BA-4's ROOT cause: a truncated round's tool calls are now refused, never executed |
-| **BA-7** | Thinking blocks neither requested nor preserved | HIGH (protocol) | 🔴 OPEN — F2 |
+| **BA-7** | Thinking blocks neither requested nor preserved | HIGH (protocol) | ✅ **SHIPPED** (this branch) — `Message.providerBlocks` opaque passthrough + opt-in `thinking`. **Two POC findings corrected the ask itself — see F2.** Still ZERO measured capability benefit; the honesty gate holds |
 | **BA-12** | A repeated tool ERROR spins unbounded | MEDIUM | ✅ **SHIPPED** (this branch) — `maxIdenticalToolErrors`, default 3. NOTE: BA-6 closed the ORIGINAL (truncation-driven) instance; this covers the residual general case |
 | **BA-1** | Anthropic transcript is re-bought every round (no cache breakpoint) | HIGH ($) | ✅ **SHIPPED** (this branch) — opt-in `cacheMessages`; measured 6.8×/round steady state |
 
@@ -97,6 +97,22 @@ bareloop measured the harsher variant independently: `max_tokens=4096 → stop_r
 # F2 — BA-7: thinking blocks are neither requested nor preserved
 
 > **⚠️ READ §0 FIRST. This is a PROTOCOL bug. bareloop's head-to-head showed that fixing it moved NO outcome (n=2, both arms failed the task identically). Do not describe this fix as improving reasoning, aim, or agent quality — it does not, and we have the measurement. It is filed because we are violating an API contract.**
+
+## 2.0 SHIPPED (2026-07-14) — and what the POC corrected
+
+Built as specified, with **two findings from the live probes that changed the shape of the fix**. Both are recorded here because each one was a confident assumption that measurement overturned.
+
+**1. The opt-in `thinking` param is NOT what turns thinking on — preservation is the entire fix.** The ask reads naturally as "ask for thinking (b), and preserve what comes back (a)." Measurement inverts the emphasis: on `claude-sonnet-5` **adaptive thinking is already the default**, and sending `thinking:{type:'adaptive'}` explicitly moved the observed rate **not at all** — **2/10 rounds with it vs 3/10 without** (`poc/ba7-adaptive-default.mjs`, same prompt, same cap, only the key varies). bare-agent has therefore been receiving thinking blocks **today, on ~a quarter of rounds, without asking**, and dropping every one. (b) is a control surface for `display`/`effort`; **(a) is the fix.**
+
+**2. A first n=1 probe said the OPPOSITE, and would have had us tell the adopter their report was wrong.** `poc/ba7-thinking-contract.mjs` R2 returned `["tool_use"]` — no thinking block — with the param omitted, which read as a clean falsification of bareloop's central premise. It was a **fluke**: *adaptive* thinking is stochastic, fires on a minority of rounds, and n=1 caught a miss. The repeated differential settled it in bareloop's favour. **Filed as a standing lesson: a single observation of a nondeterministic feature is a degenerate number, not evidence — least of all when it flatters us.**
+
+Also measured (`poc/ba7-thinking-contract.mjs`): dropping thinking blocks on a thinking-enabled continuation is **tolerated — HTTP 200, no error, ever** (R1). That is why this bug survived to 0.26.2: the loss is completely silent. Verbatim replay **validates** (R3), and blocks carry `{type, thinking, signature}` (R4) — with `redacted_thinking` a documented type we simply didn't draw, which is why the passthrough preserves **bytes** rather than a parsed shape.
+
+**Built:** `Message.providerBlocks` / `GenerateResult.providerBlocks` (`{provider, model, blocks}`), replayed at the front of the assistant turn. Opaque; provider+model tag enforced on replay (a signature is model-bound — mismatch drops rather than 400s); normalized fields stay the source of truth so a `trim`/`assemble` rewrite is never undone by a stale copy. Opt-in `AnthropicProvider({thinking})` forwarded verbatim/unvalidated (`budget_tokens` already died once).
+
+**Verified:** +14 tests, all four seams independently mutation-proven. Live verify-shipped through a recording proxy (`poc/ba7-verify-shipped.mjs`) — round 2 replays round 1's **real 400-char signature byte-identically**, thinking leads, API accepts; **guard-off negative control** reproduces the silent loss (block absent from the wire, still 200). Criteria 1, 2, 3 met and each provably fails against 0.26.2.
+
+**The honesty gate (criterion 6) holds in the shipped docs:** CHANGELOG, README, `bareagent.context.md`, CLAUDE.md and the JSDoc all state that this changed **no** task outcome in the adopter's head-to-head. Nothing claims a capability win.
 
 ## 2.1 The defect
 

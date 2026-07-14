@@ -752,7 +752,9 @@ class Loop {
         this._safeEmit({ type: 'loop:text', data: { text: result.text } });
         this._safeCall('onText', this.onText, result.text);
         this._safeEmit({ type: 'loop:done', data: { text: result.text, usage: lastUsage, cost: totalCost } });
-        msgs.push({ role: 'assistant', content: result.text });
+        // BA-7: the final turn carries its native blocks too — a caller that replays this transcript
+        // into a fresh run (or persists it) gets a faithful one rather than a silently lossy copy.
+        msgs.push({ role: 'assistant', content: result.text, ...(result.providerBlocks && { providerBlocks: result.providerBlocks }) });
         // RT-2 F2: residual harvest of the surviving window (incl. this final answer) on clean completion.
         // `trim` only harvests EVICTED turns; without this, the never-evicted tail would diverge from an
         // end-of-task batch. The trimmer's idempotent key means it never re-writes what eviction harvested.
@@ -774,6 +776,12 @@ class Loop {
           type: 'function',
           function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
         })),
+        // BA-7: carry provider-native blocks (Anthropic `thinking`/`redacted_thinking`) the normalized
+        // shape can't express. THIS is the turn the API contract is about — thinking blocks must be
+        // echoed back unchanged, signature included, when continuing a tool-use conversation. Opaque
+        // to the Loop: it never reads them, it only refuses to lose them. Providers that send none add
+        // nothing, so the message stays byte-identical to today.
+        ...(result.providerBlocks && { providerBlocks: result.providerBlocks }),
       });
 
       for (const tc of result.toolCalls) {

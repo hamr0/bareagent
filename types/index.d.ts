@@ -104,6 +104,16 @@ export interface GenerateResult {
    */
   temperatureDropped?: boolean;
   /**
+   * BA-7 — provider-native content blocks the normalized `{text, toolCalls}` shape cannot express
+   * (Anthropic `thinking` / `redacted_thinking`), captured opaquely so the Loop can put them on the
+   * transcript and the provider can replay them on the next round.
+   *
+   * Present only when the response actually carried such blocks — so a provider that returns none
+   * leaves both the result and the resulting message byte-identical to pre-BA-7. See `Message.providerBlocks`
+   * for the replay contract (the provider/model tag is enforced; a signature is model-bound).
+   */
+  providerBlocks?: { provider: string; model: string; blocks: any[] };
+  /**
    * Authoritative per-call cost in USD, reported by the provider itself — e.g. CLIPipeProvider
    * `parse:'claude-json'` surfacing the claude CLI's own `total_cost_usd`, a real price with no local
    * rate table. When a FINITE number the Loop prefers it over `estimateCost` and treats the round as
@@ -119,6 +129,25 @@ export interface Message {
   content?: string | null;
   tool_calls?: any[];
   tool_call_id?: string;
+  /**
+   * BA-7 — provider-native content blocks that this OpenAI-shaped message cannot express, carried
+   * verbatim so they can be replayed to the provider that issued them.
+   *
+   * Today this is Anthropic `thinking` / `redacted_thinking`. Anthropic's contract is that such
+   * blocks are echoed back UNCHANGED (`signature` included) when continuing a tool-use conversation;
+   * before BA-7 there was no field on this type that could hold one, so they were silently dropped.
+   *
+   * OPAQUE by design — the Loop never reads `blocks`, and the provider re-emits their bytes rather
+   * than re-serializing a parsed shape (a `redacted_thinking` block cannot survive a round-trip
+   * through parsed fields). The `provider`/`model` tag is enforced on replay: a thinking signature is
+   * bound to the model that produced it, so a mismatch drops the blocks and degrades to the lossy
+   * pre-BA-7 request rather than risking a 400.
+   *
+   * The normalized `content` / `tool_calls` remain the source of truth: only blocks that have no
+   * normalized representation live here, so an `assemble`/`trim` seam that rewrites this message is
+   * never silently undone by a stale cached copy of its text.
+   */
+  providerBlocks?: { provider: string; model: string; blocks: any[] };
   [key: string]: any;
 }
 

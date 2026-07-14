@@ -1424,3 +1424,43 @@ describe('Loop — BA-12: an identical repeated tool ERROR must not spin to the 
     assert.equal(result.error, 'denied:w', 'a deny is still a deny, not a stuck');
   });
 });
+
+// BA-7: the Loop's job here is narrow — carry provider-native blocks (Anthropic thinking) onto the
+// assistant turn so the provider can replay them. The transcript, not the provider, was hole #3 in the
+// report: the OpenAI-shaped Message had no field that COULD hold one, so the block died here.
+// The Loop stays OPAQUE — it never reads the blocks, it just refuses to lose them.
+describe('Loop — BA-7: provider-native blocks survive the transcript', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn((this._i = (this._i || 0) + 1), m, t, o); } });
+  const BLOCKS = { provider: 'anthropic', model: 'claude-sonnet-5', blocks: [{ type: 'thinking', thinking: 'hm', signature: 'SIGBYTES' }] };
+
+  it('carries providerBlocks onto a TOOL-CALL assistant turn (the turn the contract is about)', async () => {
+    const provider = scripted((i) => (i === 1
+      ? { text: '', usage, toolCalls: [{ id: 'a1', name: 'r', arguments: {} }], providerBlocks: BLOCKS }
+      : { text: 'done', usage, toolCalls: [] }));
+    const r = { name: 'r', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [r]);
+    const assistant = result.msgs.find((m) => m.role === 'assistant' && m.tool_calls);
+    assert.deepEqual(assistant.providerBlocks, BLOCKS, 'the block reaches the transcript, signature intact');
+  });
+
+  it('carries providerBlocks onto the FINAL assistant turn (a replayed transcript stays faithful)', async () => {
+    const provider = scripted(() => ({ text: 'done', usage, toolCalls: [], providerBlocks: BLOCKS }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], []);
+    const assistant = result.msgs.find((m) => m.role === 'assistant');
+    assert.deepEqual(assistant.providerBlocks, BLOCKS);
+  });
+
+  // NEGATIVE CONTROL: a provider that sends no blocks must leave the transcript byte-identical to
+  // pre-BA-7 — no empty field, no undefined key. This is what proves the carry reads the response.
+  it('NEGATIVE CONTROL: a provider sending no blocks leaves the message unchanged', async () => {
+    const provider = scripted((i) => (i === 1
+      ? { text: '', usage, toolCalls: [{ id: 'a1', name: 'r', arguments: {} }] }
+      : { text: 'done', usage, toolCalls: [] }));
+    const r = { name: 'r', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [r]);
+    for (const m of result.msgs) {
+      assert.equal('providerBlocks' in m, false, 'no stray key on any message');
+    }
+  });
+});
