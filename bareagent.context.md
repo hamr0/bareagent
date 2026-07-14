@@ -183,6 +183,8 @@ Skills are operator-registered `{ name, description, instructions, tools }` bund
 
 The shipped reference skill is **stash** — compaction-first context hygiene. Its `trim` wires into `Loop({ trim })` and folds finished sub-tasks out of the live transcript (restorable), keeping long runs under budget. Pass a litectx instance as `ctx` for lossless verbatim parking + the `ctx.summarize` lossy path; set `compaction.ceilingTokens` to enable automatic token-pressure folding.
 
+> **⚠️ Interaction with `cacheMessages` (BA-1).** Prompt caching is a **prefix match**: the transcript prefix *is* the cache key. A fold that rewrites the **head** of the transcript invalidates the cache, so the next round re-pays the 1.25× cache-write premium on the whole thing — you can end up paying *more* than with no caching at all. If you run both, **keep the head stable** (fold the MIDDLE, which is what `compaction.keepHeadTurns` is for) so the cached prefix survives the fold. The two features are complementary, but only in that order.
+
 ```javascript
 const { Loop, SkillRegistry, createStashSkill } = require('bare-agent');
 const { Anthropic } = require('bare-agent/providers');
@@ -738,6 +740,26 @@ new OpenAI({ apiKey, model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' 
 
 // Anthropic
 new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
+
+// Anthropic + TRANSCRIPT CACHING (BA-1, v0.27+) — if you run a TOOL LOOP, turn this on.
+// Anthropic does NOT auto-cache, so without it your loop re-buys its entire growing transcript at
+// FULL input price every single round. Measured on claude-sonnet-5 with a ~15k-token tool-result
+// transcript: $0.0753 -> $0.0110 per round, 6.8x cheaper in steady state (round 1 pays a 1.25x cache
+// write, once). Opt-in because it changes the wire format; also settable per call via
+// loop.run(msgs, tools, { cacheMessages: true }).
+new Anthropic({ apiKey, model: 'claude-sonnet-5', cacheMessages: true })
+//
+// Two things worth knowing before you rely on it:
+//  1. Caching pays for RE-SENDING, not for GROWING. The 6.8x is what a STABLE prefix buys — the
+//     transcript re-sent round after round. A round that appends large NEW content (another whole-file
+//     read) writes those tokens at 1.25x; no breakpoint makes a token you've never sent before cheap.
+//     Caching is necessary, not sufficient — it compounds with retrieval that stops re-reading files.
+//  2. A destructive `trim`/stash fold that rewrites the transcript PREFIX INVALIDATES the cache (the
+//     prefix IS the cache key). Keep the head stable, or you re-pay the write premium every round.
+//
+// `cacheSystem` is a different, weaker knob: Anthropic's minimum cacheable prefix is 1024-4096 tokens
+// (model-dependent) and a typical system persona is a few hundred — so on its own it silently caches
+// NOTHING. The transcript is where a tool loop's tokens actually live.
 
 // Gemini (native generateContent — needed for prompt-cache token tiers; the OpenAI-compat endpoint drops them)
 new Gemini({ apiKey, model: 'gemini-2.5-flash', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' })

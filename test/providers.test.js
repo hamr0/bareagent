@@ -246,6 +246,86 @@ describe('Anthropic cacheSystem opt-in (cache_control on the system prompt)', ()
   });
 });
 
+describe('Anthropic cacheMessages opt-in — BA-1 transcript caching', () => {
+  const RESP = { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 5, output_tokens: 1 } };
+  // The shape that MATTERS, and the one no caller-side seam can reach: a tool loop's transcript ends on a
+  // tool_result, which _toAnthropicMessage rebuilds from scratch (discarding anything a caller attached).
+  const TOOL_TRANSCRIPT = [
+    { role: 'user', content: 'read it' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 't1', content: 'a very large file body' },
+  ];
+
+  // try/finally, not a trailing close(): a failing assert must still shut the server down, or the test
+  // runner hangs on the open handle instead of reporting the failure.
+  const withServer = async (fn) => {
+    const h = await jsonServer(RESP);
+    try { await fn(h); } finally { h.server.close(); }
+  };
+
+  it('default OFF: the outbound body carries no cache_control at all (opt-in means opt-in)', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate(TOOL_TRANSCRIPT, []);
+      assert.equal(JSON.stringify(received[0].body).includes('cache_control'), false);
+    });
+  });
+
+  it('cacheMessages:true marks the last block of a TOOL_RESULT-terminated transcript', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(TOOL_TRANSCRIPT, []);
+      const msgs = received[0].body.messages;
+      const lastBlock = msgs[msgs.length - 1].content[0];
+      assert.equal(lastBlock.type, 'tool_result', 'the rebuilt tool_result is still the last block');
+      assert.deepEqual(lastBlock.cache_control, { type: 'ephemeral' }, 'and it carries the breakpoint');
+    });
+  });
+
+  it('marks a STRING-content last message by promoting it to a text block', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true })
+        .generate([{ role: 'user', content: 'hi' }], []);
+      const msgs = received[0].body.messages;
+      assert.deepEqual(msgs[msgs.length - 1].content, [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }]);
+    });
+  });
+
+  it('marks EXACTLY ONE block — Anthropic allows at most 4, and a stray mark shifts the cache key', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(TOOL_TRANSCRIPT, []);
+      const marks = JSON.stringify(received[0].body.messages).split('cache_control').length - 1;
+      assert.equal(marks, 1, 'exactly one rolling breakpoint');
+    });
+  });
+
+  // COPY-ON-WRITE. A caller's content array is passed through by reference: marking it in place would
+  // mutate the caller's OWN transcript, leaving a stale breakpoint that accumulates on every later round.
+  it('does NOT mutate the caller\'s messages (a stale mark would accumulate across rounds)', async () => {
+    await withServer(async ({ url }) => {
+      const caller = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }];
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(caller, []);
+      assert.equal(caller[0].content[0].cache_control, undefined, 'the caller\'s own array is untouched');
+    });
+  });
+
+  it('per-call cacheMessages:false overrides an instance default of true', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true })
+        .generate(TOOL_TRANSCRIPT, [], { cacheMessages: false });
+      assert.equal(JSON.stringify(received[0].body).includes('cache_control'), false);
+    });
+  });
+
+  it('composes with cacheSystem — system and transcript are marked independently', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheSystem: true, cacheMessages: true })
+        .generate([{ role: 'system', content: 'be terse' }, ...TOOL_TRANSCRIPT], []);
+      assert.ok(Array.isArray(received[0].body.system), 'system marked');
+      const msgs = received[0].body.messages;
+      assert.ok(msgs[msgs.length - 1].content[0].cache_control, 'transcript marked too');
+    });
+  });
+});
+
 // BA-10: a model that rejects a non-default `temperature` (400) must not fail the whole call — the
 // provider drops the temperature, retries once, and reports `temperatureDropped`. This drives each
 // provider's REAL generate() over the wire, proving the strip finds the temperature at that provider's

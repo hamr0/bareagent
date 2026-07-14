@@ -21,7 +21,8 @@ function isLoopbackHost(hostname) {
  * @property {string} [apiKey] - Anthropic API key (required).
  * @property {string} [model='claude-haiku-4-5-20251001'] - Model ID.
  * @property {string} [baseUrl='https://api.anthropic.com/v1'] - API base (override for proxies/gateways; the request posts to `${baseUrl}/messages`).
- * @property {boolean} [cacheSystem=false] - Opt-in prompt caching: send the system prompt with a `cache_control` breakpoint so Anthropic caches it. Anthropic does NOT auto-cache, so without this its cache tiers are always 0. Overridable per call via `generate(..., { cacheSystem })`.
+ * @property {boolean} [cacheSystem=false] - Opt-in prompt caching: send the system prompt with a `cache_control` breakpoint so Anthropic caches it. Anthropic does NOT auto-cache, so without this its cache tiers are always 0. Overridable per call via `generate(..., { cacheSystem })`. NOTE: on its own this rarely helps a tool loop — Anthropic's minimum cacheable prefix is 1024–4096 tokens (model-dependent) and a typical system persona is a few hundred, so it silently never caches. The transcript is where a tool loop's tokens actually live — see `cacheMessages`.
+ * @property {boolean} [cacheMessages=false] - Opt-in TRANSCRIPT caching (BA-1): roll a `cache_control` breakpoint onto the last content block of the last message, so Anthropic caches the whole conversation prefix and the loop stops re-buying it at full price every round. In a tool loop the transcript IS the tool results (file bodies from `shell_read`) and it always ENDS on one, which `_toAnthropicMessage` rebuilds from scratch — so no caller-side seam (`assemble` included) can reach it, and this has to live in the provider. Measured on `claude-sonnet-5` with a ~15k-token tool-result transcript (`poc/ba1-message-caching.mjs`): steady state **$0.0753 → $0.0110 per round, 6.8x cheaper**; round 1 pays a 1.25x cache WRITE once. Off by default — it changes the wire format, so adopters opt in. Overridable per call via `generate(..., { cacheMessages })`. **Interaction:** a destructive `trim`/stash fold that rewrites the transcript PREFIX invalidates the cache (the prefix is the cache key), so a fold must keep the head stable or you re-pay the write premium every round for nothing.
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
  */
 
@@ -39,6 +40,7 @@ class AnthropicProvider {
     // Anthropic caches it (unlike OpenAI/Gemini, Anthropic does NOT auto-cache — without this its
     // cache_read/cache_creation tiers are always 0). Default off keeps requests byte-identical to before.
     this.cacheSystem = options.cacheSystem === true;
+    this.cacheMessages = options.cacheMessages === true;
     // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
     this.exposeErrorBody = options.exposeErrorBody === true;
   }
@@ -75,6 +77,33 @@ class AnthropicProvider {
     const cacheSystem = options.cacheSystem != null ? options.cacheSystem === true : this.cacheSystem;
     if (cacheSystem && typeof system === 'string' && system.length > 0) {
       system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+    }
+
+    // BA-1: roll a cache breakpoint onto the LAST content block of the LAST message. Anthropic caches the
+    // whole prefix up to the mark, and rolling it forward each round keeps the GROWING transcript cached
+    // — otherwise a tool loop re-buys its entire history at full input price, every single round.
+    //
+    // This MUST live here, not in a caller-side seam: in a tool loop the transcript IS the tool results,
+    // it always ENDS on one, and `_toAnthropicMessage` rebuilds `role:'tool'` messages into fresh
+    // `tool_result` blocks — discarding anything a caller attached. There is no other reachable seam.
+    //
+    // Copy-on-write, deliberately: a caller's `content` array is passed through by reference, so marking
+    // it in place would mutate the caller's own message objects and leave a stale breakpoint behind on
+    // every later round (Anthropic allows at most 4, and a stray one silently shifts the cache key).
+    const cacheMessages = options.cacheMessages != null ? options.cacheMessages === true : this.cacheMessages;
+    if (cacheMessages && msgs.length > 0) {
+      const i = msgs.length - 1;
+      const last = msgs[i];
+      if (Array.isArray(last.content) && last.content.length > 0) {
+        const blocks = last.content.slice();
+        blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], cache_control: { type: 'ephemeral' } };
+        msgs[i] = { ...last, content: blocks };
+      } else if (typeof last.content === 'string' && last.content.length > 0) {
+        msgs[i] = { ...last, content: [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }] };
+      }
+      // An empty-content message gets no mark — there is no block to hang it on, and a synthesized empty
+      // one would be a wire error. Under the cache minimum (1024–4096 tok, model-dependent) Anthropic
+      // silently doesn't cache: harmless, just no saving. Never an error.
     }
 
     /** @type {Record<string, any>} */
