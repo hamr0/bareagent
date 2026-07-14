@@ -31,17 +31,29 @@ class OllamaProvider {
    * Generate a response from a local Ollama instance.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature).
+   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
+    // Ollama nests generation params under `options` (its `num_predict` is the output cap — the
+    // equivalent of `max_tokens` everywhere else).
+    //
+    // `maxTokens` was NOT forwarded here before, while every other provider honoured it — so a caller
+    // capping output on Ollama was silently ignored and generated unbounded. Found by the BA-6 map
+    // probe: a 16-token cap produced `done_reason: 'stop'` because nothing ever truncated. The map was
+    // right; the cap never reached the wire.
+    /** @type {Record<string, any>} */
+    const genOptions = {
+      ...(options.temperature != null && { temperature: options.temperature }),
+      ...(options.maxTokens != null && { num_predict: options.maxTokens }),
+    };
     /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       messages,
       stream: false,
-      ...(options.temperature != null && { options: { temperature: options.temperature } }),
+      ...(Object.keys(genOptions).length > 0 && { options: genOptions }),
     };
     if (tools.length > 0) {
       body.tools = tools.map(t => ({

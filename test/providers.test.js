@@ -73,6 +73,34 @@ describe('OllamaProvider', () => {
     assert.equal(p.model, 'mistral');
     assert.equal(p.url, 'http://gpu-server:11434');
   });
+
+  // REGRESSION. Ollama was the ONLY provider that silently dropped `maxTokens` — every other one
+  // forwarded it — so a caller capping output here generated unbounded and never knew. Ollama's cap is
+  // `options.num_predict`. Found by the BA-6 map probe: a 16-token cap came back `done_reason: 'stop'`
+  // because nothing ever truncated. The stopReason MAP was right; the cap never reached the wire.
+  it('forwards maxTokens as options.num_predict (it used to be silently dropped)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'length' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], [], { maxTokens: 16 });
+      assert.equal(received[0].body.options.num_predict, 16, 'the cap reaches the wire');
+    } finally { server.close(); }
+  });
+
+  it('forwards maxTokens and temperature together (both nest under options)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'stop' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], [], { maxTokens: 16, temperature: 0.7 });
+      assert.deepEqual(received[0].body.options, { temperature: 0.7, num_predict: 16 });
+    } finally { server.close(); }
+  });
+
+  it('sends no options block at all when neither is set (body unchanged)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'stop' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], []);
+      assert.equal('options' in received[0].body, false);
+    } finally { server.close(); }
+  });
 });
 
 describe('provider error body exposure', () => {
