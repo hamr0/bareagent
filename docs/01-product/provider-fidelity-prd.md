@@ -1,6 +1,8 @@
 # bareagent — Provider Fidelity & Honest Termination PRD
 
-**Status:** ALL ASKS SHIPPED (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12, BA-7.** Remaining before release: live-probe the Gemini/Ollama `stopReason` maps (documented, not measured — they degrade to `null`/status-quo if wrong).
+**Status:** ALL ASKS SHIPPED (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12, BA-7.**
+
+**Post-ship probe of the documented-not-measured `stopReason` maps:** Ollama now **VERIFIED live** — and the probe found a *different* bug it was not looking for: the map was right, but `OllamaProvider` **silently dropped `maxTokens`**, so the cap never reached the wire and truncation could never occur on that provider (fixed; see CHANGELOG). Gemini remains **UNVERIFIED** (API quota exhausted). Bounded exposure, stated rather than assumed: an unrecognized `finishReason` → `null` → pre-BA-6 behavior, so a wrong map can only **miss a true truncation**, never invent a false one. Worth closing when quota resets; not a release blocker.
 **Owner:** hamr0
 **Source:** bareloop's round-4 isolation study (`/home/hamr/Documents/PycharmProjects/bareloop/docs/UPSTREAM-FIXES.md`) + this repo's own live verify-shipped runs.
 **Language:** Node.js (JS + JSDoc), CJS surface. No new deps.
