@@ -1122,3 +1122,86 @@ describe('A1 — provider-supplied costUsd (CLI authoritative price)', () => {
     assert.equal(result.metrics.unpricedRounds, 1);
   });
 });
+
+// BA-5 (bareloop, HIGH): a governance bound firing is NORMAL operation in a ralph-style loop
+// (`while red and under-cap: run the worker`), not an exception — and the worker's own summary of what
+// it did and ruled out is the ONLY channel from attempt N to attempt N+1. Four of the five return paths
+// used to substitute `text: ''`, so a bounded attempt taught its successor NOTHING: the error tag
+// survived, the work did not. The caller decides what a partial result is worth; the library must not
+// decide it is worth zero. Supersedes the narrower BA-3 (loop.stop()), which is a sub-case.
+describe('Loop — BA-5: a bound that fires PRESERVES the text the model already produced', () => {
+  const { HaltError } = require('../src/errors');
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const readTool = { name: 'read', description: 'reads', execute: async () => 'file body' };
+
+  it('a governance HALT (budget / maxTurns) returns the produced text alongside halt:<rule>', async () => {
+    // The model narrates its progress, then the gate halts on the tool call.
+    const provider = scripted(() => ({ text: 'I ruled out tokenize.js; the bug is in store.js', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('over budget', { rule: 'limits.maxTurns' }); };
+    const result = await new Loop({ provider, policy, throwOnError: true }).run([{ role: 'user', content: 'fix it' }], [readTool]);
+    assert.equal(result.error, 'halt:limits.maxTurns', 'the rule tag still surfaces');
+    assert.equal(result.text, 'I ruled out tokenize.js; the bug is in store.js', 'the halt must NOT erase the work');
+  });
+
+  it('a halt raised while METERING the round (the budget-cap shape) keeps that round\'s text', async () => {
+    // The realistic budget halt: the round completes, onLlmResult forwards its usage to the gate, and the
+    // gate halts on the spend it just recorded. The text of the very round that tripped the cap must survive.
+    const provider = scripted(() => ({ text: 'partial answer before the cap', toolCalls: [], usage }));
+    const onLlmResult = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, onLlmResult, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.text, 'partial answer before the cap');
+  });
+
+  it('a DENY-STREAK short-circuit returns the produced text alongside denied:<tool>', async () => {
+    const provider = scripted((i) => ({ text: `attempt ${i}: still trying to write`, toolCalls: [{ id: 'w' + i, name: 'write', arguments: {} }], usage }));
+    const writeTool = { name: 'write', description: 'writes', execute: async () => 'should never run' };
+    const result = await new Loop({ provider, policy: async () => '[deny] out of scope', throwOnError: true })
+      .run([{ role: 'user', content: 'go' }], [writeTool]);
+    assert.equal(result.error, 'denied:write');
+    assert.equal(result.text, 'attempt 3: still trying to write', 'the last text the model produced, not \'\'');
+  });
+
+  it('a PROVIDER error under throwOnError:false returns the text produced on earlier rounds', async () => {
+    const provider = scripted((i) => {
+      if (i === 1) return { text: 'round one: read the file', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage };
+      throw new Error('upstream 503');
+    });
+    const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.error, 'upstream 503');
+    assert.equal(result.text, 'round one: read the file', 'a mid-run provider failure must not erase prior work');
+  });
+
+  it('loop.stop() returns error:null AND the produced text (BA-3, the caller-initiated sub-case)', async () => {
+    // A deliberate stop is not a fault. Before the fix this fell through to the HARD_ROUND_LIMIT return and
+    // reported the internal safety-limit warning as `error` — indistinguishable from a runaway.
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops the loop', execute: async () => { loop.stop(); return 'stopping'; } };
+    const provider = scripted(() => ({ text: 'work so far: narrowed it to keywords()', toolCalls: [{ id: 's1', name: 'stopper', arguments: {} }], usage }));
+    loop = new Loop({ provider });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, null, 'a caller-initiated stop is not an error');
+    assert.equal(result.text, 'work so far: narrowed it to keywords()');
+  });
+
+  it('NEGATIVE CONTROL: a bound that fires before ANY text was produced still returns text:\'\'', async () => {
+    // Without this, the suite cannot tell "preserved the model's text" from "always returns something
+    // non-empty" — a fix that stuffed a placeholder into `text` would pass every criterion above.
+    const provider = scripted(() => ({ text: '', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, policy, throwOnError: true }).run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.text, '', 'there was nothing to preserve — do not invent text');
+  });
+
+  it('the preserved text is also on the loop:done event (the stream must not disagree with the return)', async () => {
+    const provider = scripted(() => ({ text: 'produced before the halt', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('cap', { rule: 'limits.maxTurns' }); };
+    const seen = [];
+    const loop = new Loop({ provider, policy, throwOnError: true });
+    loop.on?.('loop:done', (e) => seen.push(e));
+    const result = await loop.run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.text, 'produced before the halt');
+  });
+});

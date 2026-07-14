@@ -303,6 +303,82 @@ describe('createShellTools', () => {
       assert.equal(fs.readFileSync(target, 'utf8'), 'two-three');
     });
 
+    // BA-4 (bareloop, CRITICAL): `content` used to default to '' — so a tool call that OMITTED it
+    // (the ordinary shape of an output-token-capped generation on a long file) silently truncated the
+    // target to ZERO BYTES and reported "wrote 0 bytes" as success. A gate cannot catch this: a 0-byte
+    // write is a legal write and bareguard's fs primitive judges {type,path}, never the body. Observed
+    // live: a haiku worker emptied a 1789-line src/store.js; the suite went 3 red → 41 red.
+    // These assert DISK STATE, not the thrown string — a test that only asserts "it threw" would pass
+    // even if the truncation happened first.
+    it('BA-4: rejects a missing/null/non-string content and leaves the file byte-identical', async () => {
+      const { tools } = createShellTools();
+      const write = findTool(tools, 'shell_write');
+      const target = path.join(TMP, 'ba4-victim.js');
+      const original = 'x'.repeat(1000); // the file a truncated generation would have emptied
+      fs.writeFileSync(target, original);
+
+      // 1. content ABSENT — the live failure mode
+      await assert.rejects(() => write.execute({ path: target }), /requires a "content" string/);
+      assert.equal(fs.readFileSync(target, 'utf8'), original, 'a content-less write must not touch disk');
+
+      // 2. content null
+      await assert.rejects(() => write.execute({ path: target, content: null }), /requires a "content" string/);
+      assert.equal(fs.readFileSync(target, 'utf8'), original, 'a null-content write must not touch disk');
+
+      // 3. non-string content (no silent String() coercion)
+      await assert.rejects(() => write.execute({ path: target, content: 42 }), /requires a "content" string/);
+      await assert.rejects(() => write.execute({ path: target, content: { a: 1 } }), /requires a "content" string/);
+      assert.equal(fs.readFileSync(target, 'utf8'), original, 'a non-string write must not touch disk');
+
+      // 4. same guard on the append path
+      await assert.rejects(() => write.execute({ path: target, append: true }), /requires a "content" string/);
+      assert.equal(fs.readFileSync(target, 'utf8'), original, 'a content-less append must not touch disk');
+    });
+
+    it('BA-4: an EXPLICIT empty string still empties the file (the fix must not overshoot)', async () => {
+      const { tools } = createShellTools();
+      const write = findTool(tools, 'shell_write');
+      const target = path.join(TMP, 'ba4-deliberate.txt');
+      fs.writeFileSync(target, 'some content');
+      const r = await write.execute({ path: target, content: '' }); // a string — the caller meant it
+      assert.match(r, /wrote 0 bytes/);
+      assert.equal(fs.readFileSync(target, 'utf8'), '', 'content:"" is a legal, deliberate truncation');
+    });
+
+    // BA-4, the RECOVERY path: the guard is only half the fix. The truncated model must be able to RETRY —
+    // if the throw were fatal instead of fed back as a tool result, we'd have traded silent data loss for a
+    // crashed run. This drives the real Loop: round 1 arrives content-less (the output-cap shape), round 2
+    // supplies the full body. The file must end up CORRECT, and the run must not throw.
+    it('BA-4: a content-less write is fed back to the model, which retries and lands the full content', async () => {
+      const { tools } = createShellTools();
+      const target = path.join(TMP, 'ba4-recovery.js');
+      const original = 'ORIGINAL BODY';
+      fs.writeFileSync(target, original);
+      const seen = [];
+      let round = 0;
+      const provider = {
+        async generate(messages) {
+          round += 1;
+          // Capture what the tool result said back to the model on the failed round.
+          const last = messages[messages.length - 1];
+          if (last.role === 'tool') seen.push(last.content);
+          if (round === 1) { // output-token cap: content never made it into the call
+            return { text: '', toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: target } }], usage: {} };
+          }
+          if (round === 2) { // the model reads the error and retries with the body
+            return { text: '', toolCalls: [{ id: 'w2', name: 'shell_write', arguments: { path: target, content: 'FIXED BODY' } }], usage: {} };
+          }
+          return { text: 'done', toolCalls: [], usage: {} };
+        },
+      };
+      const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'rewrite it' }], tools);
+      assert.equal(result.error, null, 'the rejected write is a recoverable tool error, NOT a fatal run');
+      assert.equal(result.text, 'done');
+      assert.match(seen[0], /requires a "content" string/, 'the model was told what went wrong');
+      assert.match(seen[0], /retry with the full content/, 'and how to recover');
+      assert.equal(fs.readFileSync(target, 'utf8'), 'FIXED BODY', 'the retry landed the real body — never a 0-byte window');
+    });
+
     it('rejects an empty path and an over-cap write', async () => {
       const { tools } = createShellTools();
       const write = findTool(tools, 'shell_write');

@@ -373,12 +373,16 @@ const loop = new Loop({
 const result = await loop.run(messages, tools, { ctx: { userId: 42 } });
 if (result.error?.startsWith('halt:')) {
   // budget / turn cap / gate terminated — handled cleanly, no [HALT:] reached the LLM (BA2)
+  // result.text still holds whatever the model produced before the bound fired (BA-5) — feed it
+  // forward to the next attempt. `error` is the success signal; non-empty text ≠ converged.
 }
 ```
 
 **Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). It also fires for the out-of-band `ctx.summarize` call (R-C6) tagged `kind:'summarize'`; main-loop rounds carry `kind:'turn'` — so summary-window tokens count against the budget too, and a consumer can tell the two apart. `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
 
 Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
+
+**A bound that fires PRESERVES the model's work (BA-5, v0.27+).** Every terminating path — governance halt, the deny-spin short-circuit, a provider error under `throwOnError:false`, `loop.stop()`, and the internal hard round limit — returns the **last non-empty assistant text** in `result.text` instead of `''`. If you drive bare-agent from an outer retry loop (`while not-done and under-cap: run the worker`), a bound firing is **normal termination**, not an exception, and that text is your only channel from attempt N to attempt N+1 — before this, a bounded attempt taught its successor nothing. Two rules: **`error` is the sole success signal** (a non-empty `text` never means the run converged — always branch on `error`), and `text` is `''` when the model genuinely produced none (no placeholder is invented, so you can trust emptiness). Under `recurse` this is what finally populates `best` on an incomplete node. Relatedly, **`loop.stop()` now returns `error: null`** — a deliberate stop is not a fault; it previously fell through to the hard-round-limit return and reported that safety warning as its error, indistinguishable from a runaway.
 
 **Deny-spin short-circuit (`maxConsecutiveDenials`, default 3, v0.25+).** A *non-halt* deny (a `policy` verdict that isn't `true` — e.g. a `humanChannel: deny`, an allowlist miss, a `content`/`fs.writeScope` block) is **advisory**: it's fed back to the model as a tool result so the model can pivot to a different allowed tool. But a model that keeps retrying the *same* denied action would otherwise spin every round until your `budget.maxCostUsd` finally halts it — burning the whole cap with no progress (this bit a coding agent whose write kept tripping `content.askPatterns`). The Loop now counts **consecutive** denials (any allowed call resets the streak, preserving the pivot) and short-circuits at `maxConsecutiveDenials` with `result.error === 'denied:<tool>'` (a clean return, transcript sealed — never a throw). Check `result.error?.startsWith('denied:')` to distinguish a governance block from a completed run; set `maxConsecutiveDenials: 0` (or `Infinity`) on `new Loop({...})` to restore the pure-advisory behavior. Under `recurse`, a short-circuited worker returns a **labeled** `{ incomplete: true, blocker: 'governance-deny' }` (and `receipts.blocker`) so you can widen scope / re-gate / escalate rather than read it as a model failure.
 
@@ -1191,16 +1195,19 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 
 ### Recipe 8b: Loop + Shell Tools (cross-platform primitives)
 
-`createShellTools()` returns three pure-Node tools that work identically on linux, macOS, and Windows — no external binaries, no platform detection.
+`createShellTools()` returns five pure-Node tools that work identically on linux, macOS, and Windows — no external binaries, no platform detection.
 
 | Tool | Purpose |
 |---|---|
 | `shell_read` | Read a file (utf8, 256KB cap) or list a directory (tab-separated). `~` expands to home. |
+| `shell_write` | Write (or `append:true`) UTF-8 text to a file, creating parent dirs. 5MB cap. No shell, so it gates cleanly through `fs.writeScope` once translated to `{type:'write'}`. **`content` is REQUIRED** — see the truncation guard below. |
 | `shell_grep` | JavaScript regex search across files. Walks directories, skips binary files, returns `{hits: [{file, line, text}], truncated, fileCount}`. |
 | `shell_run` | Run a command with an **argv array** via `child_process.execFile` (no shell, no metacharacter interpretation). Returns `{stdout, stderr, code, timedOut}`. **Use this when you need a policy allowlist.** |
 | `shell_exec` | Run a raw shell command string via `/bin/sh -c` (or `cmd.exe`). Returns the same shape. **Shell metacharacters are interpreted — naive allowlists are bypassable.** Use only when you genuinely need shell features (pipes, redirects, globs). |
 
 **Zero baked-in allowlist.** The library ships the primitives; gating is bareguard's job via the standard `wireGate(gate)` wiring.
+
+> **⚠️ `shell_write` requires `content` — and a gate cannot cover for it (v0.27+).** `content` used to default to `''`, so a tool call that OMITTED it silently overwrote the target with **zero bytes** and returned `"wrote 0 bytes to <path>"` as success. That is the ordinary shape of a model hitting its **output-token cap** mid-generation on a long file — observed live emptying a 1789-line source file. **No policy can catch it:** a 0-byte write is a *legal* write, and bareguard's `fs` primitive judges `{type:'write', path}` without inspecting the body (the gate correctly `allow`s it). `shell_write` now **rejects** an absent, `null`, or non-string `content` and leaves the file byte-identical; the error tells the model to retry with the full content. An explicit `content: ""` still empties the file — that one is deliberate.
 
 > **⚠️ `shell_exec` injection caveat.** `"ls"` passes a base-command allowlist like `args.command.split(/\s+/)[0]`, but so does `"ls;rm -rf /tmp/x"` — the shell runs both. **A base-command allowlist is NOT safe for `shell_exec`.** For policy-gated use, prefer `shell_run({argv})` and allow-list on `args.argv[0]` — there is no shell in that path, so metacharacters are just literal argument bytes. Use `shell_exec` only when the agent needs pipes/redirects/globs, and gate it at a higher level (human approval, narrow intent).
 

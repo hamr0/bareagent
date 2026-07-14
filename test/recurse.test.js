@@ -167,6 +167,27 @@ describe('recurse — Family B forced fan-out (NB-2)', () => {
     assert.equal(out.receipts.halted, true, 'the node records the governance halt');
   });
 
+  // BA-5 data path: recurse has always returned `best: out.text || null` on its incomplete paths (RC-9),
+  // but the Loop zeroed the worker's text on every bound — so `best` was ALWAYS null and the partial work
+  // recurse was trying to hand back never existed. This asserts the whole path end to end: a worker halted
+  // by governance surfaces its pre-halt reasoning as `best`, while `incomplete` still keys off the error
+  // (a non-empty best NEVER means convergence — that's the RC-9 honesty invariant, unchanged).
+  it('a governance-halted worker surfaces its pre-halt text as `best` (BA-5), still incomplete', async () => {
+    let turn = 0;
+    const sp = scriptedProvider(() => {
+      turn += 1;
+      // Round 1: the worker reasons out loud, then reaches for a tool the gate halts on.
+      if (turn === 1) return { text: 'Ruled out tokenize.js; the regression is in store.js', toolCalls: [{ id: 'r1', name: 'probe', arguments: {} }] };
+      return { text: 'unreachable' };
+    });
+    const probe = { name: 'probe', description: 'probes', execute: async () => 'never runs' };
+    const policy = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const out = await recurse('investigate the failing test', { provider: sp.provider, policy }, { tools: [probe], maxDepth: 1 });
+    assert.equal(out.incomplete, true, 'a halted worker is STILL an honest incomplete — best never fakes a pass');
+    assert.equal(out.best, 'Ruled out tokenize.js; the regression is in store.js', 'the bounded attempt hands its work to the next one');
+    assert.equal(out.receipts.halted, true);
+  });
+
   it('the decomposition call is METERED — its usage forwards to ctx.onLlmResult as kind:"plan"', async () => {
     const sp = scriptedProvider(fanoutHandler());
     const events = [];

@@ -331,6 +331,17 @@ class Loop {
    *   dangling assistant `tool_calls` from the halted round are paired with
    *   synthetic `[halted]` tool replies — safe to feed back into another
    *   provider call without violating OpenAI's tool-call/tool-result pairing.
+   *
+   *   BA-5 — a bound that fires PRESERVES the model's work. Every terminating path (governance halt,
+   *   deny-streak, provider error under `throwOnError:false`, `stop()`, the hard round limit) returns the
+   *   last non-empty assistant text in `text` rather than substituting `''`. A bound firing is normal
+   *   termination for a bounded attempt, and that text is the only channel from attempt N to attempt N+1 —
+   *   the caller decides what a partial result is worth. `error` remains the sole success signal: a
+   *   non-empty `text` NEVER means the run converged, so never infer success from it. `text` stays `''`
+   *   when the model genuinely produced none (no placeholder is invented).
+   *
+   *   A caller-initiated `stop()` returns `error: null` — a deliberate stop is not a fault. (It previously
+   *   fell through to the hard-round-limit return and reported that safety warning as its `error`.)
    * @throws {Error} `[Loop] Tool is missing a name` — when a tool has no name or a non-string name.
    * @throws {Error} `[Loop] Tool "X" is missing an execute() function` — when execute is not a function.
    * @throws {Error} `[Loop] Tool "X" has invalid parameters` — when parameters is not an object.
@@ -387,6 +398,14 @@ class Loop {
 
     let lastUsage = { inputTokens: 0, outputTokens: 0 };
     let totalCost = 0;
+    // BA-5: the most recent NON-EMPTY assistant text this run produced. Every bound that can end a run —
+    // governance halt, deny-streak, provider error, caller stop, hard round limit — returns this instead of
+    // substituting `text: ''`. In a ralph-style outer loop (`while red and under-cap: run the worker`) a bound
+    // firing is NORMAL termination, not an exception, and the worker's own account of what it did and ruled
+    // out is the only channel from attempt N to attempt N+1 — dropping it silently deletes the loop's ratchet.
+    // The caller decides what a partial result is worth; the library must not decide it is worth nothing.
+    // Stays '' when the model never produced text (nothing to preserve — we never invent a placeholder).
+    let lastText = '';
     // BA-10: sticky across rounds — true if ANY round's `temperature` was dropped by the model (400,
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
@@ -617,10 +636,16 @@ class Loop {
       } catch (err) {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics() };
+        // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics() };
       }
 
       lastUsage = result.usage || lastUsage;
+      // BA-5: capture the text BEFORE anything downstream can halt (onLlmResult forwards this round's spend
+      // to the gate, which is exactly where a budget cap trips — the text of the round that tripped the cap
+      // is the text most worth keeping). A tool-call-only round carries no text, so hold the last non-empty
+      // one rather than letting a silent round erase an earlier account.
+      if (typeof result.text === 'string' && result.text.trim() !== '') lastText = result.text;
       if (result.temperatureDropped) temperatureDropped = true;
       // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
       // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
@@ -778,8 +803,8 @@ class Loop {
               // throwOnError, mirroring the governance-halt contract.
               sealDanglingToolCalls(msgs, denyTag);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
-              this._safeEmit({ type: 'loop:done', data: { text: '', denied: true, rule: denyTag, cost: totalCost } });
-              return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics() };
+              this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
+              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics() };
             }
             continue;
           }
@@ -839,17 +864,31 @@ class Loop {
         // provider call without tripping the tool-call/tool-result pairing.
         sealDanglingToolCalls(msgs, rule);
         this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
-        this._safeEmit({ type: 'loop:done', data: { text: '', halted: true, rule, cost: totalCost } });
-        return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
+        // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
+        // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
+        this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
       }
       throw err;
+    }
+
+    // BA-5 / BA-3: a caller-initiated stop() breaks the round loop and lands here. It is NOT a fault, and it
+    // is not the hard limit — reporting it as either (which is what fall-through did: it returned the
+    // safety-limit warning below, indistinguishable from a runaway) forces every caller to keep a
+    // `stoppedByBound` flag to un-lie the return value. A deliberate stop returns error:null + the work.
+    if (this._stopped) {
+      // stop() can land mid-round, between an assistant tool_calls message and its results — pair the
+      // stragglers so the returned transcript stays provider-valid (the same seal the halt path applies).
+      sealDanglingToolCalls(msgs, 'stopped');
+      this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
+      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics() };
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
-    this._safeEmit({ type: 'loop:done', data: { text: '', warning, cost: totalCost } });
-    return { text: '', toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics() };
+    this._safeEmit({ type: 'loop:done', data: { text: lastText, warning, cost: totalCost } });
+    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics() };
   }
 
   /**
@@ -934,6 +973,11 @@ class Loop {
     return result;
   }
 
+  /**
+   * Request a clean stop. The current tool call finishes; the loop then exits at the next boundary and
+   * `run()` resolves with `error: null` and the last text the model produced (BA-5) — a deliberate stop
+   * is not a fault, and callers should not need a `stoppedByBound` flag to un-lie the return value.
+   */
   stop() {
     this._stopped = true;
   }
