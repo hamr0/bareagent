@@ -101,13 +101,17 @@ const HARD_ROUND_LIMIT = 100;
 
 // Walk the assistant tool_calls in the last assistant message and append a
 // synthetic `role:'tool'` reply for every tool_call_id that has no matching
-// reply. Halt-path only — keeps msgs a valid OpenAI transcript when the loop
-// exits between pushing assistant.tool_calls and finishing the per-tool loop.
+// reply. Keeps msgs a valid OpenAI transcript when the loop exits between
+// pushing assistant.tool_calls and finishing the per-tool loop.
+//
+// `marker` is the literal reply text, because the exit it seals is not always a halt: a caller-initiated
+// stop() is sealed too, and stamping `[halted:…]` on it would tell a resumed model it was cut off by
+// governance when it wasn't (and would false-positive any consumer grepping msgs for `[halted:`).
 /**
  * @param {Message[]} msgs
- * @param {string} rule
+ * @param {string} marker - Literal content for each synthetic reply, e.g. `[halted:budget.maxCostUsd]`.
  */
-function sealDanglingToolCalls(msgs, rule) {
+function sealDanglingToolCalls(msgs, marker) {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (m.role !== 'assistant' || !Array.isArray(m.tool_calls)) continue;
@@ -117,7 +121,7 @@ function sealDanglingToolCalls(msgs, rule) {
     }
     for (const tc of m.tool_calls) {
       if (!seen.has(tc.id)) {
-        msgs.push({ role: 'tool', tool_call_id: tc.id, content: `[halted:${rule}]` });
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: marker });
       }
     }
     return;
@@ -801,7 +805,7 @@ class Loop {
               // Pair any still-dangling tool_calls from this round so the returned transcript stays
               // provider-valid (same seal the halt path uses), then exit cleanly — no throw even under
               // throwOnError, mirroring the governance-halt contract.
-              sealDanglingToolCalls(msgs, denyTag);
+              sealDanglingToolCalls(msgs, `[halted:${denyTag}]`);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
               this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
               return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics() };
@@ -862,7 +866,7 @@ class Loop {
         // synthetic `[halted]` replies so the returned msgs is a valid
         // OpenAI-shaped transcript — consumers can feed it back into another
         // provider call without tripping the tool-call/tool-result pairing.
-        sealDanglingToolCalls(msgs, rule);
+        sealDanglingToolCalls(msgs, `[halted:${rule}]`);
         this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
         // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
         // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
@@ -879,7 +883,29 @@ class Loop {
     if (this._stopped) {
       // stop() can land mid-round, between an assistant tool_calls message and its results — pair the
       // stragglers so the returned transcript stays provider-valid (the same seal the halt path applies).
-      sealDanglingToolCalls(msgs, 'stopped');
+      sealDanglingToolCalls(msgs, '[stopped]');
+      // RT-2 F2 residual harvest, same as the clean-completion path: a stop is a DELIBERATE end (error:null,
+      // transcript final), so the surviving window must be harvested or a stopped run silently loses every
+      // never-evicted turn that an identical naturally-ending run would have kept. (A governance halt is
+      // deliberately NOT flushed — that is an abort, not an end.) Fail-open / HaltError per the trim contract.
+      const flushOnStop = this.trim && /** @type {any} */ (this.trim).flush;
+      if (typeof flushOnStop === 'function') {
+        try {
+          await flushOnStop(msgs, ctx);
+        } catch (err) {
+          // We are PAST the outer HaltError handler here, so a governance halt raised during the harvest
+          // (e.g. a write-gate deny) cannot be re-thrown — that would escape run() as an exception and break
+          // the contract that a HaltError is always a clean return. Convert it in place, as the outer handler
+          // would have.
+          if (err instanceof HaltError) {
+            const rule = err.rule || 'unknown';
+            this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
+            this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
+          }
+          this._reportError('trim-flush', err, { phase: 'stop' });
+        }
+      }
       this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
       return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics() };
     }

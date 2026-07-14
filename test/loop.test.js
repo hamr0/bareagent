@@ -1205,3 +1205,52 @@ describe('Loop — BA-5: a bound that fires PRESERVES the text the model already
     assert.equal(result.text, 'produced before the halt');
   });
 });
+
+// Review findings on the BA-5 stop() exit: the transcript seal must not claim a deliberate stop was a
+// governance halt, and a stop is a clean END (error:null) so it owes the same residual harvest that a
+// naturally-ending run performs — otherwise a stopped run silently loses its un-evicted window.
+describe('Loop — stop() exit hygiene (seal marker + residual harvest)', () => {
+  const { HaltError } = require('../src/errors');
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  it('seals a mid-round stop with [stopped], NOT [halted:…] (a stop is not a governance halt)', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    // Two tool calls in one round: the first stops the loop, the second is left dangling and must be sealed.
+    const provider = scripted(() => ({ text: 'work', toolCalls: [
+      { id: 'a', name: 'stopper', arguments: {} },
+      { id: 'b', name: 'stopper', arguments: {} },
+    ], usage: {} }));
+    loop = new Loop({ provider });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    const sealed = result.msgs.filter(m => m.role === 'tool').map(m => m.content);
+    assert.deepEqual(sealed, ['ok', '[stopped]'], 'the dangling call is sealed as [stopped]');
+    assert.ok(!sealed.some(c => String(c).includes('[halted:')), 'a deliberate stop must never be tagged as halted');
+  });
+
+  it('runs the trim .flush residual harvest on stop (a stop is a clean END, not an abort)', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    const provider = scripted(() => ({ text: 'work', toolCalls: [{ id: 'a', name: 'stopper', arguments: {} }], usage: {} }));
+    let flushed = 0;
+    const trim = async (msgs) => msgs;
+    trim.flush = async () => { flushed += 1; };
+    loop = new Loop({ provider, trim });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, null);
+    assert.equal(flushed, 1, 'the surviving window is harvested — a stopped run must not silently lose it');
+  });
+
+  it('a governance HaltError raised during the stop-flush is a clean return, never a thrown run', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    const provider = scripted(() => ({ text: 'work', toolCalls: [{ id: 'a', name: 'stopper', arguments: {} }], usage: {} }));
+    const trim = async (msgs) => msgs;
+    trim.flush = async () => { throw new HaltError('write gate', { rule: 'fs.writeScope' }); };
+    loop = new Loop({ provider, trim, throwOnError: true });
+    // This path sits PAST the outer HaltError handler — an un-converted throw would escape run() and reject.
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, 'halt:fs.writeScope', 'converted in place, not thrown');
+    assert.equal(result.text, 'work');
+  });
+});

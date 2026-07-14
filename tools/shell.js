@@ -97,7 +97,11 @@ async function readEntry(rawPath, maxBytes) {
  * No policy can catch that: a 0-byte write is a legal write, and bareguard's fs primitive judges
  * `{type:'write', path}` without ever inspecting the body. It is a missing precondition in the primitive,
  * not a governance gap. An explicit `content: ''` still empties the file — the caller meant it.
- * @param {{path: string, content?: string, append?: boolean, maxBytes?: number}} args
+ * `content` is typed REQUIRED so the generated `.d.ts` states the real contract — a library caller that omits
+ * it is a type error, not a runtime surprise. The guard below still runs, because the tool-execute boundary
+ * feeds this UNTRUSTED model-authored args (that is the boundary BA-4 was breached at, and where types buy
+ * nothing).
+ * @param {{path: string, content: string, append?: boolean, maxBytes?: number}} args
  * @returns {Promise<string>}
  */
 async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
@@ -111,16 +115,15 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
       + ' — refusing to write, the file is unchanged. If your output was cut short, retry with the full content.',
     );
   }
-  const text = content;
   const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
-  const bytes = Buffer.byteLength(text, 'utf8');
+  const bytes = Buffer.byteLength(content, 'utf8');
   if (bytes > cap) {
     throw new Error(`shell_write content is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
   }
   const resolved = path.resolve(expandHome(rawPath));
   await fs.mkdir(path.dirname(resolved), { recursive: true });
-  if (append) await fs.appendFile(resolved, text, 'utf8');
-  else await fs.writeFile(resolved, text, 'utf8');
+  if (append) await fs.appendFile(resolved, content, 'utf8');
+  else await fs.writeFile(resolved, content, 'utf8');
   return `${append ? 'appended' : 'wrote'} ${bytes} bytes to ${resolved}`;
 }
 
@@ -445,7 +448,10 @@ function createShellTools() {
         },
         required: ['path', 'content'],
       },
-      execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) => writeFile(args),
+      // The args are model-authored and UNTRUSTED — `content` may be absent (an output-token-capped
+      // generation), so the boundary type stays loose and `writeFile` enforces the contract at runtime (BA-4).
+      execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) =>
+        writeFile(/** @type {any} */ (args)),
     },
     {
       name: 'shell_run',

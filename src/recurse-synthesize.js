@@ -62,8 +62,17 @@ async function mergeReduce(task, results, opts) {
   if (typeof out.error === 'string' && out.error.startsWith('halt:')) {
     throw new HaltError('[synthesize] merge halted by governance', { rule: out.error.slice('halt:'.length) });
   }
-  // A non-halt fault (e.g. provider error) is non-fatal here — fall back to the lossless concat rather than
-  // losing the partials entirely. recurse still reports honest completeness via its own paths.
+  // A non-halt fault (e.g. provider error, deny short-circuit, the hard round limit) is non-fatal here — fall
+  // back to the LOSSLESS concat rather than losing the partials entirely. recurse still reports honest
+  // completeness via its own paths.
+  //
+  // Branch on `out.error`, NOT on the falsiness of `out.text` (BA-5). Since the Loop now preserves the text a
+  // bounded run produced, a faulted merge returns its PARTIAL, aborted prose — so `out.text || concat` would
+  // silently ship that fragment as the synthesized answer and every child result would be lost. Proven
+  // reachable: the merge Loop registers no tools, so a hallucinated tool call is fed back as
+  // `[Loop] Unknown tool` and the round loop CONTINUES — round 1 emits prose, round 2 dies, and the fallback
+  // never fires. `error` is the sole success signal; text-falsiness never was one.
+  if (out.error) return concatReduce(results);
   return out.text || concatReduce(results);
 }
 

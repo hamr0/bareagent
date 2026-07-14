@@ -1335,3 +1335,36 @@ describe('recurse — governance deny-spin short-circuit (BA-11 / relayfact F35)
     assert.ok(String(out.result).includes('done'), 'the worker completed normally');
   });
 });
+
+// Review finding (BA-5 fallout): mergeReduce guarded its LOSSLESS-concat fallback on `out.text` being falsy —
+// an invariant BA-5 removed. A faulted merge Loop now returns its partial, aborted prose, so the old
+// `out.text || concatReduce(results)` silently shipped that fragment as the synthesized answer and lost every
+// child result (the survivor-sum class RC-9 exists to prevent). Reachable because the merge Loop registers NO
+// tools: a hallucinated tool call is fed back as `[Loop] Unknown tool` and the round loop CONTINUES.
+describe('synthesize — a faulted merge falls back to the LOSSLESS concat, never a partial (BA-5 fallout)', () => {
+  const { synthesize } = require('../src/recurse-synthesize');
+  const RESULTS = ['child A answer', 'child B answer', 'child C answer'];
+
+  it('a provider error mid-merge returns every child result, not the aborted prose', async () => {
+    let round = 0;
+    const provider = {
+      name: 'p', model: 'm',
+      async generate() {
+        round += 1;
+        // Round 1: prose + a hallucinated tool call (no tools registered → Unknown tool → loop continues).
+        if (round === 1) return { text: 'PARTIAL MERGE, cut off mid-', toolCalls: [{ id: 'x1', name: 'ghost', arguments: {} }], usage: {} };
+        throw new Error('upstream 503');
+      },
+    };
+    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
+    assert.equal(round, 2, 'the harness really did drive a 2nd round (else this test proves nothing)');
+    for (const r of RESULTS) assert.ok(String(out).includes(r), `lossless concat must retain "${r}"`);
+    assert.ok(!String(out).includes('PARTIAL MERGE'), 'the aborted partial must NOT be returned as the answer');
+  });
+
+  it('a clean merge still returns the model text (the fallback must not fire on success)', async () => {
+    const provider = { name: 'p', model: 'm', async generate() { return { text: 'MERGED OK', toolCalls: [], usage: {} }; } };
+    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
+    assert.equal(out, 'MERGED OK', 'a successful merge is not clobbered by the fallback');
+  });
+});
