@@ -1,6 +1,6 @@
 # bareagent — Provider Fidelity & Honest Termination PRD
 
-**Status:** PROPOSED (2026-07-14) — awaiting sign-off. Two items SHIPPED, four open.
+**Status:** IN PROGRESS (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1.** **OPEN: BA-12, BA-7** (in that order, per D4).
 **Owner:** hamr0
 **Source:** bareloop's round-4 isolation study (`/home/hamr/Documents/PycharmProjects/bareloop/docs/UPSTREAM-FIXES.md`) + this repo's own live verify-shipped runs.
 **Language:** Node.js (JS + JSDoc), CJS surface. No new deps.
@@ -37,7 +37,7 @@ This section exists so that a future contributor cannot quietly re-sell BA-7 as 
 | **BA-6** | A truncated round reads as a clean finish | **CRITICAL** | ✅ **SHIPPED** (this branch) — and it closes BA-4's ROOT cause: a truncated round's tool calls are now refused, never executed |
 | **BA-7** | Thinking blocks neither requested nor preserved | HIGH (protocol) | 🔴 OPEN — F2 |
 | **BA-12** | A repeated tool ERROR spins unbounded | MEDIUM | 🔴 OPEN — F3 (found by our own smoke) |
-| **BA-1** | Anthropic transcript is re-bought every round (no cache breakpoint) | HIGH ($) | 🔴 OPEN — F4 |
+| **BA-1** | Anthropic transcript is re-bought every round (no cache breakpoint) | HIGH ($) | ✅ **SHIPPED** (this branch) — opt-in `cacheMessages`; measured 6.8×/round steady state |
 
 **Not filed / closed:** bareloop's "BA-8" (`loop.stop()` returns a false 100-round-limit error) is **BA-3**, already folded into BA-5 and shipped. Independent rediscovery — good confirmation, no new work. S3 (summarizer fold) and S4 (tool-result history) were investigated and **KILLED**: a default Loop wires neither `assemble` nor `trim` (`loop.js:253,262`), the full transcript is replayed every round (`toSend = msgs`, `loop.js:621`), and there are **zero** truncation/slice calls in `loop.js`. bare-agent is exonerated on both.
 
@@ -185,7 +185,22 @@ Generalize BA-11 from "consecutive denials" to "consecutive **fruitless** tool c
 
 ## 4.3 The fix
 
-A rolling `cache_control: {type:'ephemeral'}` breakpoint on the last content block of the last message, rolled forward each round. **Open decision (D3): default ON or opt-in `cacheMessages`?** bareloop asks for default-ON, arguing the failure mode of *not* caching is a silent 5–10× bill with no error and no signal.
+A rolling `cache_control: {type:'ephemeral'}` breakpoint on the last content block of the last message, rolled forward each round. **D3 RESOLVED: opt-in `cacheMessages`** for one minor, then reconsider default-ON with production evidence — flipping every adopter's wire format on one upstream report is not a decision to take on trust.
+
+### 4.3a — SHIPPED, and what WE measured (not bareloop's numbers)
+
+`poc/ba1-message-caching.mjs` (same transcript, one knob apart, `claude-sonnet-5`, ~15k-token tool-result transcript):
+
+| | round 1 | round 2 | round 3 | round 4 |
+|---|---|---|---|---|
+| no breakpoint (today) | $0.0753 | $0.0753 | $0.0754 | $0.0754 |
+| `cacheMessages: true` | $0.0932 *(cache write)* | **$0.0110** | **$0.0110** | **$0.0110** |
+
+**6.8× cheaper per round in steady state** (bareloop reported 9.4× on their shape; we cite ours). **Negative control:** flag off ⇒ cache tiers are **0** on every round — the flag is demonstrably what does the work, not Anthropic auto-caching. Live through the shipped Loop (`poc/ba1-verify-shipped.mjs`): full-price input collapses **71,744 → 504 tokens**, cache read back — Anthropic honours the breakpoint.
+
+**THE HONEST LIMIT — caching pays for RE-SENDING, not for GROWING.** The 6.8× is what a *stable* prefix buys. A round that appends large **new** content (another whole-file read) must write those tokens at 1.25×; no breakpoint makes a token you've never sent before cheap. In the live run the model re-read the file on round 3, so **that** run netted only ~1.15× overall despite the mechanism working perfectly. Caching is **necessary, not sufficient** — it compounds with retrieval that stops the worker re-reading whole files (bareloop's own BA-2/LC-1 track). Do not quote the 6.8× without this caveat.
+
+**Correction shipped alongside:** `cacheSystem` oversold itself in its own JSDoc. Anthropic's minimum cacheable prefix is **1024–4096 tokens (model-dependent)** and a typical persona is a few hundred — so `cacheSystem` alone **silently caches nothing**. That is exactly why the transcript, not the system prompt, is where a tool loop's money lives.
 
 **Interaction to respect:** destructively editing the *prefix* (a `trim`/stash fold) invalidates the cache — folds must keep the head stable, or the cache write is paid repeatedly for nothing. This must be documented alongside the stash skill, not just here.
 
