@@ -50,6 +50,16 @@ const { isTruncated } = require('./provider-stop-reason');
  *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
  *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget.
  * @property {Function} [onToolResult]
+ * @property {number} [maxIdenticalToolErrors] - BA-12 safety net (default 3). Short-circuit the run when a
+ *   tool's `execute` throws this many times IN A ROW for a BYTE-IDENTICAL call (same tool + same args). A
+ *   tool error is deliberately fed back to the model so it can recover — that is the point of the feedback
+ *   loop — but a model re-issuing the SAME impossible call verbatim can never succeed, and spins to the
+ *   budget cap with no progress (observed live: `claude-sonnet-5` retried a rejected write 8/8 times).
+ *   Deliberately the NARROWEST guard: any tool call that SUCCEEDS, or the same tool called with DIFFERENT
+ *   arguments, resets the streak — a model adapting its input in response to an error is genuinely
+ *   recovering and is never penalised. Returns cleanly with `error: 'stuck:<tool>'` (mirrors the deny/halt
+ *   returns; never throws even under `throwOnError`; transcript sealed; the model's text preserved).
+ *   `0`/`Infinity` disables (restores pre-BA-12 behavior: errors are advisory forever).
  * @property {number} [maxConsecutiveDenials] - BA-11 safety net (default 3). Short-circuit the run when
  *   `policy` denies this many tool calls IN A ROW with no allowed call in between — a governance deny is
  *   not a recoverable tool error, so a model that keeps retrying variants of a denied action would
@@ -248,6 +258,12 @@ class Loop {
       throw new Error('[Loop] options.maxConsecutiveDenials must be a non-negative number (0 or Infinity disables)');
     }
     this.maxConsecutiveDenials = options.maxConsecutiveDenials != null ? options.maxConsecutiveDenials : 3;
+    // BA-12 identical-tool-error spin guard. Same shape as BA-11: default 3, 0/Infinity disables.
+    if (options.maxIdenticalToolErrors != null
+        && (typeof options.maxIdenticalToolErrors !== 'number' || options.maxIdenticalToolErrors < 0 || Number.isNaN(options.maxIdenticalToolErrors))) {
+      throw new Error('[Loop] options.maxIdenticalToolErrors must be a non-negative number (0 or Infinity disables)');
+    }
+    this.maxIdenticalToolErrors = options.maxIdenticalToolErrors != null ? options.maxIdenticalToolErrors : 3;
     if (options.assemble != null && typeof options.assemble !== 'function') {
       throw new Error('[Loop] options.assemble must be a function (msgs, info) => msgs');
     }
@@ -418,6 +434,15 @@ class Loop {
     // BA-11: consecutive policy-deny counter (reset by any tool call that PASSES policy). When it reaches
     // this.maxConsecutiveDenials the run short-circuits cleanly — see the deny block below.
     let consecutiveDenials = 0;
+    // BA-12: a policy DENY is not the only way a model can spin. A tool whose `execute` keeps THROWING is
+    // fed the error back as a tool result (deliberately — that's how a model recovers from a bad path), but
+    // a model that re-issues the BYTE-IDENTICAL call against an error that cannot be recovered from will
+    // spin to the budget cap with zero progress. We count only IDENTICAL repeats of a FAILING call
+    // (same tool + same args), which is the narrowest guard that catches the observed spin: a model that
+    // VARIES its arguments in response to an error is genuinely recovering and must never be penalised.
+    let identicalErrors = 0;
+    /** @type {string|null} */
+    let lastErrorFingerprint = null;
 
     // The meter (Feature 3): bareagent is the canonical run counter. Accumulates across rounds and is
     // returned as `result.metrics`. `tokens` is CUMULATIVE over all four tiers (fixes the last-round-only
@@ -854,6 +879,11 @@ class Loop {
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
           msgs.push({ role: 'tool', tool_call_id: tc.id, content });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, result: content } });
+          // BA-12: a call that SUCCEEDED is progress — clear the identical-failure streak. Without this, a
+          // tool that fails, is recovered from, then fails identically much later would accumulate across
+          // unrelated stretches of the run and short-circuit a healthy loop.
+          identicalErrors = 0;
+          lastErrorFingerprint = null;
         } catch (err) {
           // A HaltError from a tool body is a deliberate governance exit, not a tool failure — re-throw it
           // like every other seam (the outer catch pairs dangling tool_calls + returns halt cleanly). Ordinary
@@ -863,6 +893,28 @@ class Loop {
           const errMsg = `[Loop] Tool error: ${toolError.message}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
+
+          // BA-12: count only a BYTE-IDENTICAL repeat of a failing call. A different tool, or the same tool
+          // with different args, resets the streak — because that is a model ADAPTING to the error, which is
+          // exactly the recovery the error-feedback loop exists to enable. What this catches is the model
+          // re-issuing the same impossible call verbatim, which cannot ever succeed and burns the budget to
+          // the cap with no progress. (Args are fingerprinted defensively: an unstringifiable payload simply
+          // never matches, so the guard degrades to off rather than throwing inside the error path.)
+          let fingerprint = null;
+          try { fingerprint = `${tc.name}:${JSON.stringify(tc.arguments)}`; } catch { fingerprint = null; }
+          if (fingerprint !== null && fingerprint === lastErrorFingerprint) identicalErrors += 1;
+          else { identicalErrors = 1; lastErrorFingerprint = fingerprint; }
+
+          if (this.maxIdenticalToolErrors > 0 && Number.isFinite(this.maxIdenticalToolErrors)
+              && identicalErrors >= this.maxIdenticalToolErrors) {
+            const stuckTag = `stuck:${tc.name}`;
+            // Same clean exit as the deny-streak and halt paths: seal the transcript, never throw (even under
+            // throwOnError), and preserve the model's text (BA-5) so a bounded attempt still teaches its successor.
+            sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
+            this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
+            this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+          }
         }
 
         // BA1: forward tool result/error to gate.record (via wireGate) with ctx in

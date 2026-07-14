@@ -1,6 +1,6 @@
 # bareagent — Provider Fidelity & Honest Termination PRD
 
-**Status:** IN PROGRESS (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1.** **OPEN: BA-12, BA-7** (in that order, per D4).
+**Status:** IN PROGRESS (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12.** **OPEN: BA-7** (last, per D4 — the only item with a measured ZERO benefit; see §0).
 **Owner:** hamr0
 **Source:** bareloop's round-4 isolation study (`/home/hamr/Documents/PycharmProjects/bareloop/docs/UPSTREAM-FIXES.md`) + this repo's own live verify-shipped runs.
 **Language:** Node.js (JS + JSDoc), CJS surface. No new deps.
@@ -36,7 +36,7 @@ This section exists so that a future contributor cannot quietly re-sell BA-7 as 
 | **BA-5** | Bounds discard the model's text (+ BA-3 `stop()` sub-case) | HIGH | ✅ **SHIPPED** (this branch) |
 | **BA-6** | A truncated round reads as a clean finish | **CRITICAL** | ✅ **SHIPPED** (this branch) — and it closes BA-4's ROOT cause: a truncated round's tool calls are now refused, never executed |
 | **BA-7** | Thinking blocks neither requested nor preserved | HIGH (protocol) | 🔴 OPEN — F2 |
-| **BA-12** | A repeated tool ERROR spins unbounded | MEDIUM | 🔴 OPEN — F3 (found by our own smoke) |
+| **BA-12** | A repeated tool ERROR spins unbounded | MEDIUM | ✅ **SHIPPED** (this branch) — `maxIdenticalToolErrors`, default 3. NOTE: BA-6 closed the ORIGINAL (truncation-driven) instance; this covers the residual general case |
 | **BA-1** | Anthropic transcript is re-bought every round (no cache breakpoint) | HIGH ($) | ✅ **SHIPPED** (this branch) — opt-in `cacheMessages`; measured 6.8×/round steady state |
 
 **Not filed / closed:** bareloop's "BA-8" (`loop.stop()` returns a false 100-round-limit error) is **BA-3**, already folded into BA-5 and shipped. Independent rediscovery — good confirmation, no new work. S3 (summarizer fold) and S4 (tool-result history) were investigated and **KILLED**: a default Loop wires neither `assemble` nor `trim` (`loop.js:253,262`), the full transcript is replayed every round (`toSend = msgs`, `loop.js:621`), and there are **zero** truncation/slice calls in `loop.js`. bare-agent is exonerated on both.

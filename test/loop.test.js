@@ -1335,3 +1335,92 @@ describe('Loop — BA-6: a TRUNCATED round must never read as a completed one', 
     assert.equal(result.metrics.tokens.output, 99, 'and is counted by the meter');
   });
 });
+
+describe('Loop — BA-12: an identical repeated tool ERROR must not spin to the budget cap', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  // The observed spin: the model re-issues the SAME impossible call, verbatim, forever.
+  it('short-circuits with stuck:<tool> after N identical failing calls', async () => {
+    let calls = 0;
+    const provider = scripted((i) => ({
+      text: `attempt ${i}`, usage,
+      toolCalls: [{ id: `w${i}`, name: 'shell_write', arguments: { path: '/tmp/x' } }], // byte-identical every round
+    }));
+    const badTool = {
+      name: 'shell_write', description: 'writes',
+      execute: async () => { calls++; throw new Error('shell_write requires a non-empty "content" string'); },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [badTool]);
+    assert.equal(result.error, 'stuck:shell_write');
+    assert.equal(calls, 3, 'stopped at the threshold — not 100 rounds of burn');
+    assert.equal(result.text, 'attempt 3', 'BA-5: the model\'s work is still preserved');
+  });
+
+  // NEGATIVE CONTROL 1 — the whole risk of this guard. A model that ADAPTS its arguments in response to an
+  // error is doing exactly what the error-feedback loop exists to enable, and must never be punished.
+  it('NEGATIVE CONTROL: a model that VARIES its args (genuinely recovering) is never tripped', async () => {
+    const provider = scripted((i) => (i <= 4
+      ? { text: '', usage, toolCalls: [{ id: `r${i}`, name: 'read', arguments: { path: `/try/${i}` } }] } // different args each time
+      : { text: 'found it', toolCalls: [], usage }));
+    const failing = { name: 'read', description: 'reads', execute: async () => { throw new Error('ENOENT'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [failing]);
+    assert.equal(result.error, null, 'varying args = recovery in progress, not a spin');
+    assert.equal(result.text, 'found it');
+  });
+
+  // NEGATIVE CONTROL 2 — a transient failure that recovers must not be killed.
+  it('NEGATIVE CONTROL: a tool that errors then SUCCEEDS resets the streak', async () => {
+    let n = 0;
+    const provider = scripted((i) => (i <= 4
+      ? { text: '', usage, toolCalls: [{ id: `f${i}`, name: 'flaky', arguments: { q: 1 } }] } // identical args!
+      : { text: 'done', toolCalls: [], usage }));
+    // Fails, fails, SUCCEEDS, fails, fails — never 3 identical failures in a row.
+    const flaky = {
+      name: 'flaky', description: 'flaky',
+      execute: async () => { n++; if (n === 3) return 'ok'; throw new Error('transient network blip'); },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [flaky]);
+    assert.equal(result.error, null, 'a success in the middle clears the streak — a flaky tool still recovers');
+    assert.equal(result.text, 'done');
+  });
+
+  it('a DIFFERENT tool failing in between resets the streak', async () => {
+    const provider = scripted((i) => ({
+      text: '', usage,
+      toolCalls: [{ id: `t${i}`, name: i % 2 ? 'a' : 'b', arguments: { x: 1 } }], // alternating tools
+    }));
+    const a = { name: 'a', description: 'a', execute: async () => { throw new Error('boom'); } };
+    const b = { name: 'b', description: 'b', execute: async () => { throw new Error('boom'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [a, b]);
+    // Never 3 identical in a row, so BA-12 never fires — the run ends on the hard round limit instead.
+    assert.notEqual(result.error, 'stuck:a');
+    assert.notEqual(result.error, 'stuck:b');
+  });
+
+  it('maxIdenticalToolErrors:0 disables the guard (restores pre-BA-12 behavior)', async () => {
+    const provider = scripted((i) => ({ text: '', usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const bad = { name: 'w', description: 'w', execute: async () => { throw new Error('always fails'); } };
+    const result = await new Loop({ provider, throwOnError: true, maxIdenticalToolErrors: 0 })
+      .run([{ role: 'user', content: 'go' }], [bad]);
+    assert.notEqual(result.error, 'stuck:w', 'disabled means disabled — it spins to the hard limit');
+  });
+
+  it('the transcript is sealed provider-valid (no orphan tool_call)', async () => {
+    const provider = scripted((i) => ({ text: 'x', usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const bad = { name: 'w', description: 'w', execute: async () => { throw new Error('nope'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [bad]);
+    assert.equal(result.error, 'stuck:w');
+    const callIds = result.msgs.filter((m) => m.role === 'assistant' && m.tool_calls).flatMap((m) => m.tool_calls.map((c) => c.id));
+    const resultIds = result.msgs.filter((m) => m.role === 'tool').map((m) => m.tool_call_id);
+    assert.deepEqual(callIds.sort(), resultIds.sort(), 'every tool_call has a tool_result');
+  });
+
+  it('BA-11 deny behavior is unchanged (the two guards are independent)', async () => {
+    const provider = scripted((i) => ({ text: `t${i}`, usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const w = { name: 'w', description: 'w', execute: async () => 'never runs' };
+    const result = await new Loop({ provider, policy: async () => '[deny] no', throwOnError: true })
+      .run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'denied:w', 'a deny is still a deny, not a stuck');
+  });
+});
