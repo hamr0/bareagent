@@ -131,11 +131,15 @@ class GeminiProvider {
       text,
       toolCalls,
       model: data.modelVersion || this.model,
-      // BA-6: `MAX_TOKENS` ⇒ cut off at the output cap. NOT probed live (no key at build time) — mapped
-      // from the documented vocabulary, and an unrecognized value falls through to `null`, which
-      // reproduces today's behavior exactly. A wrong guess degrades to the status quo, never to a
-      // false truncation on a healthy run. Verify live before release.
-      stopReason: normalizeStopReason(data.candidates?.[0]?.finishReason, 'gemini'),
+      // BA-6: `MAX_TOKENS` ⇒ cut off at the output cap. VERIFIED LIVE on `gemini-2.5-flash`
+      // (`poc/ba6-stop-reason-gemini-ollama.mjs`): STOP→end_turn, MAX_TOKENS→max_tokens. An unrecognized
+      // value still falls through to `null` (today's behavior), never to a false truncation.
+      //
+      // Gemini has NO tool_use finish reason — a complete function call comes back as `STOP` (measured).
+      // `hasToolCalls` lets the normalizer report the round for what it was: a round that stopped to CALL
+      // A TOOL, not one the model chose to end. Without it, `stopReason` would say `end_turn` here and
+      // `tool_use` on Anthropic/OpenAI for the identical event.
+      stopReason: normalizeStopReason(data.candidates?.[0]?.finishReason, 'gemini', { hasToolCalls: toolCalls.length > 0 }),
       usage: this._normalizeUsage(data.usageMetadata),
       ...(temperatureDropped && { temperatureDropped: true }),
     };

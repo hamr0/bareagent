@@ -72,20 +72,26 @@ class OllamaProvider {
     });
     const msg = data.message || {};
 
+    /** @type {import('../types').ToolCall[]} */
+    const toolCalls = (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
+      id: tc.id || `call_${Date.now()}`,
+      name: tc.function.name,
+      arguments: typeof tc.function.arguments === 'string'
+        ? JSON.parse(tc.function.arguments)
+        : tc.function.arguments,
+    }));
+
     return {
       text: msg.content || '',
-      toolCalls: (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
-        id: tc.id || `call_${Date.now()}`,
-        name: tc.function.name,
-        arguments: typeof tc.function.arguments === 'string'
-          ? JSON.parse(tc.function.arguments)
-          : tc.function.arguments,
-      })),
+      toolCalls,
       model: data.model || this.model,
-      // BA-6: `length` ⇒ cut off at num_predict. NOT probed live (no local daemon at build time) —
-      // documented mapping; unknown ⇒ null ⇒ today's behavior. Lifecycle values (`load`/`unload`) are
-      // deliberately unmapped rather than forced into the vocabulary.
-      stopReason: normalizeStopReason(data.done_reason, 'ollama'),
+      // BA-6: `length` ⇒ cut off at num_predict. VERIFIED LIVE on qwen2.5:0.5b
+      // (`poc/ba6-stop-reason-gemini-ollama.mjs`): stop→end_turn, length→max_tokens. Lifecycle values
+      // (`load`/`unload`) stay deliberately unmapped rather than forced into the vocabulary.
+      //
+      // Like Gemini, Ollama has NO tool_use done_reason — a complete tool call returns `stop` (measured).
+      // `hasToolCalls` lets the normalizer say so, instead of reporting a tool round as a clean finish.
+      stopReason: normalizeStopReason(data.done_reason, 'ollama', { hasToolCalls: toolCalls.length > 0 }),
       usage: {
         inputTokens: data.prompt_eval_count || 0,
         outputTokens: data.eval_count || 0,

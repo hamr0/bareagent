@@ -64,8 +64,9 @@ const OPENAI = {
 };
 
 /**
- * Gemini `finishReason` → neutral. Gemini does NOT tag a function call specially: a clean tool call
- * comes back as `STOP` with a `functionCall` part, so there is no 'tool_use' row here by design.
+ * Gemini `finishReason` → neutral. Gemini does NOT tag a function call specially — a complete tool call
+ * comes back as `STOP` with a `functionCall` part (measured live) — so there is no `tool_use` row here
+ * by design. `normalizeStopReason` derives it from `hasToolCalls` instead; see the note there.
  */
 const GEMINI = {
   STOP: 'end_turn',
@@ -99,15 +100,34 @@ const TABLES = {
  * @param {string|null|undefined} raw - the provider's native value (`stop_reason` / `finish_reason` /
  *   `finishReason` / `done_reason`). Absent or non-string ⇒ `null` (pre-BA-6 behavior).
  * @param {'anthropic'|'openai'|'gemini'|'ollama'} provider - which table to read.
+ * @param {{hasToolCalls?: boolean}} [ctx] - what the round actually CARRIED. See below: two providers
+ *   cannot express "stopped to call a tool" in their finish-reason field at all, so the round's own
+ *   content is the only place that fact exists.
  * @returns {string|null} a neutral value, an unrecognized value passed through verbatim, or `null`.
  */
-function normalizeStopReason(raw, provider) {
+function normalizeStopReason(raw, provider, ctx = {}) {
   if (typeof raw !== 'string' || raw === '') return null;
   const table = TABLES[provider];
   if (!table) return raw;
   // An unrecognized-but-present value passes through: the caller can still SEE it, and the Loop only
   // acts on the known vocabulary — so a new upstream value can never be mistaken for a truncation.
-  return table[raw] || raw;
+  const mapped = table[raw] || raw;
+
+  // GEMINI AND OLLAMA HAVE NO `tool_use` FINISH REASON (both measured live: Gemini returns
+  // `finishReason: STOP` and Ollama `done_reason: 'stop'` on a round that emitted a complete function
+  // call). Reported verbatim, a round that stopped TO CALL A TOOL would come back as `end_turn` — "the
+  // model finished of its own accord" — on 2 of 5 providers and `tool_use` on the other 3.
+  //
+  // That is the BA-6 defect class in miniature: a round that is NOT a finish, reporting as a finish.
+  // An adopter branching on `stopReason === 'end_turn'` would be right on Anthropic/OpenAI and wrong
+  // on Gemini/Ollama. So derive it from what the round CARRIED — the model did stop to call a tool,
+  // and that is a report, not an invention.
+  //
+  // Narrow on purpose: only ever promotes `end_turn` → `tool_use`. It cannot touch `max_tokens` (a
+  // truncated round carrying a half-generated call must stay TRUNCATED — that is BA-4's mechanism),
+  // nor `refusal`/`pause_turn`/`context_exceeded`, nor an unrecognized passthrough value.
+  if (mapped === 'end_turn' && ctx.hasToolCalls === true) return 'tool_use';
+  return mapped;
 }
 
 /**

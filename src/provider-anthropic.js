@@ -173,7 +173,7 @@ class AnthropicProvider {
       // BA-6: why generation ended. `max_tokens` here means the API CUT THIS ROUND OFF — the Loop must
       // not read it as a finished turn, and must not execute any tool call it carries (a complete call
       // arrives as `tool_use`; one riding a `max_tokens` round was cut off mid-generation).
-      stopReason: normalizeStopReason(data.stop_reason, 'anthropic'),
+      stopReason: normalizeStopReason(data.stop_reason, 'anthropic', { hasToolCalls: toolCalls.length > 0 }),
       // BA-7: the opaque blocks, tagged so they can only ever be replayed to the model that signed
       // them. A thinking `signature` is model-bound; on a mismatch we drop them and degrade to the
       // pre-BA-7 behavior (a lossy request that still succeeds) rather than risk a 400.

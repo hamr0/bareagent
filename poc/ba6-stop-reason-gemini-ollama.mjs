@@ -46,7 +46,10 @@ const gkey = process.env.GEMINI_API_KEY;
 if (!gkey) {
   console.log('  SKIP — no GEMINI_API_KEY. The map stays UNVERIFIED; it degrades to null (pre-BA-6) if wrong.\n');
 } else {
-  const g = new GeminiProvider({ apiKey: gkey, model: process.env.GEMINI_MODEL || 'gemini-2.0-flash' });
+  // Default to the provider's OWN default, so this probe verifies the model adopters actually get.
+  // (`gemini-2.0-flash` is RETIRED — the API now 400s on it. The shipped default is already current.)
+  const g = new GeminiProvider({ apiKey: gkey, ...(process.env.GEMINI_MODEL && { model: process.env.GEMINI_MODEL }) });
+  console.log(`  model: ${g.model}\n`);
   try {
     const stop = await g.generate([{ role: 'user', content: 'Reply with exactly: ok' }], []);
     check('STOP -> end_turn', stop.stopReason, 'end_turn');
@@ -77,6 +80,18 @@ if (!up) {
 
     const cut = await o.generate([{ role: 'user', content: LONG }], [], { maxTokens: 16 });
     check('length -> max_tokens  (the BA-6 case)', cut.stopReason, 'max_tokens');
+
+    // Ollama, like Gemini, has NO tool_use done_reason — a complete tool call returns `stop`. Derived
+    // from the round's content, or a tool round would report as a clean finish on 2 of 5 providers.
+    // NOTE: qwen2.5:0.5b is tiny and only SOMETIMES calls the tool — asserting through that is a flaky
+    // test by construction. So we only check the invariant WHEN a call was actually emitted; the
+    // deterministic proof lives in test/stop-reason.test.js (mutation-proven), not here.
+    const tool = await o.generate([{ role: 'user', content: 'What is the weather in Paris? Use the tool.' }], TOOL);
+    if (tool.toolCalls.length > 0) {
+      check('tool call -> tool_use (DERIVED: raw is "stop")', tool.stopReason, 'tool_use');
+    } else {
+      console.log(`  SKIP  tool call -> tool_use — model emitted no tool call this run (0.5b is flaky); invariant is unit-tested`);
+    }
   } catch (err) {
     console.log(`  ERROR  ${err.message.slice(0, 160)}`);
     failures++;

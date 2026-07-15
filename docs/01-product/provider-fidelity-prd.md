@@ -2,7 +2,11 @@
 
 **Status:** ALL ASKS SHIPPED (2026-07-14). Decisions D1–D4 signed off. **SHIPPED: BA-4, BA-5, BA-6, BA-1, BA-12, BA-7.**
 
-**Post-ship probe of the documented-not-measured `stopReason` maps:** Ollama now **VERIFIED live** — and the probe found a *different* bug it was not looking for: the map was right, but `OllamaProvider` **silently dropped `maxTokens`**, so the cap never reached the wire and truncation could never occur on that provider (fixed; see CHANGELOG). Gemini remains **UNVERIFIED** (API quota exhausted). Bounded exposure, stated rather than assumed: an unrecognized `finishReason` → `null` → pre-BA-6 behavior, so a wrong map can only **miss a true truncation**, never invent a false one. Worth closing when quota resets; not a release blocker.
+**Post-ship probe of the documented-not-measured `stopReason` maps: ALL FIVE PROVIDERS NOW VERIFIED LIVE** (`poc/ba6-stop-reason-gemini-ollama.mjs`, Gemini on `gemini-2.5-flash` + Ollama on `qwen2.5:0.5b`). The probe earned its keep — it surfaced **two bugs a docs-vs-table check could never have caught**, because in both cases the table was *right*:
+> 1. **`OllamaProvider` silently dropped `maxTokens`** — the cap never reached the wire, so output ran unbounded and truncation could never *happen* on Ollama (fixed: forwarded as `options.num_predict`).
+> 2. **Gemini and Ollama have no `tool_use` finish reason** — a complete tool call returns `STOP`/`stop`, so a tool round reported as a clean `end_turn` on 2 of 5 providers. Fixed by deriving `tool_use` from the round's content (`hasToolCalls`), narrowly — a truncated round still stays `max_tokens`, preserving BA-4's refusal. Mutation-proven in `test/stop-reason.test.js`.
+>
+> (Gemini was briefly blocked on an exhausted API quota and my POC's own hardcoded default pointing at the now-retired `gemini-2.0-flash`; the shipped default was already the current `gemini-2.5-flash`.)
 **Owner:** hamr0
 **Source:** bareloop's round-4 isolation study (`/home/hamr/Documents/PycharmProjects/bareloop/docs/UPSTREAM-FIXES.md`) + this repo's own live verify-shipped runs.
 **Language:** Node.js (JS + JSDoc), CJS surface. No new deps.
