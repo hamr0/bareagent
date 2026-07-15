@@ -37,6 +37,17 @@ describe('normalizeStopReason — the neutral vocabulary', () => {
   it('an unknown provider passes the raw value through', () => {
     assert.equal(normalizeStopReason('whatever', /** @type {any} */ ('mystery')), 'whatever');
   });
+
+  // Own-property only (mirror of classifyStopReason's guard): `raw` is a provider/proxy-supplied field,
+  // so an Object.prototype method name must pass through as its verbatim STRING — never resolve to the
+  // inherited function (truthy), which would return a Function where the contract promises string|null.
+  it('a prototype-inherited key passes through as a string, not an inherited function', () => {
+    for (const k of ['toString', 'constructor', 'valueOf', 'hasOwnProperty']) {
+      const out = normalizeStopReason(k, 'anthropic');
+      assert.equal(typeof out, 'string', `${k} must stay a string, not become an inherited function`);
+      assert.equal(out, k, `${k} must pass through verbatim`);
+    }
+  });
 });
 
 // Gemini and Ollama have NO tool_use finish reason — both measured live: a COMPLETE tool call comes

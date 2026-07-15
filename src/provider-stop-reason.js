@@ -111,7 +111,10 @@ function normalizeStopReason(raw, provider, ctx = {}) {
   if (!table) return raw;
   // An unrecognized-but-present value passes through: the caller can still SEE it, and the Loop only
   // acts on the known vocabulary — so a new upstream value can never be mistaken for a truncation.
-  const mapped = table[raw] || raw;
+  // Own-property only (mirror of classifyStopReason): `raw` is a provider/proxy-supplied field, so a
+  // value like 'toString'/'constructor' would otherwise resolve `table[raw]` to an inherited
+  // Object.prototype function (truthy) and be returned in place of the verbatim string.
+  const mapped = Object.prototype.hasOwnProperty.call(table, raw) ? table[raw] : raw;
 
   // GEMINI AND OLLAMA HAVE NO `tool_use` FINISH REASON (both measured live: Gemini returns
   // `finishReason: STOP` and Ollama `done_reason: 'stop'` on a round that emitted a complete function
