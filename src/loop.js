@@ -443,6 +443,30 @@ class Loop {
     let identicalErrors = 0;
     /** @type {string|null} */
     let lastErrorFingerprint = null;
+    // BA-12: record a FAILING tool call and short-circuit if it is the Nth byte-identical repeat. Shared by
+    // the two ways a call can fail with an error fed back to the model: `execute` threw, OR the tool name is
+    // unknown (a hallucinated tool). Both feed an error result the model can spin on identically, so both
+    // must count — an unknown-tool spin is the same budget burn as a throwing-tool spin. Only a DIFFERENT
+    // tool/args (recovery) or a SUCCESS resets the streak. Returns the clean stuck-result to return, or null
+    // to continue. Args are fingerprinted defensively: an unstringifiable payload never matches, so the
+    // guard degrades to off rather than throwing inside the failure path.
+    const recordToolFailure = (/** @type {ToolCall} */ tc) => {
+      let fingerprint = null;
+      try { fingerprint = `${tc.name}:${JSON.stringify(tc.arguments)}`; } catch { fingerprint = null; }
+      if (fingerprint !== null && fingerprint === lastErrorFingerprint) identicalErrors += 1;
+      else { identicalErrors = 1; lastErrorFingerprint = fingerprint; }
+      if (this.maxIdenticalToolErrors > 0 && Number.isFinite(this.maxIdenticalToolErrors)
+          && identicalErrors >= this.maxIdenticalToolErrors) {
+        const stuckTag = `stuck:${tc.name}`;
+        // Same clean exit as the deny-streak and halt paths: seal the transcript, never throw (even under
+        // throwOnError), and preserve the model's text (BA-5) so a bounded attempt still teaches its successor.
+        sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
+        this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
+        this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+      }
+      return null;
+    };
 
     // The meter (Feature 3): bareagent is the canonical run counter. Accumulates across rounds and is
     // returned as `result.metrics`. `tokens` is CUMULATIVE over all four tiers (fixes the last-round-only
@@ -667,7 +691,7 @@ class Loop {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
         // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -797,6 +821,11 @@ class Loop {
           const errMsg = `[Loop] Unknown tool: ${tc.name}`;
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
+          // BA-12: an unknown-tool error is fed back like any tool error, and a weak model can spin on it
+          // verbatim just the same (it hallucinates the same missing tool every round). Count it so the
+          // spin guard catches it too — otherwise the run burns to the hard round limit / budget cap.
+          const stuck = recordToolFailure(tc);
+          if (stuck) return stuck;
           continue;
         }
 
@@ -868,7 +897,7 @@ class Loop {
               sealDanglingToolCalls(msgs, `[halted:${denyTag}]`);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
               this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
-              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics() };
+              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
             }
             continue;
           }
@@ -902,27 +931,11 @@ class Loop {
           msgs.push({ role: 'tool', tool_call_id: tc.id, content: errMsg });
           this._safeEmit({ type: 'loop:tool_result', data: { tool: tc.name, error: errMsg } });
 
-          // BA-12: count only a BYTE-IDENTICAL repeat of a failing call. A different tool, or the same tool
-          // with different args, resets the streak — because that is a model ADAPTING to the error, which is
-          // exactly the recovery the error-feedback loop exists to enable. What this catches is the model
-          // re-issuing the same impossible call verbatim, which cannot ever succeed and burns the budget to
-          // the cap with no progress. (Args are fingerprinted defensively: an unstringifiable payload simply
-          // never matches, so the guard degrades to off rather than throwing inside the error path.)
-          let fingerprint = null;
-          try { fingerprint = `${tc.name}:${JSON.stringify(tc.arguments)}`; } catch { fingerprint = null; }
-          if (fingerprint !== null && fingerprint === lastErrorFingerprint) identicalErrors += 1;
-          else { identicalErrors = 1; lastErrorFingerprint = fingerprint; }
-
-          if (this.maxIdenticalToolErrors > 0 && Number.isFinite(this.maxIdenticalToolErrors)
-              && identicalErrors >= this.maxIdenticalToolErrors) {
-            const stuckTag = `stuck:${tc.name}`;
-            // Same clean exit as the deny-streak and halt paths: seal the transcript, never throw (even under
-            // throwOnError), and preserve the model's text (BA-5) so a bounded attempt still teaches its successor.
-            sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
-            this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
-            this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
-            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
-          }
+          // BA-12: `execute` threw. Count this failing call and short-circuit on the Nth identical repeat —
+          // see recordToolFailure for the full rationale (only a byte-identical repeat counts; a model that
+          // adapts its args, or a success, resets the streak).
+          const stuck = recordToolFailure(tc);
+          if (stuck) return stuck;
         }
 
         // BA1: forward tool result/error to gate.record (via wireGate) with ctx in
@@ -958,7 +971,7 @@ class Loop {
         // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
         // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
         this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
       throw err;
     }
@@ -988,20 +1001,20 @@ class Loop {
             const rule = err.rule || 'unknown';
             this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
             this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics() };
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
           }
           this._reportError('trim-flush', err, { phase: 'stop' });
         }
       }
       this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
-      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics() };
+      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: lastText, warning, cost: totalCost } });
-    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics() };
+    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
   }
 
   /**

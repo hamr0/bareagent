@@ -1357,6 +1357,33 @@ describe('Loop — BA-12: an identical repeated tool ERROR must not spin to the 
     assert.equal(result.text, 'attempt 3', 'BA-5: the model\'s work is still preserved');
   });
 
+  // The unknown-tool variant of the same spin: a model that hallucinates the SAME missing tool name every
+  // round gets an error fed back exactly like a throwing tool, and can spin on it just as hard. Before the
+  // fix this reached the hard round limit (the `!tool` branch continued without counting).
+  it('short-circuits an identical UNKNOWN (hallucinated) tool call too', async () => {
+    const provider = scripted((i) => ({
+      text: `attempt ${i}`, usage,
+      toolCalls: [{ id: `g${i}`, name: 'ghost_tool', arguments: { x: 1 } }], // a tool that does not exist
+    }));
+    const realTool = { name: 'real', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [realTool]);
+    assert.equal(result.error, 'stuck:ghost_tool', 'the spin guard catches an unknown-tool spin, not just a throwing one');
+    assert.doesNotMatch(String(result.error), /safety limit/, 'it must not spin to the hard round limit');
+    assert.equal(result.text, 'attempt 3', 'BA-5: the model text is preserved');
+  });
+
+  // NEGATIVE CONTROL — an unknown tool called ONCE then recovered from must not trip (threshold is 3), and
+  // varying the hallucinated name is recovery, not a spin.
+  it('NEGATIVE CONTROL: a one-off / varied unknown tool is never tripped', async () => {
+    const provider = scripted((i) => (i <= 2
+      ? { text: '', usage, toolCalls: [{ id: `g${i}`, name: `ghost_${i}`, arguments: {} }] } // different name each time
+      : { text: 'recovered', toolCalls: [], usage }));
+    const realTool = { name: 'real', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [realTool]);
+    assert.equal(result.error, null, 'varied unknown names = recovery in progress, not a spin');
+    assert.equal(result.text, 'recovered');
+  });
+
   // NEGATIVE CONTROL 1 — the whole risk of this guard. A model that ADAPTS its arguments in response to an
   // error is doing exactly what the error-feedback loop exists to enable, and must never be punished.
   it('NEGATIVE CONTROL: a model that VARIES its args (genuinely recovering) is never tripped', async () => {
@@ -1422,6 +1449,53 @@ describe('Loop — BA-12: an identical repeated tool ERROR must not spin to the 
     const result = await new Loop({ provider, policy: async () => '[deny] no', throwOnError: true })
       .run([{ role: 'user', content: 'go' }], [w]);
     assert.equal(result.error, 'denied:w', 'a deny is still a deny, not a stuck');
+  });
+});
+
+// BA-10: `temperatureDropped` (a round whose non-default temperature the model rejected and retried without)
+// must survive on EVERY terminating return, not only the clean/truncated ones — recurse's refineLeaf reads
+// it to record the EFFECTIVE temperature. A bounded attempt most often ends by halt/deny/stop, so those are
+// exactly the paths that must not silently drop the flag (or the receipt reports the ignored requested temp).
+describe('Loop — BA-10: temperatureDropped is preserved on governance-terminated returns', () => {
+  const { HaltError } = require('../src/errors');
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+  const droppingProvider = () => scripted((i) => ({
+    text: `t${i}`, usage, temperatureDropped: true,
+    toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }],
+  }));
+  const w = { name: 'w', description: 'w', execute: async () => 'ran' };
+
+  it('survives a governance HALT', async () => {
+    const policy = async () => { throw new HaltError('budget', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider: droppingProvider(), policy }).run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.temperatureDropped, true, 'the effective-temperature signal must not be lost on a halt');
+  });
+
+  it('survives a deny-streak short-circuit', async () => {
+    const result = await new Loop({ provider: droppingProvider(), policy: async () => '[deny] no', maxConsecutiveDenials: 3 })
+      .run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'denied:w');
+    assert.equal(result.temperatureDropped, true);
+  });
+
+  it('survives a caller-initiated stop()', async () => {
+    const loop = new Loop({ provider: scripted((i) => {
+      if (i >= 2) loop.stop();
+      return { text: `t${i}`, usage, temperatureDropped: true, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] };
+    }) });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, null, 'a deliberate stop is not a fault');
+    assert.equal(result.temperatureDropped, true);
+  });
+
+  it('is ABSENT when no temperature was ever dropped (no false flag)', async () => {
+    const provider = scripted((i) => ({ text: `t${i}`, usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const policy = async () => { throw new HaltError('budget', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, policy }).run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.temperatureDropped, undefined, 'the flag appears only when a drop actually happened');
   });
 });
 
