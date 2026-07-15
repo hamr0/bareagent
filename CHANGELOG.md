@@ -4,6 +4,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-15
+
 ### Added
 
 - **Anthropic `thinking` blocks are preserved and replayed instead of silently dropped (BA-7, bareloop — a PROTOCOL fix, and explicitly NOT a capability one).**
@@ -33,6 +35,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   **`tool_use` is derived where a provider cannot express it — found by the live probe.** Gemini and Ollama have **no** tool-call finish reason: a *complete* function call comes back as `STOP` / `stop` (both measured). Reported verbatim, a round that stopped **to call a tool** would read as `end_turn` — "the model finished" — on 2 of 5 providers and `tool_use` on the other 3, for the identical event. That is the BA-6 defect class in miniature (a non-finish reporting as a finish), so `normalizeStopReason(raw, provider, { hasToolCalls })` promotes `end_turn → tool_use` when the round actually carried a call. **Deliberately narrow, and mutation-proven:** it *only* touches `end_turn`, so a **truncated** round carrying a half-generated call stays `max_tokens` (that is BA-4's mechanism — the Loop must still refuse it); `refusal`/`pause_turn`/`context_exceeded` and unrecognized passthrough values are never promoted. New `test/stop-reason.test.js` (+12, the guard's mutation kills the BA-4 truncation test). *(Hoisting `toolCalls` to feed this surfaced that OpenAI/Ollama built it inline in the return — the derivation would have thrown at runtime on both; caught by `tsc`, not tests.)*
 
 ### Fixed
+
+- **Two follow-up gaps from the branch's own `/code-review`, both validated before fixing and regression-tested.**
+  - **BA-12's spin guard missed a hallucinated tool name.** The identical-error short-circuit only counted throws from a tool's `execute`; a model re-issuing a byte-identical call to an **unknown** tool hit the `!tool` branch, got the error fed back, and was never counted — so it spun to `HARD_ROUND_LIMIT` (100) / the budget cap with zero progress, the exact class BA-12 exists to bound. Proven on a deterministic harness (**100 → 3 rounds** after the fix). The count-and-short-circuit is now one shared closure used by both the unknown-tool branch and the `execute` catch, so an unknown-tool spin returns the same clean `error: 'stuck:<tool>'`. Negative controls hold: a one-off or **varied** unknown name is recovery, never tripped.
+  - **BA-10's `temperatureDropped` was lost on the governance-terminated returns.** The clean/truncated/stuck returns carried the effective-temperature signal, but the provider-error, deny-streak, both halt paths, `stop()`, and hard-limit returns dropped it — so `recurse`'s `refineLeaf` receipt reported the *ignored requested* temperature instead of the effective one on the most common bounded-termination paths. Threaded onto all six; a test confirms it stays **absent** when no drop occurred (no false flag).
+
+  `src/loop.js`, `test/loop.test.js` (+6, mutation-checked). No happy-path behavior change; 709 unit tests pass.
 
 - **`OllamaProvider` silently dropped `maxTokens` — the output cap never reached the wire.** Every other provider forwarded it; Ollama passed only `temperature`, so a caller capping output on Ollama generated **unbounded** and had no way to know. It also meant BA-6's truncation contract could never fire there, because truncation could never *happen*. Ollama nests generation params under `options` and calls the cap `num_predict`; both params now merge into one block, omitted entirely when neither is set (a body with no options stays byte-identical).
 
