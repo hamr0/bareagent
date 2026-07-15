@@ -23,14 +23,21 @@ const require = createRequire(import.meta.url);
 const { Loop } = require('../src/loop');
 
 /** A provider that returns one canned round, then (if asked again) a clean end to avoid an infinite loop. */
-function stubProvider({ text, stopReason }) {
+function stubProvider({ text, stopReason, isResume }) {
   let calls = 0;
   return {
     model: 'stub-1',
-    async generate() {
+    async generate(messages) {
       calls++;
-      // First call: the round under test. Any later call: a benign clean finish (not exercised here —
-      // every case under test terminates on round 1).
+      // pause_turn is RESUME-AWARE: it finishes ONLY once the Loop has appended the paused assistant turn
+      // (the documented protocol). A bare `continue` re-sends identical input (last message still a user
+      // turn), so this keeps pausing → the spin the fix prevents. Non-pause cases keep the simple shape:
+      // one canned round under test, then a benign clean finish.
+      if (isResume) {
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'assistant') return { text: 'fallback', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
+        return { text, toolCalls: [], usage: { inputTokens: 10, outputTokens: 0 }, stopReason, providerBlocks: { provider: 'anthropic', model: 'stub-1', blocks: [{ type: 'server_tool_use', id: 's1' }] } };
+      }
       if (calls === 1) return { text, toolCalls: [], usage: { inputTokens: 10, outputTokens: 0 }, stopReason };
       return { text: 'fallback', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, stopReason: 'end_turn' };
     },

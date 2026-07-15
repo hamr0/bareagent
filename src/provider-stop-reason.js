@@ -186,7 +186,12 @@ const TERMINAL_ACTIONS = /** @type {Record<string, 'truncated'|'refusal'|'contex
  */
 function classifyStopReason(stopReason) {
   if (typeof stopReason !== 'string') return null;
-  return TERMINAL_ACTIONS[stopReason] || null;
+  // Own-property only: `normalizeStopReason` passes an unrecognized value through verbatim, so a
+  // provider/proxy emitting stop_reason:'toString'/'constructor'/etc. would otherwise resolve to an
+  // inherited Object.prototype function (truthy) and be mistaken for a terminal action.
+  return Object.prototype.hasOwnProperty.call(TERMINAL_ACTIONS, stopReason)
+    ? TERMINAL_ACTIONS[stopReason]
+    : null;
 }
 
 module.exports = { normalizeStopReason, isTruncated, classifyStopReason };

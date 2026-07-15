@@ -1383,20 +1383,53 @@ describe('Loop — BA-13: non-clean terminal stop reasons are error-tagged, not 
   });
 
   // pause_turn is the tell: it proves this needs a CLASSIFIER, not another short-circuit. It must RESUME,
-  // never error. A two-call stub (pause → end_turn) yields exactly one clean final — the loop advanced.
-  it('pause_turn RESUMES the loop rather than terminating (2-call: pause → end_turn)', async () => {
+  // never error — and resuming REQUIRES appending the paused assistant turn so the provider sees the
+  // trailing server-tool block and continues (the documented Anthropic pause_turn protocol). A resume-
+  // aware stub finishes ONLY once it sees that appended assistant turn: a bare `continue` (the bug) re-
+  // sends byte-identical input, so the last message stays a user turn and this stub keeps pausing → spin.
+  it('pause_turn RESUMES by appending the paused turn, not by re-sending identical input', async () => {
     let calls = 0;
-    const provider = scripted((i) => {
-      calls = i;
-      return i === 1
-        ? { text: '', toolCalls: [], stopReason: 'pause_turn', usage }
-        : { text: 'resumed and finished', toolCalls: [], stopReason: 'end_turn', usage };
-    });
-    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
-    assert.equal(calls, 2, 'the loop resumed — the provider was called a second time');
+    const provider = {
+      model: 'stub-1',
+      async generate(messages) {
+        calls++;
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'assistant') {
+          return { text: 'resumed and finished', toolCalls: [], stopReason: 'end_turn', usage };
+        }
+        return {
+          text: 'partial', toolCalls: [], stopReason: 'pause_turn', usage,
+          providerBlocks: { provider: 'anthropic', model: 'stub-1', blocks: [{ type: 'server_tool_use', id: 's1' }] },
+        };
+      },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'search the web' }]);
+    assert.equal(calls, 2, 'resumed in exactly one extra round — the paused turn was appended, not re-sent');
     assert.equal(result.error, null, 'a resumed-then-finished turn is a clean finish');
     assert.equal(result.text, 'resumed and finished');
     assert.equal(result.stopReason, 'end_turn', 'the surfaced stop reason is the round it actually ended on');
+    const assistantTurns = result.msgs.filter((m) => m.role === 'assistant');
+    assert.ok(assistantTurns.some((m) => m.providerBlocks), 'the paused turn was appended WITH its provider-native server-tool block');
+  });
+
+  // The pathological case: a provider that NEVER stops pausing must be bounded, not spin forever. Before
+  // the append fix this also spun (re-send identical → pause) but produced no honest bound signal; now the
+  // existing HARD_ROUND_LIMIT catches it and the run returns the safety-limit error, not an infinite loop.
+  it('a persistently-pausing provider is bounded by the hard round limit', async () => {
+    let calls = 0;
+    const provider = {
+      model: 'stub-1',
+      async generate() {
+        calls++;
+        return {
+          text: '', toolCalls: [], stopReason: 'pause_turn', usage,
+          providerBlocks: { provider: 'anthropic', model: 'stub-1', blocks: [{ type: 'server_tool_use', id: 's' }] },
+        };
+      },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.match(result.error, /safety limit/, 'a pause that never progresses hits the hard round limit, not an infinite loop');
+    assert.ok(calls <= 100, `bounded by HARD_ROUND_LIMIT (was ${calls})`);
   });
 
   // "Every return" — stopReason is present on a CLEAN finish too, not only the new terminal legs.

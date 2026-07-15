@@ -11,7 +11,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   The single `if (isTruncated)` short-circuit is replaced by **one table-driven classifier** (`classifyStopReason`, `src/provider-stop-reason.js`) over the neutral stop-reason vocabulary, with an **explicit pass-through default** — the BA-7 lesson ("don't parse-key on a closed set") applied to termination, so the *next* new stop reason degrades to the status quo instead of re-breeding the bug:
   - `refusal` → **`error: 'refusal'`** (partial text preserved, BA-5)
   - `context_exceeded` → **`error: 'context_exceeded'`** (partial text preserved)
-  - `pause_turn` → **the loop RESUMES** — a resumable server-tool pause is not terminal and not an error; a pause that never progresses is bounded by the existing `HARD_ROUND_LIMIT` / gate `maxTurns`, so no new counter was added
+  - `pause_turn` → **the loop RESUMES** — a resumable server-tool pause is not terminal and not an error. Resuming APPENDS the paused assistant turn (partial text + provider-native server-tool blocks, replayed via `providerBlocks`) and re-requests, which is the documented Anthropic pause_turn protocol — a bare `continue` re-sends byte-identical input and the server restarts the turn and pauses again, spinning to the cap. A pause that never progresses is bounded by the existing `HARD_ROUND_LIMIT` / gate `maxTurns`, so no new counter was added
   - `max_tokens` → `error: 'truncated:max_tokens'` (**unchanged**, BA-6)
   - `end_turn` / `stop_sequence` / `tool_use` / unrecognized / absent → pass through to today's behavior (**unchanged**)
 

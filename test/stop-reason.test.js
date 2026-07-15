@@ -119,4 +119,13 @@ describe('classifyStopReason — the terminal-action table', () => {
     assert.equal(classifyStopReason('max_tokens') === 'truncated', isTruncated('max_tokens'));
     assert.equal(classifyStopReason('refusal') === 'truncated', isTruncated('refusal'));
   });
+
+  // Own-property only: normalizeStopReason passes an unrecognized value through verbatim, so a rogue
+  // provider/proxy emitting an Object.prototype method name must NOT resolve to the inherited function
+  // (which is truthy and would be mistaken for a terminal action, aborting an otherwise clean round).
+  it('a prototype-inherited key is NOT treated as a terminal action', () => {
+    for (const k of ['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__']) {
+      assert.equal(classifyStopReason(k), null, `${k} must resolve to null, not an inherited value`);
+    }
+  });
 });

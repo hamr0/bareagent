@@ -776,12 +776,24 @@ class Loop {
       // library's. `lastText` (BA-5) preserves the partial work on every terminal leg.
       const terminal = classifyStopReason(result.stopReason);
       if (terminal === 'resume') {
-        // BA-13: `pause_turn` — a RESUMABLE server-side tool pause, NOT a finish and NOT an error.
-        // Laundering it into `error: null` empty-success (the pre-fix behavior) was wrong; erroring on it
-        // (like a truncation) would be equally wrong — it breaks a server-tool flow working as designed.
-        // Continue the round loop so the turn can resume; the existing HARD_ROUND_LIMIT / gate maxTurns
-        // bound a pause that never progresses (a stuck pause is just a non-advancing loop). No terminal
-        // return, no tool execution; any partial text is already held in lastText (BA-5).
+        // BA-13: `pause_turn` — a RESUMABLE server-side tool pause (the API's server-tool loop hit its
+        // per-turn iteration cap mid-turn). NOT a finish, NOT an error. Resuming REQUIRES re-sending the
+        // paused assistant turn: the provider detects the trailing server-tool block and continues where
+        // it left off (the documented Anthropic pause_turn protocol — "re-send the user message and
+        // assistant response"). A bare `continue` WITHOUT appending re-sends byte-identical input, so the
+        // server restarts the turn from scratch and pauses again, spinning to HARD_ROUND_LIMIT (100 paid
+        // calls) instead of resuming. So append the assistant turn — its partial text plus the
+        // provider-native server-tool/thinking blocks (which the Anthropic provider replays via
+        // providerBlocks) — BEFORE continuing, exactly as the tool-execution path pushes its assistant
+        // turn. Only push when there is something to carry: an empty assistant turn (no text, no blocks)
+        // is wire-invalid, and a pause with no partial output cannot be advanced anyway — HARD_ROUND_LIMIT
+        // (or the gate) bounds that pathological case. No client tool_calls are pushed: a server pause
+        // does not carry an unpaired client call, and pushing one would orphan it (wire-invalid) — the
+        // same BA-4 refusal principle as the other non-clean terminal legs.
+        const hasText = typeof result.text === 'string' && result.text.trim() !== '';
+        if (hasText || result.providerBlocks) {
+          msgs.push({ role: 'assistant', content: result.text || null, ...(result.providerBlocks && { providerBlocks: result.providerBlocks }) });
+        }
         this._safeEmit({ type: 'loop:resume', data: { round, stopReason: lastStopReason } });
         continue;
       }
