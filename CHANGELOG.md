@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.28.0] - 2026-07-15
 
 ### Changed
 
@@ -20,6 +20,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   **Plus the load-bearing companion: `result.stopReason` (the neutral value) is now surfaced on EVERY `Loop.run()` return**, not only the clean-finish path — a caller can branch on *why* a run ended, not just its `error` tag. **The fix error-tags rather than merely surfacing `stopReason`**, and that is deliberate: `recurse` and downstream adopters branch on `error`, and 0.27.0's "`error` is the sole success signal" invariant would be re-broken by an `error: null` + `stopReason: 'refusal'`. Because `recurse` already keys on `out.error`, it inherits the fix with **zero recurse changes** — a refused worker now yields an honest `{ incomplete }`.
 
   **BEHAVIOR CHANGE:** a round the model refused on safety grounds that previously returned `error: null` with empty text now returns `error: 'refusal'`. This is the point of the fix — a refusal is not an empty success — but it changes an existing return value, so branch on `error` (as the BA-5/BA-6 contract already asks) rather than on emptiness. `src/provider-stop-reason.js`, `src/loop.js`, `test/stop-reason.test.js` + `test/loop.test.js` + `test/recurse.test.js` (mutation-checked: dropping the `refusal` leg reds exactly the refusal tests at both the Loop and recurse layers). Origin: a self-audit of the BA-4/5/6/7 "under-modeled boundary" class — the deterministic probes live in `poc/audit-*.mjs`.
+
+### Fixed
+
+- **`normalizeStopReason`'s table lookup was one prototype-key footgun short of the classifier's guard (release-gate `/diff-review`).** The BA-13 review added an own-property guard to `classifyStopReason` but its sibling one function up — `const mapped = table[raw] || raw` — was left unguarded. Because `raw` is a provider/proxy-supplied field (`data.stop_reason`, and `baseUrl` is caller-configurable), a value like `stop_reason: 'toString'` or `'constructor'` resolved `table[raw]` to an inherited `Object.prototype` function (truthy) and returned it in place of the verbatim string the JSDoc promises. Contained rather than dangerous — both downstream consumers (`loop.js`'s `lastStopReason` and `classifyStopReason`) `typeof`-guard, so the malformed value degraded to `null` (safe pass-through) and never reached a user-visible `out.stopReason` — and pre-existing since 0.27.0, not a regression from this branch. Now guarded with the same `Object.prototype.hasOwnProperty.call(table, raw)` check. `src/provider-stop-reason.js`, `test/stop-reason.test.js` (+1, mutation-checked: reverting the guard reds exactly the new prototype-key test).
 
 ## [0.27.0] - 2026-07-15
 
