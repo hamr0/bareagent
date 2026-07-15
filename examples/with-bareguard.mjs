@@ -60,6 +60,8 @@ const actionTranslator = (toolName, args, ctx) => {
     case 'shell_grep': return { type: 'read', path: args?.path, args, _ctx: ctx ?? null };
     // shell_write is a write — gate it through fs.writeScope (add writeScope to the Gate config to enforce).
     case 'shell_write': return { type: 'write', path: args?.path, args, _ctx: ctx ?? null };
+    // shell_edit is an anchored edit — bareguard gates {type:'edit'} by the SAME fs.writeScope as write.
+    case 'shell_edit':  return { type: 'edit',  path: args?.path, args, _ctx: ctx ?? null };
     default:           return { type: toolName, args, _ctx: ctx ?? null };
   }
 };

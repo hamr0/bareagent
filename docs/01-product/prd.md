@@ -809,6 +809,55 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.29.0 / `shell_edit` — anchored edit verb (bareloop BA-13) (2026-07-15)
+
+> **Numbering note.** This is **bareloop's** BA-13 (`docs/UPSTREAM-ASKS.md`),
+> a DIFFERENT item from bare-agent's own BA-13 above (the termination
+> classifier). The two numbering schemes aligned through BA-1/4/5/6/7/10/12
+> and diverged at 13 — bareloop found the write-side gap while bare-agent's
+> self-audit found the terminal-signal gap in the same week. Referred to as
+> `shell_edit` in bare-agent's records to avoid the collision.
+
+- **The gap.** `shell_write` is whole-file: changing one line of an 800-line
+  file forces the model to EMIT all 800 lines as tool-call JSON — an OUTPUT-token
+  tax ∝ file size (output is the expensive class), paid on every revision, and
+  the maximal broken-tree surface (a truncated rewrite mangles the lines it never
+  meant to touch — the BA-4/BA-6 class). The READ side already split correctly
+  (ranged read = litectx `get`); the WRITE side had no ranged counterpart.
+- **The verb.** `shell_edit({path, oldText, newText})` — anchored exact-once
+  replace. `oldText` must occur **exactly once**.
+- **Decisions taken at sign-off (hamr, 2026-07-15):**
+  - **Anchor miss (0 or 2+ matches) → a refusal RETURNED AS THE TOOL RESULT**,
+    not a throw — the loop continues and the model re-anchors (the refusal names
+    the count). Tradeoff accepted with eyes open: a result does NOT feed the Loop
+    `maxIdenticalToolErrors` spin guard, so a byte-identical repeated miss is
+    bounded by maxTurns/budget, not short-circuited. A widened anchor is a
+    different call and recovers naturally; this matches the ask's explicit
+    "refusal, not a throw" contract.
+  - **BA-4 param guards from birth.** Missing/empty `oldText`, missing/non-string
+    `newText` THROW at the boundary (an absent param is the truncated-call
+    signature); explicit `newText:''` is a legal deletion. fs-layer errors
+    (missing file / a directory) also throw.
+  - **Atomic** (sibling temp + `rename`, original mode preserved) — an injected
+    fs failure leaves the file byte-identical to old-or-fully-patched, never
+    partial, and an edit can't silently drop the executable bit.
+  - **Literal splice** (index+slice, NOT `String.replace`) so `$&`/`$1`/`` $` ``
+    in `newText` land verbatim — a real corruption footgun avoided.
+  - **Gate action `{type:'edit'}`** — bareguard's FS primitive `FS_TYPES` already
+    includes `edit` and gates it by `fs.writeScope` identically to `write`
+    (source-verified, `node_modules/bareguard/src/primitives/fs.js:6,76-78`), so
+    a consumer that fences `write` gets `edit` fenced with **zero bareguard
+    change**. This was the one integration risk; cleared before building.
+- **Verification.** 11 mutation-checked offline tests cover the 7 fail-able
+  acceptance criteria (economy MECHANISM, anchor miss/ambiguous, BA-4 guards,
+  gate integration with a real bareguard Gate, atomicity under injected fs
+  failure, negative control, literal-splice regression). Criterion 1 (the
+  ECONOMY claim — one-line edit < 500 output tokens vs whole-file > 8000) is a
+  real-API measurement (`poc/ba13-shell-edit-economy.mjs`) since output tokens
+  can't be counted offline: **measured 187 vs 31,402 output tokens on
+  `claude-sonnet-5` — 167.9× cheaper** on the write/edit round, both arms
+  verified to have landed the correct edit.
+
 ### v0.28.0 / BA-13 — honest termination classifier (2026-07-15)
 
 - **One table-driven classifier replaces BA-6's lone truncation

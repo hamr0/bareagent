@@ -161,6 +161,7 @@ const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate, {
     if (toolName === 'shell_exec') return { type: 'bash', args, _ctx: ctx };
     if (toolName === 'shell_read') return { type: 'read', args, _ctx: ctx };
     if (toolName === 'shell_write') return { type: 'write', args, _ctx: ctx }; // gate by fs.writeScope
+    if (toolName === 'shell_edit')  return { type: 'edit',  args, _ctx: ctx }; // same fs.writeScope as write
     return defaultActionTranslator(toolName, args, ctx);
   },
 });

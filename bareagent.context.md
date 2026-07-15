@@ -65,7 +65,8 @@ Eight entry points:
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
 | Control Android/iOS devices | createMobileTools + Loop |
 | Control mobile (token-efficient, disk-based) | `baremobile` CLI session — snapshots to `.baremobile/*.yml` |
-| Read/write files, list directories, run shell commands, grep | createShellTools (shell_read/grep/**write**/run/exec) + Loop({ policy }) — gate `shell_write` via `fs.writeScope` with an actionTranslator |
+| Read/write files, list directories, run shell commands, grep | createShellTools (shell_read/grep/**write**/**edit**/run/exec) + Loop({ policy }) — gate `shell_write`/`shell_edit` via `fs.writeScope` with an actionTranslator |
+| Change one span of a big file without re-emitting the whole thing | `shell_edit({path, oldText, newText})` — anchored exact-once replace; the surgical alternative to whole-file `shell_write` (BA-13). Gate it as `{type:'edit'}` |
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
 | Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
 | Gate every tool call with one policy hook | `wireGate(gate).policy` → `Loop({ policy })` |
@@ -423,6 +424,7 @@ const { policy, onToolResult } = wireGate(gate, {
     if (toolName === 'shell_run')   return { type: 'bash', args, _ctx: ctx };   // reads args.argv → joins to cmd
     if (toolName === 'shell_read')  return { type: 'read',  args, _ctx: ctx };  // reads args.path
     if (toolName === 'shell_write') return { type: 'write', args, _ctx: ctx };  // gate by fs.writeScope (reads args.path)
+    if (toolName === 'shell_edit')  return { type: 'edit',  args, _ctx: ctx };  // same fs.writeScope as write (reads args.path)
     return { type: toolName, args, _ctx: ctx };          // fall through to defaultActionTranslator
   },
 });
@@ -1247,6 +1249,7 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 |---|---|
 | `shell_read` | Read a file (utf8, 256KB cap) or list a directory (tab-separated). `~` expands to home. |
 | `shell_write` | Write (or `append:true`) UTF-8 text to a file, creating parent dirs. 5MB cap. No shell, so it gates cleanly through `fs.writeScope` once translated to `{type:'write'}`. **`content` is REQUIRED** — see the truncation guard below. |
+| `shell_edit` | Anchored exact-string replace — the **surgical** alternative to whole-file `shell_write` (BA-13). `{path, oldText, newText}`: `oldText` must occur **exactly once** (quote surrounding lines to be unique); `newText` is spliced in **verbatim** (`""` deletes). Returns a compact `edited <path>: 1 replacement` receipt, never the body. 0 or 2+ matches → a refusal **returned as the tool result** (the model re-anchors; file untouched). Gates through `fs.writeScope` translated to `{type:'edit'}` — see the note below. |
 | `shell_grep` | JavaScript regex search across files. Walks directories, skips binary files, returns `{hits: [{file, line, text}], truncated, fileCount}`. |
 | `shell_run` | Run a command with an **argv array** via `child_process.execFile` (no shell, no metacharacter interpretation). Returns `{stdout, stderr, code, timedOut}`. **Use this when you need a policy allowlist.** |
 | `shell_exec` | Run a raw shell command string via `/bin/sh -c` (or `cmd.exe`). Returns the same shape. **Shell metacharacters are interpreted — naive allowlists are bypassable.** Use only when you genuinely need shell features (pipes, redirects, globs). |
@@ -1254,6 +1257,8 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 **Zero baked-in allowlist.** The library ships the primitives; gating is bareguard's job via the standard `wireGate(gate)` wiring.
 
 > **⚠️ `shell_write` requires `content` — and a gate cannot cover for it (v0.27+).** `content` used to default to `''`, so a tool call that OMITTED it silently overwrote the target with **zero bytes** and returned `"wrote 0 bytes to <path>"` as success. That is the ordinary shape of a model hitting its **output-token cap** mid-generation on a long file — observed live emptying a 1789-line source file. **No policy can catch it:** a 0-byte write is a *legal* write, and bareguard's `fs` primitive judges `{type:'write', path}` without inspecting the body (the gate correctly `allow`s it). `shell_write` now **rejects** an absent, `null`, or non-string `content` and leaves the file byte-identical; the error tells the model to retry with the full content. An explicit `content: ""` still empties the file — that one is deliberate.
+
+> **`shell_edit` — the surgical write (BA-13).** Changing one line of an 800-line file with `shell_write` forces the model to re-emit **all 800 lines** as tool-call JSON: an output-token tax ∝ file size (output is the expensive token class), paid on every revision, and the maximal broken-tree surface (a truncated rewrite mangles the lines it never meant to touch — the BA-4/BA-6 class). `shell_edit({path, oldText, newText})` emits only the anchor + replacement. Semantics worth knowing: `oldText` must match **exactly once** (a 0/2+ match is a refusal *returned as the tool result*, so the loop continues and the model widens the anchor — not a throw, so a repeated-identical miss is bounded by maxTurns/budget, not the spin guard); missing/empty `oldText` or missing/non-string `newText` **throw** (BA-4 guards; `newText:""` is a legal deletion); the write is **atomic** (sibling temp + rename, mode preserved) so an fs failure never leaves a partial file; and `newText` is a **literal splice** (a `$&`/`$1` in it lands verbatim, unlike `String.replace`). Gate it exactly like `shell_write` but as `{type:'edit'}` — **bareguard gates `edit` by the same `fs.writeScope` as `write` with zero config** (its FS primitive's `FS_TYPES` already includes `edit`).
 
 > **⚠️ `shell_exec` injection caveat.** `"ls"` passes a base-command allowlist like `args.command.split(/\s+/)[0]`, but so does `"ls;rm -rf /tmp/x"` — the shell runs both. **A base-command allowlist is NOT safe for `shell_exec`.** For policy-gated use, prefer `shell_run({argv})` and allow-list on `args.argv[0]` — there is no shell in that path, so metacharacters are just literal argument bytes. Use `shell_exec` only when the agent needs pipes/redirects/globs, and gate it at a higher level (human approval, narrow intent).
 
