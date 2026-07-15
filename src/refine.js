@@ -4,10 +4,14 @@
 
 /**
  * @typedef {object} RefineOptions
- * @property {(args: {iteration: number, lastResult: any, critique: string|null, contract: string|null}) => any} attempt
- *   Build one generation. On iteration 0, `lastResult`/`critique` are null. Fresh-feedback (D6/A1) is the
- *   consumer's to realize here: seed a NEW Loop with `{goal + critique}` rather than continuing the failed
- *   transcript — anchoring on a wrong answer defeats the independent verifier.
+ * @property {(args: {iteration: number, lastResult: any, critique: string|null, contract: string|null, history: Array<{result: any, verdict: Verdict}>}) => any} attempt
+ *   Build one generation. On iteration 0, `lastResult`/`critique` are null and `history` is empty. Fresh-feedback
+ *   (D6/A1) is the consumer's to realize here: seed a NEW Loop with `{goal + critique}` rather than continuing the
+ *   failed transcript — anchoring on a wrong answer defeats the independent verifier. `history` is a COPY of every
+ *   prior `{result, verdict}` in order (a SkillOpt rejected-attempt buffer, BA-14): a consumer MAY surface the
+ *   failed attempts verbatim ("you already wrote these, they failed X — write something different"), the lever
+ *   that recovers a temperature-fixed model's fixation rut where escalation is inert (`poc/ba14-rejected-buffer.mjs`:
+ *   flat-temp 50%→100%). Mutating it does not affect refine's internal state.
  * @property {(result: any, ctx: {iteration: number, contract: string|null}) => (Verdict | Promise<Verdict>)} evaluate
  *   Judge a result — typically `evaluator.evaluate(goal, result, { rubric, contract })`.
  * @property {string} [contract] - The shared definition of done (A3/D10), forwarded to BOTH `attempt` and
@@ -49,7 +53,7 @@ async function refine(options) {
   let lastVerdict = null;
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
-    const result = await attempt({ iteration, lastResult, critique: lastVerdict ? lastVerdict.critique : null, contract });
+    const result = await attempt({ iteration, lastResult, critique: lastVerdict ? lastVerdict.critique : null, contract, history: history.slice() });
     const verdict = await evaluate(result, { iteration, contract });
     history.push({ result, verdict });
     lastResult = result;

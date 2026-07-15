@@ -216,7 +216,7 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   TRUSTED run-state (paths/cwd); do NOT pass untrusted / end-user-controlled text here.
  * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
  *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
- * @property {{sensor: (result: any, ctx: {task: string, context: string|undefined, contract: string|null}) => (Verdict|Promise<Verdict>), maxIterations?: number, temperatures?: number[]}} [refineLeaf]
+ * @property {{sensor: (result: any, ctx: {task: string, context: string|undefined, contract: string|null}) => (Verdict|Promise<Verdict>), maxIterations?: number, temperatures?: number[], rejectedBuffer?: boolean}} [refineLeaf]
  *   (Opt-in, BA-8 / relayfact F17) Turn a DEFINITE LEAF (a node that is offered no `spawn_child` — `simple`
  *   tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass, so a failed
  *   slice can self-correct. `sensor` is a DETERMINISTIC close (test/compile/lint — NOT a model judge, R-S8) that
@@ -225,13 +225,29 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   (`temperatures`, default `[0.2,0.7,1.0]`) — the live-validated lever that lets a weak model escape a
  *   repeat-the-same-mistake rut (`poc/ba8-leaf-refine.mjs`: 0/5 → 2-3/5; flat temp recovers 0/5). On a
  *   temperature-fixed model (BA-10) the provider drops the param, `receipts.refineLeaf.temperatures` records
- *   `null`, and the fed-back gap critique carries recovery alone. `maxIterations` defaults to
+ *   `null`, and the fed-back gap critique carries recovery alone — UNLESS the rejected-attempt buffer engages
+ *   (below). `maxIterations` defaults to
  *   `temperatures.length`; the REAL bound is bareguard (each attempt is gate-checked + metered). CARRIES DOWN the
  *   tree (preserved by `forChild`), so it engages at the leaves of a Family-A decomposition. Recovery is PARTIAL
  *   (a stubborn blind spot may persist) — `receipts.refineLeaf.passed` reports honestly. Does NOT apply to a node
  *   that delegates (its children + the tree verify own quality), nor to the scan/fanout/partition dispatch paths.
  *   Absent ⇒ a leaf is a single pass (byte-identical to pre-BA-8). An error-keyed `recall` is the CALLER's tool
  *   (`opts.tools`) keyed off the fed-back critique — bareagent stays litectx-agnostic.
+ *   **Sensor integrity (RSI-learnings #1/#5, "audit the close"):** the `sensor` MUST judge the RETURNED result
+ *   (tamper-proof — e.g. build/run the returned string in an isolated context, as `poc/ba8-leaf-refine.mjs` does),
+ *   NEVER a worker side-effect a worker with edit tools could GAME (writing a passing file then returning junk, or
+ *   editing the failing test itself). A gameable close is the reward-hacking surface every RSI system in the field
+ *   got bitten by; the loop optimizes against WHATEVER the sensor reads, so keep it outside what the worker can write.
+ *   **`rejectedBuffer` (BA-14):** a SkillOpt-shaped rejected-attempt buffer — instead of only the LATEST critique,
+ *   surface the model's OWN prior failed attempts verbatim ("you wrote these, they failed X — write something
+ *   STRUCTURALLY DIFFERENT"). This is DIRECTED diversity (attack the specific repeated mistake), where escalation
+ *   is RANDOM diversity; the two are ANTAGONISTIC (`poc/ba14b-temp-with-buffer.mjs`: temperature monotonically
+ *   degrades the buffer, 100%→70%→50% across 0.2/0.7/1.0), so when the buffer engages the retry temperature is
+ *   HELD at `temperatures[0]` (flat-low), never escalated. `true` = force on (also on temperature-accepting
+ *   models); `false` = force off (pure BA-8 escalation); UNSET = ADAPTIVE — engage only once a prior attempt's
+ *   temperature was dropped (a temperature-fixed model, BA-10, where escalation is inert and the buffer is the
+ *   sole lever — `poc/ba14-rejected-buffer.mjs`: flat-temp 50%→100%). `receipts.refineLeaf.rejectedBuffer`
+ *   reports whether any iteration injected it. Bounded by `maxIterations` (the buffer never outgrows it).
  * @property {string} [contract] - Definition of done (A3). When present, the verifier grades against THIS,
  *   not the loose task, and verification always runs.
  * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate]
@@ -293,10 +309,12 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {string} [blocker] - (BA-11) set to `'governance-deny'` when this node stopped because its Loop
  *   short-circuited a consecutive-policy-deny spin (not a model failure). Mirrors `RecurseResult.blocker`.
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
- * @property {{iterations: number, passed: boolean, temperatures: (number|null)[]}} [refineLeaf] - (BA-8) when this
- *   leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
+ * @property {{iterations: number, passed: boolean, temperatures: (number|null)[], rejectedBuffer: boolean}} [refineLeaf] - (BA-8) when
+ *   this leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
  *   passed (false = honest non-recovery, not a faked success). `temperatures` are the EFFECTIVE per-attempt temps
  *   (BA-10): a `null` marks an attempt the model ran at its DEFAULT because it rejected the requested temperature.
+ *   `rejectedBuffer` (BA-14): whether any iteration injected the rejected-attempt buffer (prior failed attempts
+ *   surfaced verbatim); when true the effective temps are held flat at `temperatures[0]` (ba14b antagonism).
  * @property {string|null} model
  * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
  *   or null/absent for a plain reasoning node.
@@ -608,10 +626,25 @@ async function recurse(task, ctx = {}, opts = {}) {
 async function recurseRefineLeaf(task, ctx, opts, state) {
   const { provider, system, handleTools, depth, critical, node, sensor } = state;
   node.model = provider.model || null;
-  const cfg = /** @type {{maxIterations?: number, temperatures?: number[]}} */ (opts.refineLeaf || {});
+  const cfg = /** @type {{maxIterations?: number, temperatures?: number[], rejectedBuffer?: boolean}} */ (opts.refineLeaf || {});
   const temps = Array.isArray(cfg.temperatures) && cfg.temperatures.length ? cfg.temperatures : DEFAULT_REFINE_TEMPS;
   const maxIterations = Number.isInteger(cfg.maxIterations) && /** @type {number} */ (cfg.maxIterations) > 0
     ? /** @type {number} */ (cfg.maxIterations) : temps.length;
+  // BA-14 rejected-attempt buffer: surface the model's OWN prior failed attempts verbatim ("you wrote these,
+  // they failed X — write something DIFFERENT") — a SkillOpt-shaped directed-diversity lever. `rejectedBuffer`:
+  // `true` = force on (also on temperature-accepting models); `false` = force off; unset = ADAPTIVE (engage only
+  // once a prior attempt's temperature was DROPPED, i.e. a temperature-fixed model where BA-8 escalation is inert
+  // and the buffer is the only lever — ba14 D>C). Escalation and the buffer are ANTAGONISTIC (ba14b: temp
+  // monotonically degrades the buffer 100→70→50% across 0.2/0.7/1.0), so when the buffer engages we HOLD temps[0].
+  const bufferForced = cfg.rejectedBuffer === true;
+  const bufferDisabled = cfg.rejectedBuffer === false;
+  let bufferUsed = false; // receipt: did any iteration actually inject the ledger?
+  const LEDGER_ENTRY_CAP = 600, LEDGER_WHY_CAP = 400;
+  const formatLedger = (/** @type {Array<{result: any, verdict: any}>} */ history) => history.map((h, i) => {
+    const code = String(h.result == null ? '' : h.result).replace(/```[a-zA-Z]*\n?/g, '').trim().slice(0, LEDGER_ENTRY_CAP);
+    const why = h.verdict && typeof h.verdict.critique === 'string' ? h.verdict.critique.slice(0, LEDGER_WHY_CAP) : '';
+    return `--- Rejected attempt ${i + 1} (already failed — do NOT reproduce) ---\n${code}${why ? `\nFailed: ${why}` : ''}`;
+  }).join('\n\n');
 
   // A refine leaf runs N Loops, so its receipts.tokens SUMS every attempt's spend (not just the last) — the
   // honest cost of the node. The 4-tier tokens object (`{input,output,cacheCreation,cacheRead}`, loop.js) is flat
@@ -632,8 +665,16 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
   const effectiveTemps = [];
   // One attempt = a fresh leaf Loop (no spawn tool: a retry is a direct correction, not a re-decomposition) at the
   // iteration's temperature, with the GAP fed forward as fresh feedback. A governance halt → throw so refine stops.
-  const attempt = async ({ iteration, critique }) => {
-    const temperature = temps[Math.min(iteration, temps.length - 1)];
+  const attempt = async ({ iteration, critique, history }) => {
+    const hist = Array.isArray(history) ? history : [];
+    // ADAPTIVE trigger: a prior attempt whose temperature the model rejected (BA-10) records `null` in
+    // effectiveTemps → escalation is inert on this (temperature-fixed) model, so engage the buffer. Forced-on
+    // engages regardless (incl. temperature-accepting models). Needs ≥1 prior attempt to have something to buffer.
+    const tempDropped = effectiveTemps.some((t) => t === null);
+    const useBuffer = hist.length > 0 && !bufferDisabled && (bufferForced || tempDropped);
+    // ba14b: temperature is antagonistic to the buffer's directed diversity — HOLD temps[0] when it engages;
+    // otherwise escalate (BA-8, the no-memory lever). On a temperature-fixed model both collapse to the default.
+    const temperature = useBuffer ? temps[0] : temps[Math.min(iteration, temps.length - 1)];
     const loop = new Loop({
       provider, system,
       policy: ctx.policy || undefined,
@@ -642,9 +683,15 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       throwOnError: false,
     });
     const base = withContext(task, opts.context);
-    const userText = critique
-      ? `${base}\n\nYour previous attempt FAILED these checks:\n${critique}\n\nReturn a corrected result that passes ALL of them.`
-      : base;
+    let userText;
+    if (useBuffer) {
+      bufferUsed = true;
+      userText = `${base}\n\nYou have already tried the following and each FAILED. Do NOT reproduce them — write a STRUCTURALLY DIFFERENT result that passes ALL checks:\n\n${formatLedger(hist)}`;
+    } else if (critique) {
+      userText = `${base}\n\nYour previous attempt FAILED these checks:\n${critique}\n\nReturn a corrected result that passes ALL of them.`;
+    } else {
+      userText = base;
+    }
     const out = await loop.run([{ role: 'user', content: userText }], handleTools, { ctx: auditSafeCtx(ctx, { depth }), temperature });
     // `temperatureDropped` is set on the Loop result only when the model rejected the requested temperature
     // (BA-10); it's absent on the error/halt return shapes, so read it through a narrow cast.
@@ -667,7 +714,7 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     // `temperatures` = the EFFECTIVE temps (BA-10): a `null` marks an attempt whose requested temperature the
     // model rejected and ran at its default — so the receipt never claims a value the model ignored. On a
     // temperature-accepting model this equals the requested `temps.slice(0, iterations)` (byte-identical receipt).
-    node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: effectiveTemps.slice(0, outcome.iterations) };
+    node.refineLeaf = { iterations: outcome.iterations, passed: !!(outcome.verdict && outcome.verdict.pass), temperatures: effectiveTemps.slice(0, outcome.iterations), rejectedBuffer: bufferUsed };
     const result = outcome.result;
 
     // Optional rubric layer on top of the deterministic sensor (RC-7): forced for critical, or a contract/override.

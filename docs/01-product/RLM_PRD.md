@@ -1257,6 +1257,52 @@ bareagent's) (`UPSTREAM-FIXES.md` BA-11 / `FINDINGS.md` F35).
   `incomplete`, `blocker:'governance-deny'`, stopped at 3 denials + 1 read — no burn). +10 mutation-proven tests
   (threshold off-by-one, streak reset, blocker label), full suite **741 pass / 0 fail / 2 skipped**.
 
+**Added (RSI-learnings fold, 2026-07-15) → `[Unreleased]`.** NOT adopter-reported: the `bareloop`
+`RSI-LEARNINGS.md` corpus (SkillOpt's "rejected-edit buffer" + the "delivery ≠ conversion" finding) mapped onto
+`refineLeaf` as a new directed-diversity lever.
+
+- **(BA-14) `refineLeaf` fed only the LATEST critique forward, never the model's own prior FAILED attempts** — so a
+  temperature-fixed model (BA-10, escalation inert) had only the single critique to escape a fixation rut, and a
+  weak model that regenerates byte-identical wrong code stayed stuck. **Added `opts.refineLeaf.rejectedBuffer`:** a
+  SkillOpt-shaped buffer surfacing the model's prior failed attempts VERBATIM ("you wrote these, they failed X —
+  write something structurally DIFFERENT"). `refine.js` now threads the full `history` into its `attempt` callback
+  (the missing seam). **Trigger (user-chosen adaptive + override):** `true` = force on; `false` = force off (pure
+  BA-8 escalation); UNSET = ADAPTIVE — engage only once a prior attempt's temperature was dropped (the temp-fixed
+  model, where escalation is inert and the buffer is the sole lever). **Load-bearing measured finding — temperature
+  and the buffer are ANTAGONISTIC, not complementary:** escalation is RANDOM diversity, the buffer is DIRECTED
+  diversity, and random noise drowns the directed signal. `poc/ba14b-temp-with-buffer.mjs` (10 trials, gpt-4o-mini)
+  measured a **monotonic** degradation of the buffer as temperature rises — **flat-0.2 100% → 0.7 70% → 1.0 50%**
+  (escalate 90%) — so when the buffer engages the retry temperature is HELD at `temps[0]`, never escalated. This
+  REFINES BA-10's "temperature is *secondary*": with a buffer it is actively HARMFUL, not merely inert. Efficacy on
+  the rut: `poc/ba14-rejected-buffer.mjs` — flat-temp + buffer recovered a temperature-fixed rut critique-only
+  could not (**50%→100%**). **Verified-shipped LIVE on real `claude-sonnet-5`** (`poc/ba14-verify-shipped.mjs`, the
+  temp-fixed production model, per the BA-10 lesson): the adaptive buffer engaged **6/6** on retries, temps
+  recorded `[null,…]`, the ledger (marker + prior code) reached the Anthropic wire, bounded, no collapse — efficacy
+  an **HONEST NULL** (sonnet recovers from buffer AND critique equally: the buffer's lift is a WEAK-model /
+  fixation phenomenon, and it is cost-neutral where the model doesn't fixate — vindicating the ADAPTIVE, not
+  always-on, default). `receipts.refineLeaf.rejectedBuffer` reports whether it engaged. **Deferred (evidence-gated,
+  NOT dropped):** flat-low+buffer (**16/16** across ba14+ba14b) beat shipped escalate+critique (**3/6**) on the
+  weak model, hinting the buffer may DOMINATE escalation universally — but retiring a live-validated mechanism
+  (BA-8) on one model + one task is the "toy-fixtures" trap in reverse; the default flip (buffer-on + temp-low,
+  temperature demoted to the caller's creative/rubric exploration knob) waits on a SECOND deterministic task +
+  broader model coverage. +2 mutation-proven tests (adaptive-on-temp-fixed, forced-on-flat-temp, forced-off), full
+  suite green.
+
+- **Principle (RSI-learnings #11, "structural edits beat parameter tuning"):** the field's Bilevel-Autoresearch
+  result — mechanism-level edits gained ~5× over parameter retuning under crisp objectives — is reproduced in
+  miniature by BA-14 itself: a **structural** lever (surface the prior failed attempts) beat a **parameter** lever
+  (temperature) on the same rut, and the two even proved antagonistic. General guidance for future `recurse` seams:
+  when a leaf/loop is stuck, prefer changing the SHAPE of what the model sees (what feedback, which prior state,
+  which decomposition) over tuning a knob (temperature, sample count). Applies only under a crisp deterministic
+  close — a rubric/soft close doesn't yet earn it.
+- **Contract (RSI-learnings #1/#5, "audit the close"):** a `refineLeaf.sensor` MUST judge the RETURNED result
+  (tamper-proof), never a worker side-effect a worker with edit tools could game (write a passing file then return
+  junk; edit the failing test). The loop optimizes against whatever the sensor reads; a gameable close is the
+  reward-hacking surface every RSI system in the corpus got bitten by. Now stated in the `refineLeaf` JSDoc,
+  README, and adopter context. This is a contract note, not a new primitive — bareagent can't enforce isolation of
+  a caller-supplied sensor, only document the requirement (mirrors bareloop's "judge outside the loop, no write
+  access").
+
 ---
 
 ## Source & cross-refs

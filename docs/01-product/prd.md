@@ -802,7 +802,7 @@ re-litigated unless the user explicitly asks.
 
 > **Coverage note.** Between v0.16.2 and v0.27.0 the eval-assist suite
 > (0.17–0.19), the RLM/`recurse` primitive (0.20–0.24), and the
-> BA-8/9/10/11 `recurse` seams (0.22–0.25) were decided in their own PRDs —
+> BA-8/9/10/11/14 `recurse` seams (0.22–0.30) were decided in their own PRDs —
 > `eval-assist-prd.md` and `RLM_PRD.md`, which remain the canonical record for
 > those. The entries below fold the *former standalone side-docs*
 > (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`)
