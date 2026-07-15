@@ -1,7 +1,7 @@
 'use strict';
 
 const { ToolError, HaltError } = require('./errors');
-const { isTruncated } = require('./provider-stop-reason');
+const { classifyStopReason } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Provider} Provider */
 /** @typedef {import('../types').Message} Message */
@@ -346,7 +346,7 @@ class Loop {
    *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
    *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -363,6 +363,13 @@ class Loop {
    *
    *   A caller-initiated `stop()` returns `error: null` — a deliberate stop is not a fault. (It previously
    *   fell through to the hard-round-limit return and reported that safety warning as its `error`.)
+   *
+   *   BA-13 — `stopReason` (the round's NEUTRAL stop reason) is surfaced on EVERY return, and non-clean
+   *   terminal rounds are error-tagged instead of laundered into `error: null`: a safety `refusal` returns
+   *   `error: 'refusal'` and a `context_exceeded` returns `error: 'context_exceeded'`, both with partial
+   *   text preserved (BA-5). BEHAVIOR CHANGE: a refused round that previously returned `error: null` with
+   *   empty text now returns `error: 'refusal'` — the point of the fix. `pause_turn` is NOT terminal: the
+   *   loop resumes (bounded by the hard round limit / gate). `error` stays the sole success signal.
    * @throws {Error} `[Loop] Tool is missing a name` — when a tool has no name or a non-string name.
    * @throws {Error} `[Loop] Tool "X" is missing an execute() function` — when execute is not a function.
    * @throws {Error} `[Loop] Tool "X" has invalid parameters` — when parameters is not an object.
@@ -427,6 +434,12 @@ class Loop {
     // The caller decides what a partial result is worth; the library must not decide it is worth nothing.
     // Stays '' when the model never produced text (nothing to preserve — we never invent a placeholder).
     let lastText = '';
+    // BA-13: the NEUTRAL stop reason of the most recent completed round (post-provider-normalization).
+    // Surfaced on EVERY return so a caller can branch on WHY a run ended, not just its `error` tag — the
+    // load-bearing companion to the classifier (a terminal `error` says "not a clean finish"; `stopReason`
+    // says which kind). Stays null until the first round completes, and across a provider error / a
+    // pre-round stop() it holds the last round's value (or null if none ran).
+    let lastStopReason = null;
     // BA-10: sticky across rounds — true if ANY round's `temperature` was dropped by the model (400,
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
@@ -463,7 +476,7 @@ class Loop {
         sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
         this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
         this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
       return null;
     };
@@ -691,7 +704,7 @@ class Loop {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
         // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -700,6 +713,9 @@ class Loop {
       // is the text most worth keeping). A tool-call-only round carries no text, so hold the last non-empty
       // one rather than letting a silent round erase an earlier account.
       if (typeof result.text === 'string' && result.text.trim() !== '') lastText = result.text;
+      // BA-13: capture this round's neutral stop reason for surfacing on the run's return (every exit
+      // path reads lastStopReason). Non-string / absent ⇒ null (the provider's pre-BA-6 degrade).
+      lastStopReason = typeof result.stopReason === 'string' ? result.stopReason : null;
       if (result.temperatureDropped) temperatureDropped = true;
       // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
       // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
@@ -745,21 +761,48 @@ class Loop {
         }
       }
 
-      // BA-6: the API CUT THIS ROUND OFF at the output cap. It is NOT a finished turn, and it must not
-      // reach the "no tool calls ⇒ final answer" rule below — that rule is what laundered a truncation
-      // into a clean `error: null` completion, indistinguishable from a model that chose to stop.
+      // BA-13: classify this round's terminal signal against the neutral stop-reason vocabulary. BA-6
+      // short-circuited exactly one non-clean reason (max_tokens); this gate is the general form. It sits
+      // AFTER metering (the tokens were really spent — the gate must see them) and BEFORE tool execution,
+      // which is the load-bearing half: a non-final round's tool calls were cut off mid-generation, so
+      // their arguments are missing keys. Executing one is exactly how BA-4 emptied a 1789-line file
+      // (`shell_write` reached the fs with no `content`). A COMPLETE call always arrives tagged 'tool_use',
+      // never a truncation/refusal (measured on the real API, poc/ba6-stop-reason-mapping.mjs), so refusing
+      // the tool calls of ANY non-clean terminal round discards nothing legitimate and closes the data-loss
+      // path for EVERY tool — the BA-4 protocol-layer closure applied uniformly (see classifyStopReason).
       //
-      // Placed AFTER metering (the tokens were really spent — the gate must see them) and BEFORE tool
-      // execution, which is the load-bearing half: a truncated round's tool calls were cut off
-      // mid-generation, so their arguments are missing keys. Executing one is exactly how BA-4 emptied a
-      // 1789-line file (`shell_write` reached the fs with no `content`). A COMPLETE call always arrives
-      // tagged 'tool_use', never 'max_tokens' (measured on the real API, poc/ba6-stop-reason-mapping.mjs),
-      // so refusing here discards nothing legitimate and closes the data-loss path for EVERY tool.
-      //
-      // We report; the caller decides. No auto-retry at a bigger cap: that doubles spend against a budget
-      // the gate is enforcing, and the right recovery (raise the cap? split the task? shorten it?) is the
-      // caller's call, not the library's. `lastText` (BA-5) preserves the partial work either way.
-      if (isTruncated(result.stopReason)) {
+      // We report; the caller decides. No auto-retry: that doubles spend against the gate's budget, and the
+      // right recovery (raise the cap? re-gate the refusal? shorten the context?) is the caller's, not the
+      // library's. `lastText` (BA-5) preserves the partial work on every terminal leg.
+      const terminal = classifyStopReason(result.stopReason);
+      if (terminal === 'resume') {
+        // BA-13: `pause_turn` — a RESUMABLE server-side tool pause (the API's server-tool loop hit its
+        // per-turn iteration cap mid-turn). NOT a finish, NOT an error. Resuming REQUIRES re-sending the
+        // paused assistant turn: the provider detects the trailing server-tool block and continues where
+        // it left off (the documented Anthropic pause_turn protocol — "re-send the user message and
+        // assistant response"). A bare `continue` WITHOUT appending re-sends byte-identical input, so the
+        // server restarts the turn from scratch and pauses again, spinning to HARD_ROUND_LIMIT (100 paid
+        // calls) instead of resuming. So append the assistant turn — its partial text plus the
+        // provider-native server-tool/thinking blocks (which the Anthropic provider replays via
+        // providerBlocks) — BEFORE continuing, exactly as the tool-execution path pushes its assistant
+        // turn. Only push when there is something to carry: an empty assistant turn (no text, no blocks)
+        // is wire-invalid, and a pause with no partial output cannot be advanced anyway — HARD_ROUND_LIMIT
+        // (or the gate) bounds that pathological case. No client tool_calls are pushed: a server pause
+        // does not carry an unpaired client call, and pushing one would orphan it (wire-invalid) — the
+        // same BA-4 refusal principle as the other non-clean terminal legs.
+        const hasText = typeof result.text === 'string' && result.text.trim() !== '';
+        if (hasText || result.providerBlocks) {
+          msgs.push({ role: 'assistant', content: result.text || null, ...(result.providerBlocks && { providerBlocks: result.providerBlocks }) });
+        }
+        this._safeEmit({ type: 'loop:resume', data: { round, stopReason: lastStopReason } });
+        continue;
+      }
+      if (terminal) {
+        // terminal ∈ {'truncated','refusal','context_exceeded'} — a non-clean terminal round. Error-tag it
+        // (NOT just surface stopReason): `recurse`'s worker path and the bareloop adopter both branch on
+        // `error`, and 0.27.0's "error is the sole success signal" invariant must stay true — an
+        // `error:null` + `stopReason:'refusal'` would re-breed BA-6 for these legs.
+        const errorTag = terminal === 'truncated' ? 'truncated:max_tokens' : terminal;
         const dropped = (result.toolCalls || []).length;
         // Seal the transcript with the partial text only. Deliberately NOT the tool_calls: pushing a call
         // we refuse to execute would orphan it (a tool_call with no tool_result is a wire-invalid
@@ -767,8 +810,8 @@ class Loop {
         if (typeof result.text === 'string' && result.text.trim() !== '') {
           msgs.push({ role: 'assistant', content: result.text });
         }
-        this._safeEmit({ type: 'loop:done', data: { text: lastText, truncated: true, droppedToolCalls: dropped, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: 'truncated:max_tokens', msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+        this._safeEmit({ type: 'loop:done', data: { text: lastText, ...(terminal === 'truncated' && { truncated: true }), terminal, stopReason: lastStopReason, droppedToolCalls: dropped, cost: totalCost } });
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: errorTag, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       // No tool calls — LLM gave a final text response
@@ -788,7 +831,7 @@ class Loop {
           try { await flush(msgs, ctx); }
           catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
         }
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       // Execute tool calls
@@ -897,7 +940,7 @@ class Loop {
               sealDanglingToolCalls(msgs, `[halted:${denyTag}]`);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
               this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
-              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
             }
             continue;
           }
@@ -971,7 +1014,7 @@ class Loop {
         // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
         // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
         this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
       throw err;
     }
@@ -1001,20 +1044,20 @@ class Loop {
             const rule = err.rule || 'unknown';
             this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
             this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
           }
           this._reportError('trim-flush', err, { phase: 'stop' });
         }
       }
       this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
-      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: lastText, warning, cost: totalCost } });
-    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
+    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
   }
 
   /**
@@ -1087,7 +1130,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, msgs: Message[], metrics: RunMetrics, temperatureDropped?: boolean}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });

@@ -278,6 +278,37 @@ describe('recurse — router (assessComplexity as a hint, not a gate)', () => {
   });
 });
 
+// BA-13 — recurse INHERITS the Loop's terminal-signal fix for free. Its worker path branches on
+// `out.error` (the :527 catch-all), never on `out.stopReason`. Before the Loop error-tagged refusal, a
+// safety-refused sub-task returned out.error=null and was scored CONVERGED (result:'') up the tree. Once
+// the Loop returns error:'refusal', the SAME catch-all turns it into an honest {incomplete} — no recurse
+// change. An inline stub is used because scriptedProvider's wrapper does not thread stopReason.
+describe('recurse — BA-13: a refused worker is honest-incomplete, not silently converged', () => {
+  const stub = (stopReason, text) => ({
+    model: 'stub-1',
+    async generate() { return { text, toolCalls: [], usage: { inputTokens: 10, outputTokens: 0 }, stopReason }; },
+  });
+
+  it('refusal → {incomplete}, NOT a converged empty result (was result:"")', async () => {
+    const out = await recurse('say the word hello', { provider: stub('refusal', '') }, { maxDepth: 1 });
+    assert.equal(out.incomplete, true, 'a safety refusal must not score as convergence');
+    assert.equal(out.result, undefined, 'and must not surface a fake converged result');
+  });
+
+  it('context_exceeded → {incomplete} as well', async () => {
+    const out = await recurse('say the word hello', { provider: stub('context_exceeded', 'partial') }, { maxDepth: 1 });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.best, 'partial', 'BA-5: the partial worker text is preserved as best');
+  });
+
+  // NEGATIVE CONTROL: a genuine clean finish still converges — the fix must not turn every worker incomplete.
+  it('NEGATIVE CONTROL: a clean end_turn worker still converges', async () => {
+    const out = await recurse('say the word hello', { provider: stub('end_turn', 'hello') }, { maxDepth: 1 });
+    assert.equal(out.incomplete, undefined, 'a real finish must still converge');
+    assert.equal(out.result, 'hello');
+  });
+});
+
 describe('recurse — Family A decomposition (NB-4 spawn A-tool)', () => {
   it('the model spawns a child via the A-tool; the parent synthesizes the returned result', async () => {
     const sp = scriptedProvider(decomposingHandler());

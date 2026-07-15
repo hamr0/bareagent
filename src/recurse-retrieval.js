@@ -16,7 +16,7 @@
 //
 // THE CORPUS FOR SCAN IS A GENERIC ARRAY SLICE-SOURCE (`opts.corpus`), NOT litectx: litectx has no exhaustive,
 // rank-free enumerate verb today (every read is FTS-gated). The "corpus that already LIVES in litectx" case
-// waits on the litectx `enumerate` verb (docs/01-product/litectx-enumerate-spec.md) and drops in behind this
+// waits on the litectx `enumerate` verb (docs/01-product/prd.md) and drops in behind this
 // same slice-source socket with ZERO recurse changes — the same backend-agnostic stance as `remember`'s Store
 // socket. Composes AROUND a Loop; NEVER imported by loop.js.
 
@@ -326,7 +326,7 @@ const ENUM_PAGE = 200;
 /**
  * Build a SCAN slice-source backed by a litectx-RESIDENT corpus (facts/episodes the agent already accrued) —
  * the §10-step-7 deferral un-blocked by litectx 0.26's `enumerate` verb (spec:
- * docs/01-product/litectx-enumerate-spec.md). Returns the generic async slice-source recurse's scan reads: a
+ * docs/01-product/prd.md). Returns the generic async slice-source recurse's scan reads: a
  * `() => Promise<Slice[]>` that pages through EVERY row of `kind` via `enumerate` (exhaustive — the rank-free
  * read `recall` structurally cannot do) and maps each to `{id: item.path, text: item.body}`. recurse stays
  * litectx-agnostic: it depends on this source SHAPE, never on litectx (same stance as `remember`'s Store
