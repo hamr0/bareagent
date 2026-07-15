@@ -2,6 +2,26 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.29.0] - 2026-07-15
+
+### Added
+
+- **`shell_edit` — anchored exact-string replace, the surgical alternative to whole-file `shell_write` (bareloop's BA-13).**
+
+  > **Numbering note.** This is **bareloop's** BA-13, a *different* item from bare-agent's own BA-13 in 0.28.0 (the termination classifier). The two ask-numbering schemes aligned through BA-1/4/5/6/7/10/12 and diverged at 13 — same week, two gaps. It's called `shell_edit` throughout bare-agent's records to avoid the collision.
+
+  `shell_write` is whole-file: to change one line of an 800-line file the model must EMIT all 800 lines as tool-call JSON. That is an OUTPUT-token tax proportional to file size (output is the expensive token class), paid on **every** revision, and the maximal broken-tree surface — a truncated rewrite mangles the 799 lines it never meant to touch (the BA-4/BA-6 truncation class). The read side already split correctly (a ranged read is litectx's `get`); the write side had no ranged counterpart, and it can't be litectx's — litectx owns the index, not the tree mutation.
+
+  `shell_edit({ path, oldText, newText })` emits only the anchor and its replacement. `oldText` must occur **exactly once**. Semantics, each a lesson already paid for:
+  - **Anchor miss (0 or 2+ matches) is a refusal RETURNED AS THE TOOL RESULT**, not a throw — the loop continues and the model re-anchors, and the refusal **names the count** so a widened retry is a distinct call. (Deliberate tradeoff: a result does not feed the Loop's `maxIdenticalToolErrors` spin guard, so a *byte-identical* repeated miss is bounded by `maxTurns`/budget rather than short-circuited; a widened anchor is a different call and recovers naturally. This matches the ask's explicit "refusal, not a throw" contract.)
+  - **BA-4 param guards from birth.** Missing/empty `oldText` or missing/non-string `newText` **throw** at the tool boundary (an absent param is the truncated-call signature — the same shape that made `shell_write` zero files in BA-4, guarded here from the start); an explicit `newText: ""` is a legal deletion. fs-layer errors (missing file, a directory) throw, the same surface as `shell_read`.
+  - **Atomic.** Read → splice in memory → write a sibling temp (same filesystem, so `rename` is atomic) carrying the original's mode → rename over the original. Any throw before the rename leaves the original byte-identical and cleans the temp up, so a reader never sees a partial file and an edit can't silently drop the executable bit.
+  - **Literal splice, NOT `String.replace`.** `.replace(oldText, newText)` interprets `$&` / `$1` / `` $` `` patterns in `newText` and would corrupt any edit whose replacement contains a `$`. `shell_edit` indexes and slices, so every byte of `newText` lands verbatim.
+  - **Compact receipt, no body echo:** `edited <path>: 1 replacement (-N/+M lines)` — never the file body (a body echo rebuilds the context bloat the whole feature exists to avoid).
+  - **Gate action `{ type: 'edit', path }`** flows through `wireGate` / `actionTranslator` exactly like `write`. bareguard's fs primitive already treats `edit` as a first-class action gated by `fs.writeScope` identically to `write` (source-verified against the shipped `node_modules/bareguard/src/primitives/fs.js:6,76-78`), so a consumer that fences `write` gets `edit` fenced by the same scope with **zero bareguard change**. This was the only real integration risk and it was cleared before a line was written.
+
+  `tools/shell.js` (new `editFile`, exported as `_editFile`), `examples/with-bareguard.mjs` (translator gains the `shell_edit → {type:'edit'}` case), `test/shell-tools.test.js` (+11, mutation-checked — the 7 fail-able acceptance criteria: economy mechanism, anchor miss returned as a result and driven through the Loop, ambiguous anchor names the count, BA-4 guards + `newText:""` deletion, gate integration with a **real** bareguard `Gate`, atomicity under an injected `writeFile`/`rename`/`chmod` failure, negative control that `shell_write` is unchanged, plus a literal-`$`-splice regression). The economy claim itself (criterion 1: a one-line edit costs < 500 output tokens versus > 8,000 for a whole-file `shell_write`) is **measured on the real API** in `poc/ba13-shell-edit-economy.mjs`, since output tokens cannot be counted offline: on `claude-sonnet-5`, the same one-line change to the same 800-line file cost **187 output tokens via `shell_edit` versus 31,402 via whole-file `shell_write` — 167.9× cheaper** on the write/edit round (both arms verified to have actually landed the correct edit with the other 799 lines byte-identical, so a "cheap" no-op cannot pass).
+
 ## [0.28.0] - 2026-07-15
 
 ### Changed

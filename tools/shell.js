@@ -7,6 +7,7 @@
  *   shell_read  — read a file or list a directory
  *   shell_grep  — regex search across files (JS regex, no grep/rg/findstr)
  *   shell_write — write/overwrite (or append to) a file, creating parent dirs (no shell)
+ *   shell_edit  — anchored exact-string replace: change one span without rewriting the whole file
  *   shell_run   — run a command via an argv array (no shell, allowlist-friendly on argv[0])
  *   shell_exec  — run a raw shell command with timeout + max buffer
  *
@@ -16,11 +17,13 @@
  * GATING WITH bareguard's fs/bash PRIMITIVES: these tools carry tool-named actions by default
  * (`{ type:'shell_write' }`), which match `tools.allowlist`/`tools.denylist` but do NOT activate the
  * `fs`/`bash` primitives — those need `action.type ∈ {read,write,edit,bash}` with `action.path`/`action.cmd`.
- * To gate `shell_write` by `fs.writeScope` (so a write outside the allowed root is denied BEFORE it touches
- * disk), translate it at the gate — see `examples/with-bareguard.mjs` for the `wireGate(gate, { actionTranslator })`
- * mapping (`shell_write` → `{ type:'write', path }`, `shell_read`/`shell_grep` → `{ type:'read', path }`,
- * `shell_run`/`shell_exec` → `{ type:'bash', cmd }`). A write tool alone is NOT auto-gated — validated by
- * poc/ba2-write-tool-gate.mjs (without the translator the out-of-scope write leaks).
+ * To gate `shell_write`/`shell_edit` by `fs.writeScope` (so a write outside the allowed root is denied BEFORE it
+ * touches disk), translate it at the gate — see `examples/with-bareguard.mjs` for the `wireGate(gate, { actionTranslator })`
+ * mapping (`shell_write` → `{ type:'write', path }`, `shell_edit` → `{ type:'edit', path }`, `shell_read`/`shell_grep`
+ * → `{ type:'read', path }`, `shell_run`/`shell_exec` → `{ type:'bash', cmd }`). bareguard gates `edit` by
+ * `fs.writeScope` identically to `write` (its FS primitive's `FS_TYPES` includes `edit`), so a consumer that
+ * fences `write` gets `edit` fenced by the same scope with ZERO extra config. A write/edit tool alone is NOT
+ * auto-gated — validated by poc/ba2-write-tool-gate.mjs (without the translator the out-of-scope write leaks).
  *
  * CAVEAT (applies to read AND write scopes): bareguard's `fs` primitive matches paths LEXICALLY (no
  * `realpath`/symlink resolution), so a symlink that lives INSIDE the allowed scope but points OUTSIDE it is
@@ -33,6 +36,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
 
@@ -125,6 +129,101 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
   if (append) await fs.appendFile(resolved, content, 'utf8');
   else await fs.writeFile(resolved, content, 'utf8');
   return `${append ? 'appended' : 'wrote'} ${bytes} bytes to ${resolved}`;
+}
+
+/**
+ * Anchored exact-string replace (BA-13) — the surgical counterpart to the whole-file `shell_write`.
+ * Changing one line of an 800-line file with `shell_write` forces the model to EMIT all 800 lines as
+ * tool-call JSON: an output-token tax ∝ file size (output is the expensive token class), paid on every
+ * revision, and the maximal broken-tree surface (a truncated rewrite mangles the 799 lines it never meant
+ * to touch — the BA-4/BA-6 truncation class). `shell_edit` emits only the anchor and its replacement.
+ *
+ * TWO error classes, deliberately split:
+ *   - ANCHOR failures (`oldText` matches 0 or 2+ times) RETURN a refusal string as a normal tool RESULT —
+ *     the loop continues and the model re-anchors, and the refusal names the count so the retry is a DISTINCT
+ *     call. (Tradeoff, chosen with eyes open: a result does NOT feed the Loop's `maxIdenticalToolErrors` spin
+ *     guard, so a model that repeats the byte-identical wrong anchor is bounded only by maxTurns/budget, not
+ *     short-circuited. A widened anchor is a different call and recovers naturally; the exact-repeat spin is
+ *     the rare degenerate case. This matches the ask's "refusal, not a throw" contract.)
+ *   - fs-layer errors (missing file, a directory) and BA-4 param-guard violations THROW at the tool boundary.
+ *
+ * BA-4 param guards (guarded from birth this time — cf. `shell_write` zeroing files on an absent arg):
+ * `oldText` a required NON-EMPTY string, `newText` a required string — both THROW when absent/wrong-type (an
+ * absent param is the truncated-call signature, never a silent default). Explicit `newText:""` is a legal
+ * deletion; an absent `newText` is not.
+ *
+ * ATOMIC: read → splice in memory → write a sibling temp (same filesystem, so `rename` is atomic) carrying
+ * the original's mode → rename over the original. Any throw before the rename leaves the original
+ * byte-identical and cleans the temp up, so a reader never sees a partial file, and an edit can't silently
+ * drop the executable bit.
+ *
+ * LITERAL splice, NOT `String.replace`: `.replace(oldText, newText)` interprets `$&`/`$1`/`` $` `` patterns in
+ * `newText` and would corrupt any edit whose replacement contains a `$`. We index + slice, so every byte of
+ * `newText` lands verbatim.
+ * @param {{path: string, oldText: string, newText: string, maxBytes?: number}} args
+ * @returns {Promise<string>}
+ */
+async function editFile({ path: rawPath, oldText, newText, maxBytes }) {
+  if (typeof rawPath !== 'string' || rawPath.length === 0) {
+    throw new Error('shell_edit requires a non-empty "path" string');
+  }
+  if (typeof oldText !== 'string' || oldText.length === 0) {
+    throw new Error(
+      'shell_edit requires a non-empty "oldText" string to anchor the edit — refusing to edit, the file is unchanged. '
+      + `Got ${oldText === undefined ? 'no oldText argument' : oldText === '' ? 'an empty string' : `oldText of type ${oldText === null ? 'null' : typeof oldText}`}.`,
+    );
+  }
+  if (typeof newText !== 'string') {
+    throw new Error(
+      'shell_edit requires a "newText" string (pass newText:"" to delete the anchored text) — refusing to edit, the file is unchanged. '
+      + `Got ${newText === undefined ? 'no newText argument' : `newText of type ${newText === null ? 'null' : typeof newText}`}`
+      + '. If your output was cut short, retry with the full newText.',
+    );
+  }
+
+  const resolved = path.resolve(expandHome(rawPath));
+  // fs-layer errors (ENOENT for a missing file, EISDIR for a directory) throw — same surface as shell_read.
+  const content = await fs.readFile(resolved, 'utf8');
+
+  // Literal, non-overlapping occurrence count (split on a string does no regex interpretation).
+  const occurrences = content.split(oldText).length - 1;
+  if (occurrences === 0) {
+    return `shell_edit: oldText not found in ${resolved} — no change made. Quote the exact text to replace `
+      + `(check whitespace and indentation), or read the file to re-anchor.`;
+  }
+  if (occurrences > 1) {
+    return `shell_edit: oldText occurs ${occurrences}× in ${resolved} — the anchor must match exactly once. `
+      + `Widen it with surrounding lines so it is unique. No change made.`;
+  }
+
+  const idx = content.indexOf(oldText);
+  const patched = content.slice(0, idx) + newText + content.slice(idx + oldText.length);
+
+  const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
+  const bytes = Buffer.byteLength(patched, 'utf8');
+  if (bytes > cap) {
+    throw new Error(`shell_edit result is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
+  }
+
+  // Atomic replace: a sibling temp (same dir → same filesystem → rename is atomic) with the original's mode.
+  const stat = await fs.stat(resolved);
+  const tmp = `${resolved}.shell_edit-${crypto.randomBytes(9).toString('hex')}.tmp`;
+  try {
+    // flag 'wx' (O_CREAT|O_EXCL) — never follow or clobber a pre-planted file/symlink at the temp path; a
+    // colliding name fails the write instead. Create owner-only (0o600) so the patched body — which may hold
+    // a secret from a sensitive source file — is never briefly world-readable in the window before chmod sets
+    // the original's real mode. (This temp pattern is new to shell_edit, so it carries its own hardening.)
+    await fs.writeFile(tmp, patched, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    await fs.chmod(tmp, stat.mode & 0o777);
+    await fs.rename(tmp, resolved);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+
+  const removed = oldText.split('\n').length - 1;
+  const added = newText.split('\n').length - 1;
+  return `edited ${resolved}: 1 replacement (-${removed}/+${added} lines)`;
 }
 
 // Probe the first 1KB for NUL bytes to skip binary files in grep walks.
@@ -454,6 +553,30 @@ function createShellTools() {
         writeFile(/** @type {any} */ (args)),
     },
     {
+      name: 'shell_edit',
+      description: 'Replace an exact, unique text span in a file — the surgical alternative to shell_write, which ' +
+        'rewrites the ENTIRE file. Give oldText (the exact text to replace — it must occur EXACTLY ONCE, so quote ' +
+        'enough surrounding lines to be unique) and newText (its replacement; pass "" to delete). Matched literally ' +
+        '(no regex; whitespace and indentation are significant). Returns a compact "edited <path>: 1 replacement" ' +
+        'receipt, never the file body. If oldText matches 0 or 2+ times the file is left unchanged and the reason is ' +
+        'returned so you can re-anchor. The file must already exist. No shell — gate by path with an fs.writeScope ' +
+        'policy (translate to {type:"edit"}).',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File to edit. ~ expands to home. The file must already exist.' },
+          oldText: { type: 'string', description: 'Exact text to find — must occur exactly once. Quote surrounding lines to disambiguate. Matched literally (no regex); whitespace and indentation are significant.' },
+          newText: { type: 'string', description: 'Replacement text, inserted verbatim (a literal splice — $ is not special). Pass "" to delete the anchored text. Required — a call without it is REJECTED, not treated as a deletion.' },
+          maxBytes: { type: 'integer', description: 'Reject if the resulting file would exceed this many bytes (default 5242880).' },
+        },
+        required: ['path', 'oldText', 'newText'],
+      },
+      // The args are model-authored and UNTRUSTED — oldText/newText may be absent (an output-token-capped
+      // generation), so the boundary type stays loose and editFile enforces the BA-4 contract at runtime.
+      execute: async (/** @type {{path: string, oldText?: string, newText?: string, maxBytes?: number}} */ args) =>
+        editFile(/** @type {any} */ (args)),
+    },
+    {
       name: 'shell_run',
       description: 'Run a command with an argv array (no shell, no interpolation) and return {stdout, stderr, code, timedOut}. Use this when a policy allowlist needs to match on argv[0] — no shell metacharacter injection is possible. Default timeout 30s, max output 1MB.',
       parameters: {
@@ -493,4 +616,4 @@ function createShellTools() {
   return { tools };
 }
 
-module.exports = { createShellTools, _grepCore, _writeFile: writeFile };
+module.exports = { createShellTools, _grepCore, _writeFile: writeFile, _editFile: editFile };
