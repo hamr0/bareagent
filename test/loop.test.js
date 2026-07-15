@@ -1315,13 +1315,16 @@ describe('Loop — BA-6: a TRUNCATED round must never read as a completed one', 
     assert.equal(result.msgs.filter((m) => m.role === 'tool').length, 0, 'and no orphan tool result');
   });
 
-  // pause_turn is a RESUMABLE server-tool state, and context_exceeded is a different failure.
-  // Folding either into the truncation check would break flows that are working as designed.
-  it('does NOT treat pause_turn or refusal as a truncation', async () => {
-    for (const stopReason of ['pause_turn', 'refusal', 'stop_sequence']) {
+  // refusal / context_exceeded / stop_sequence are all non-truncation stop reasons — none may be
+  // MISLABELLED as an output-cap truncation. Their BA-13 terminal handling (error-tag vs clean finish
+  // vs resume) is exercised in the BA-13 block below; here we only lock that the `truncated:max_tokens`
+  // tag stays reserved for max_tokens. (pause_turn is omitted — it resumes rather than terminating, so
+  // a single-response stub would spin to the hard limit; it has its own resume test below.)
+  it('never mislabels a non-truncation stop reason as truncated:max_tokens', async () => {
+    for (const stopReason of ['refusal', 'context_exceeded', 'stop_sequence']) {
       const provider = scripted(() => ({ text: 'x', toolCalls: [], stopReason, usage }));
       const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
-      assert.equal(result.error, null, `${stopReason} is not an output-cap truncation`);
+      assert.notEqual(result.error, 'truncated:max_tokens', `${stopReason} must not read as a truncation`);
     }
   });
 
@@ -1333,6 +1336,114 @@ describe('Loop — BA-6: a TRUNCATED round must never read as a completed one', 
       .run([{ role: 'user', content: 'go' }]);
     assert.equal(seen.length, 1, 'the truncated round still forwards its usage to the gate');
     assert.equal(result.metrics.tokens.output, 99, 'and is counted by the meter');
+  });
+});
+
+// BA-13 — the generalization of BA-6. max_tokens was the ONE non-clean stop reason the Loop acted on;
+// refusal / context_exceeded fell through the "no tool calls ⇒ final answer" rule and laundered into an
+// error:null empty success (the caller — and recurse up the tree — read a safety refusal as convergence).
+// The fix routes every terminal reason through classifyStopReason and surfaces stopReason on EVERY return.
+describe('Loop — BA-13: non-clean terminal stop reasons are error-tagged, not laundered', () => {
+  const { HaltError } = require('../src/errors');
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  // fn receives the 1-based call index, so a two-call script can return pause then a clean finish.
+  const scripted = (fn) => ({ model: 'stub-1', async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  // The core defect: a refusal returned error:null — indistinguishable from a real (empty) answer.
+  it('refusal → error:"refusal" with partial text preserved (was error:null)', async () => {
+    const provider = scripted(() => ({ text: 'I can’t help with that.', toolCalls: [], stopReason: 'refusal', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'recite the lyrics' }]);
+    assert.equal(result.error, 'refusal', 'a safety refusal is not a clean finish');
+    assert.equal(result.text, 'I can’t help with that.', 'BA-5: the partial text is preserved');
+    assert.equal(result.stopReason, 'refusal', 'and the neutral stop reason is surfaced');
+  });
+
+  it('context_exceeded → error:"context_exceeded" with partial text preserved', async () => {
+    const provider = scripted(() => ({ text: 'partial', toolCalls: [], stopReason: 'context_exceeded', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, 'context_exceeded');
+    assert.equal(result.text, 'partial');
+    assert.equal(result.stopReason, 'context_exceeded');
+  });
+
+  // The BA-4 protocol closure applied uniformly: a refused round's tool calls were cut off mid-generation
+  // (args missing) just like a truncated one, so they must NOT execute — the same guard, one more reason.
+  it('REFUSES to execute the tool calls of a refusal round (BA-4 closure, uniform)', async () => {
+    let executed = false;
+    const provider = scripted(() => ({
+      text: '', stopReason: 'refusal', usage,
+      toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: '/tmp/x' } }],
+    }));
+    const writeTool = { name: 'shell_write', description: 'writes', execute: async () => { executed = true; return 'wrote'; } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [writeTool]);
+    assert.equal(executed, false, 'a refused round’s tool call must never reach the tool');
+    assert.equal(result.error, 'refusal');
+    const assistantTurns = result.msgs.filter((m) => m.role === 'assistant');
+    assert.ok(assistantTurns.every((m) => !m.tool_calls), 'no orphaned tool_call left in the transcript');
+  });
+
+  // pause_turn is the tell: it proves this needs a CLASSIFIER, not another short-circuit. It must RESUME,
+  // never error. A two-call stub (pause → end_turn) yields exactly one clean final — the loop advanced.
+  it('pause_turn RESUMES the loop rather than terminating (2-call: pause → end_turn)', async () => {
+    let calls = 0;
+    const provider = scripted((i) => {
+      calls = i;
+      return i === 1
+        ? { text: '', toolCalls: [], stopReason: 'pause_turn', usage }
+        : { text: 'resumed and finished', toolCalls: [], stopReason: 'end_turn', usage };
+    });
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(calls, 2, 'the loop resumed — the provider was called a second time');
+    assert.equal(result.error, null, 'a resumed-then-finished turn is a clean finish');
+    assert.equal(result.text, 'resumed and finished');
+    assert.equal(result.stopReason, 'end_turn', 'the surfaced stop reason is the round it actually ended on');
+  });
+
+  // "Every return" — stopReason is present on a CLEAN finish too, not only the new terminal legs.
+  it('surfaces stopReason on a clean end_turn finish', async () => {
+    const provider = scripted(() => ({ text: 'the answer is 42', toolCalls: [], stopReason: 'end_turn', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null);
+    assert.equal(result.stopReason, 'end_turn');
+  });
+
+  // ...and on a truncation return (max_tokens was already error-tagged; now it also carries stopReason).
+  it('surfaces stopReason on a truncation return', async () => {
+    const provider = scripted(() => ({ text: 'partial', toolCalls: [], stopReason: 'max_tokens', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, 'truncated:max_tokens');
+    assert.equal(result.stopReason, 'max_tokens');
+  });
+
+  // ...and on a governance HALT return — proves stopReason rides EVERY terminating path, not just the
+  // clean/terminal ones. The last completed round's neutral reason is what surfaces.
+  it('surfaces the last round’s stopReason on a halt return', async () => {
+    const provider = scripted(() => ({
+      text: 'working', stopReason: 'tool_use', usage,
+      toolCalls: [{ id: 'a', name: 'act', arguments: {} }],
+    }));
+    const policy = () => { throw new HaltError('budget', { rule: 'budget.maxTurns' }); };
+    const act = { name: 'act', description: 'acts', execute: async () => 'done' };
+    const result = await new Loop({ provider, throwOnError: true, policy }).run([{ role: 'user', content: 'go' }], [act]);
+    assert.equal(result.error, 'halt:budget.maxTurns');
+    assert.equal(result.stopReason, 'tool_use', 'the halted round’s neutral stop reason is surfaced');
+  });
+
+  // NEGATIVE CONTROL: an unrecognized/absent stop reason must pass through to today's behavior — a clean
+  // finish, error:null — and surface the value (or null) rather than inventing an error. This is the
+  // explicit pass-through default that keeps the NEXT new stop reason from re-breeding the bug.
+  it('NEGATIVE CONTROL: an unrecognized stop reason passes through as a clean finish', async () => {
+    const provider = scripted(() => ({ text: 'done', toolCalls: [], stopReason: 'brand_new_reason', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null, 'an unrecognized reason must not invent an error');
+    assert.equal(result.stopReason, 'brand_new_reason', 'but the value is still surfaced for visibility');
+  });
+
+  it('NEGATIVE CONTROL: an absent stop reason surfaces null and finishes clean', async () => {
+    const provider = scripted(() => ({ text: 'done', toolCalls: [], usage })); // no stopReason field
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null);
+    assert.equal(result.stopReason, null);
   });
 });
 

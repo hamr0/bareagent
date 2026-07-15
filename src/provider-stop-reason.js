@@ -138,6 +138,9 @@ function normalizeStopReason(raw, provider, ctx = {}) {
  * folded in here — `pause_turn` in particular is a RESUMABLE state, and erroring on it would break
  * server-side tool flows that are working exactly as designed.
  *
+ * Retained for back-compat (it was the Loop's original BA-6 gate). The Loop now routes through
+ * {@link classifyStopReason} instead — `isTruncated(x)` is exactly `classifyStopReason(x) === 'truncated'`.
+ *
  * @param {string|null|undefined} stopReason - a NEUTRAL value (post-{@link normalizeStopReason}).
  * @returns {boolean}
  */
@@ -145,4 +148,45 @@ function isTruncated(stopReason) {
   return stopReason === 'max_tokens';
 }
 
-module.exports = { normalizeStopReason, isTruncated };
+/**
+ * BA-13 — classify a round's NEUTRAL stop reason into the terminal ACTION the Loop must take.
+ *
+ * BA-6 short-circuited exactly one non-clean stop reason (`max_tokens`). Every OTHER non-clean reason
+ * — `refusal`, `context_exceeded`, `pause_turn` — fell through the Loop's "no tool calls ⇒ final
+ * answer" rule and was laundered into a clean `error: null` empty success (the BA-4/5/6/7 bug class:
+ * an under-modeled boundary round rounding optimistically toward "done"). A `RECITATION` refusal fires
+ * on entirely BENIGN prompts, so this was reachable on ordinary runs, and it propagated up `recurse`'s
+ * agent tree as a converged sub-task.
+ *
+ * One table with an EXPLICIT pass-through default replaces the single `if (isTruncated)` — the BA-7
+ * lesson ("don't parse-key on a closed set") applied to termination: BA-6 added one leg, BA-13 adds
+ * two terminals plus one resume, and the NEXT new stop reason degrades to pass-through (status quo)
+ * rather than re-breeding the bug.
+ *
+ *   'truncated'         `max_tokens` — cut off at the output cap (BA-6). Loop returns `error:'truncated:max_tokens'`.
+ *   'refusal'           declined on safety grounds. Loop returns `error:'refusal'` + partial text.
+ *   'context_exceeded'  ran out of context window. Loop returns `error:'context_exceeded'` + partial text.
+ *   'resume'            `pause_turn` — a RESUMABLE server-tool pause. NOT terminal, NOT an error: the
+ *                       Loop CONTINUES the round loop (bounded by HARD_ROUND_LIMIT / the gate's maxTurns).
+ *   null                pass-through: `end_turn` / `stop_sequence` / `tool_use` / an unrecognized value /
+ *                       absent. The Loop's existing tool-exec / final-answer logic runs unchanged.
+ *
+ * NB: `tool_use` is already derived by {@link normalizeStopReason} from what the round carried, so it
+ * needs no row here — a round that stopped to call a complete tool passes through to tool execution.
+ */
+const TERMINAL_ACTIONS = /** @type {Record<string, 'truncated'|'refusal'|'context_exceeded'|'resume'>} */ ({
+  max_tokens: 'truncated',
+  refusal: 'refusal',
+  context_exceeded: 'context_exceeded',
+  pause_turn: 'resume',
+});
+/**
+ * @param {string|null|undefined} stopReason - a NEUTRAL value (post-{@link normalizeStopReason}).
+ * @returns {'truncated'|'refusal'|'context_exceeded'|'resume'|null}
+ */
+function classifyStopReason(stopReason) {
+  if (typeof stopReason !== 'string') return null;
+  return TERMINAL_ACTIONS[stopReason] || null;
+}
+
+module.exports = { normalizeStopReason, isTruncated, classifyStopReason };

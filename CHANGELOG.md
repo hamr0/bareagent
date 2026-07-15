@@ -4,6 +4,23 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Changed
+
+- **Every non-clean terminal stop reason is now error-tagged, not just `max_tokens` (BA-13).** BA-6 taught the Loop to stop laundering a truncated round into a clean `error: null` finish — but it fixed exactly ONE stop reason. `refusal`, `context_exceeded`, and `pause_turn` still fell through the *"no tool calls ⇒ final answer"* rule and came back as clean empty successes. That is the same bug in different clothes (an under-modeled boundary round rounding optimistically toward "done"), and a `RECITATION` refusal fires on **entirely benign** prompts (e.g. "recite the lyrics to…"), so it was reachable on ordinary, non-adversarial runs. Worse, `recurse`'s worker path branches on `out.error` (never `out.stopReason`), so a **safety-refused sub-task scored as CONVERGED** — a fabricated empty result propagated up an agent tree.
+
+  The single `if (isTruncated)` short-circuit is replaced by **one table-driven classifier** (`classifyStopReason`, `src/provider-stop-reason.js`) over the neutral stop-reason vocabulary, with an **explicit pass-through default** — the BA-7 lesson ("don't parse-key on a closed set") applied to termination, so the *next* new stop reason degrades to the status quo instead of re-breeding the bug:
+  - `refusal` → **`error: 'refusal'`** (partial text preserved, BA-5)
+  - `context_exceeded` → **`error: 'context_exceeded'`** (partial text preserved)
+  - `pause_turn` → **the loop RESUMES** — a resumable server-tool pause is not terminal and not an error; a pause that never progresses is bounded by the existing `HARD_ROUND_LIMIT` / gate `maxTurns`, so no new counter was added
+  - `max_tokens` → `error: 'truncated:max_tokens'` (**unchanged**, BA-6)
+  - `end_turn` / `stop_sequence` / `tool_use` / unrecognized / absent → pass through to today's behavior (**unchanged**)
+
+  The tool calls of a refusal / context_exceeded round are **refused, never executed**, the same BA-4 protocol-layer closure that already covered `max_tokens` — a complete tool call always arrives tagged `tool_use`, so a call riding any non-clean terminal round was cut off mid-generation with arguments missing.
+
+  **Plus the load-bearing companion: `result.stopReason` (the neutral value) is now surfaced on EVERY `Loop.run()` return**, not only the clean-finish path — a caller can branch on *why* a run ended, not just its `error` tag. **The fix error-tags rather than merely surfacing `stopReason`**, and that is deliberate: `recurse` and downstream adopters branch on `error`, and 0.27.0's "`error` is the sole success signal" invariant would be re-broken by an `error: null` + `stopReason: 'refusal'`. Because `recurse` already keys on `out.error`, it inherits the fix with **zero recurse changes** — a refused worker now yields an honest `{ incomplete }`.
+
+  **BEHAVIOR CHANGE:** a round the model refused on safety grounds that previously returned `error: null` with empty text now returns `error: 'refusal'`. This is the point of the fix — a refusal is not an empty success — but it changes an existing return value, so branch on `error` (as the BA-5/BA-6 contract already asks) rather than on emptiness. `src/provider-stop-reason.js`, `src/loop.js`, `test/stop-reason.test.js` + `test/loop.test.js` + `test/recurse.test.js` (mutation-checked: dropping the `refusal` leg reds exactly the refusal tests at both the Loop and recurse layers). Origin: a self-audit of the BA-4/5/6/7 "under-modeled boundary" class — the deterministic probes live in `poc/audit-*.mjs`.
+
 ## [0.27.0] - 2026-07-15
 
 ### Added

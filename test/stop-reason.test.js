@@ -2,7 +2,7 @@
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { normalizeStopReason, isTruncated } = require('../src/provider-stop-reason');
+const { normalizeStopReason, isTruncated, classifyStopReason } = require('../src/provider-stop-reason');
 
 // BA-6. Pure mapping logic, so it gets real unit tests (the Testing Trophy's narrow top).
 // Every value below was MEASURED against the live API, not copied from documentation —
@@ -92,5 +92,31 @@ describe('isTruncated — deliberately narrow', () => {
     for (const v of ['end_turn', 'tool_use', 'stop_sequence', 'refusal', 'pause_turn', 'context_exceeded', null, undefined]) {
       assert.equal(isTruncated(/** @type {any} */ (v)), false, `${v} must not read as a truncation`);
     }
+  });
+});
+
+// BA-13 — the terminal-action table. One classifier over the neutral vocabulary replaces the single
+// isTruncated short-circuit, with an EXPLICIT pass-through default so the next new stop reason degrades
+// to the status quo instead of re-breeding the laundering bug.
+describe('classifyStopReason — the terminal-action table', () => {
+  it('maps each non-clean terminal reason to its action', () => {
+    assert.equal(classifyStopReason('max_tokens'), 'truncated');
+    assert.equal(classifyStopReason('refusal'), 'refusal');
+    assert.equal(classifyStopReason('context_exceeded'), 'context_exceeded');
+    assert.equal(classifyStopReason('pause_turn'), 'resume', 'pause_turn resumes — not terminal, not an error');
+  });
+
+  // The pass-through default: a clean finish, a tool round, an unrecognized value, and absence all return
+  // null so the Loop's existing tool-exec / final-answer logic runs unchanged.
+  it('returns null (pass-through) for clean / tool / unrecognized / absent reasons', () => {
+    for (const v of ['end_turn', 'stop_sequence', 'tool_use', 'some_brand_new_reason', null, undefined, '', 0, {}]) {
+      assert.equal(classifyStopReason(/** @type {any} */ (v)), null, `${JSON.stringify(v)} must pass through`);
+    }
+  });
+
+  // Back-compat: the retained isTruncated is exactly the truncated leg of the classifier.
+  it('agrees with isTruncated on the truncation leg', () => {
+    assert.equal(classifyStopReason('max_tokens') === 'truncated', isTruncated('max_tokens'));
+    assert.equal(classifyStopReason('refusal') === 'truncated', isTruncated('refusal'));
   });
 });
