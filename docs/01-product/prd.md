@@ -800,6 +800,143 @@ Order matters. Each step is independently shippable.
 These were resolved during the design conversation and should not be
 re-litigated unless the user explicitly asks.
 
+> **Coverage note.** Between v0.16.2 and v0.27.0 the eval-assist suite
+> (0.17–0.19), the RLM/`recurse` primitive (0.20–0.24), and the
+> BA-8/9/10/11 `recurse` seams (0.22–0.25) were decided in their own PRDs —
+> `eval-assist-prd.md` and `RLM_PRD.md`, which remain the canonical record for
+> those. The entries below fold the *former standalone side-docs*
+> (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`)
+> back into this main PRD; granular evidence tables for each live in the
+> CHANGELOG and git history.
+
+### v0.28.0 / BA-13 — honest termination classifier (2026-07-15)
+
+- **One table-driven classifier replaces BA-6's lone truncation
+  short-circuit.** BA-6 (v0.27.0) stopped a *truncated* round from laundering
+  into a clean `error:null` finish — but it fixed exactly one stop reason.
+  `refusal`, `context_exceeded`, and `pause_turn` still fell through the "no
+  tool calls ⇒ final answer" rule into clean empty successes. A `RECITATION`
+  refusal fires on **entirely benign** prompts, so this was reachable on
+  ordinary runs, and `recurse` — which keys on `out.error`, never
+  `out.stopReason` — scored a **safety-refused sub-task as CONVERGED** up an
+  agent tree. Decision: replace `if (isTruncated)` with `classifyStopReason`
+  (`src/provider-stop-reason.js`) over the neutral vocabulary, with an
+  **explicit pass-through default** (the BA-7 lesson — "don't parse-key on a
+  closed set" — applied to termination, so the *next* new stop reason degrades
+  to the status quo). `refusal → error:'refusal'`, `context_exceeded →
+  error:'context_exceeded'` (both preserve partial text per BA-5 and REFUSE the
+  round's tool calls — the BA-4 protocol closure applied uniformly);
+  `max_tokens` unchanged.
+- **`pause_turn` RESUMES, it does not error — and resuming means re-sending the
+  paused assistant turn.** A resumable server-tool pause is not terminal. The
+  loop APPENDS the paused assistant turn (partial text + provider-native
+  server-tool blocks, replayed via BA-7 `providerBlocks`) then re-requests —
+  the documented Anthropic protocol. A bare `continue` re-sends byte-identical
+  input, so the server restarts the turn and pauses again, spinning to
+  `HARD_ROUND_LIMIT`; a stuck pause is just a non-progressing loop the existing
+  round/`maxTurns` bound already catches, so **no new counter** was added.
+- **Error-tag, not merely surface.** `stopReason` (neutral) is now surfaced on
+  EVERY `Loop.run()` return, but the classified terminals are *error-tagged*
+  because `error` is the sole success signal (0.27.0's invariant) and `recurse`
+  / the bareloop adopter both branch on it — so a refused worker propagates an
+  honest `{incomplete}` with **zero `recurse` changes**. Decisions taken at
+  sign-off: bare tags (`'refusal'`, not `'refusal:<subreason>'`) for the first
+  cut; the `error:null → 'refusal'` shift is a deliberate BEHAVIOR CHANGE
+  (called out in the CHANGELOG); `HARD_ROUND_LIMIT`/gate bounds the resume with
+  no dedicated pause counter. Both table lookups
+  (`normalizeStopReason` and `classifyStopReason`) use `hasOwnProperty` guards
+  — a provider/proxy-supplied `stop_reason` of `'toString'`/`'constructor'`
+  otherwise resolves to an inherited `Object.prototype` function (the
+  `normalizeStopReason` sibling of this was caught at the release gate).
+- Origin: a self-audit of the BA-4/5/6/7 "under-modeled boundary rounds
+  optimistically toward success" class; the deterministic probes are kept as
+  living regression tests (`poc/audit-*.mjs`).
+
+### v0.27.0 / Provider fidelity & honest termination — BA-1/4/5/6/7/12 (2026-07-14)
+
+- **The governing finding: these are protocol/representation-fidelity fixes,
+  and at least one carries NO measured capability benefit — ship it labeled
+  honestly.** Each sits at a provider-normalization boundary where the external
+  API reported something the neutral `{text, toolCalls, usage}` shape had no
+  slot for, and the code rounded optimistically toward "done". The adopter's
+  head-to-head found **no outcome difference** for BA-7 (thinking blocks); it is
+  fixed because bare-agent was silently violating an API contract, not because
+  it makes the agent smarter, and the PRD acceptance criteria bake that honesty
+  in so it can't be re-sold as a capability win.
+- **BA-6 — truncation is honest.** A round the API cut off at the output cap
+  (`max_tokens`) returns `error:'truncated:max_tokens'` with partial text
+  instead of laundering into `error:null`; its tool calls are REFUSED, never
+  executed (a complete call always arrives tagged `tool_use`, so one riding a
+  truncated round was cut off mid-generation with args missing — this closes
+  BA-4's file-zeroing root cause at the protocol layer, for every tool).
+- **BA-4 / BA-5 — no silent data loss on the boundary.** `shell_write` REJECTS
+  a missing/null/non-string `content` (a 0-byte write is legal, so no gate can
+  catch it); every terminating path (halt, deny-streak, provider error,
+  `stop()`, hard limit) PRESERVES the last non-empty assistant text — a bound
+  firing is normal termination, and that text is the only channel from attempt N
+  to N+1. `error` stays the SOLE success signal; `stop()` returns `error:null`.
+- **BA-1 — the Anthropic transcript stops being re-bought every round.** Opt-in
+  `cacheMessages` places a rolling `cache_control` breakpoint on the last
+  content block of the last message; measured **$0.0753→$0.0110/round (6.8×)**
+  steady state on our own harness. D3: ships opt-in for one minor, then flips
+  default-ON once we have our own measurement — default-ON changes every
+  adopter's wire format. It MUST live in the provider (the transcript ends on a
+  rebuilt `tool_result`, so no caller seam can reach it) and a destructive
+  `trim` that rewrites the PREFIX invalidates it (fold the middle, keep the
+  head).
+- **BA-12 — a repeated tool ERROR spins unbounded (the error-side mirror of the
+  BA-11 deny guard).** `maxIdenticalToolErrors` (default 3) short-circuits on
+  N *byte-identical* repeats (`name` + `JSON.stringify(args)`) → clean
+  `error:'stuck:<tool>'`. Narrowest detection by decision (D2): counting ANY
+  consecutive tool error reds the negative controls (a model varying args while
+  recovering; alternating tools) — it would punish the recovery it exists to
+  protect. Counts both the `execute`-throw and the unknown/hallucinated-tool
+  branch via one shared `recordToolFailure`.
+- **BA-7 — thinking blocks preserved, not dropped.** New opaque
+  `providerBlocks` (`{provider, model, blocks}`) carries content blocks the
+  normalized shape can't express (`thinking`/`redacted_thinking`); the Anthropic
+  provider replays them at the FRONT of the assistant turn on a tool-use
+  continuation. Three constraints: OPAQUE (keep bytes, never re-serialize — a
+  `type==='thinking'` check would silently drop the next new block type =
+  the same bug again); provider+model TAG enforced on replay (a signature is
+  model-bound; mismatch ⇒ drop to the lossy-but-valid pre-BA-7 request, never a
+  400); normalized `content` stays the source of truth. Adaptive thinking is
+  ALREADY default on sonnet-5/Opus 4.7+, so the opt-in `thinking` param does NOT
+  enable it — it pins the mode.
+- **Signed off (hamr, 2026-07-14): D1** keep `max_tokens` default 4096 but make
+  truncation loud + document raising it (a silent cost increase is the same sin
+  as a silent truncation); **D2** identical-repeated-call detection; **D3**
+  `cacheMessages` opt-in → default-ON after our own measurement; **D4** build
+  order BA-6 → BA-1 → BA-12 → BA-7 (BA-7 last — largest change, no measured
+  benefit). Non-goals: making the agent debug better (a model-strategy ceiling,
+  the adopter's cheap probe is the right instrument); a retry-on-truncation
+  policy (we report, the caller decides); interpreting `raw` blocks in the Loop
+  (opaque passthrough or it's provider lock-in).
+
+### litectx `enumerate` — cross-repo dependency spec (handed off 2026-06-28, delivered in litectx 0.26.0)
+
+- **A spec bare-agent authored FOR litectx, folded here for the record.** RLM
+  `recurse` `retrieval:'scan'`/`mode:'partition'` needs an exhaustive,
+  scope-aware, paged, **rank-free** read over accrued memory — the one read
+  litectx could not do (every read was FTS-gated, which structurally caps recall
+  and cannot count). Settled decisions (bare-agent, 2026-06-28, against litectx
+  0.25.0 source): **v1 = memory axis (`fact`/`episode`) only** — `code`/`doc`
+  drags in a second expiry-aware scope path + a file-vs-chunk unit decision for
+  no current consumer (thin-glue/YAGNI, land it when a codebase-scan consumer
+  exists); a **distinct `enumerate` verb**, NOT a `search(null)` overload
+  (overloading the relevance API hides an exhaustive read behind a ranking
+  surface and invites the recall-with-big-`n` trap — mirrors the `recentMemory`
+  precedent); field is **`path`, not `id`** (uniform with `recall`/`recentMemory`
+  via `memId()`, W4); `count(kind)` already shipped in 0.23.0 and is out of
+  scope; `OFFSET` (not a cursor) for v1's small stores.
+- **Verified against the spec before wiring.** litectx delivered `enumerate` in
+  0.26.0; bare-agent confirmed the DoD live (`poc/litectx-enumerate-verify.mjs`)
+  BEFORE building on it — the same verify-shipped-vs-SPEC discipline used on
+  bare-agent's own primitives, because you don't trust that an upstream built
+  the contract you asked for. `recurse` stays litectx-agnostic: it depends only
+  on the `Slice[] | () => Promise<Slice[]>` socket shape, and `litectxCorpus`
+  paginates `enumerate` as one adapter behind that socket, not the default.
+
 ### v0.16.2 / MCP skipped-project-config hint (2026-06-15)
 
 - **A safe default must not be a silent one.** 0.16.1 made the project-cwd

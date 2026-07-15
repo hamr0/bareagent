@@ -708,7 +708,7 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
  * never folded into the count as a zero; a governance HaltError mid-scan → clean incomplete.
  *
  * The corpus is the generic array slice-source `opts.corpus`. Absent it, scan has nothing to read — litectx's
- * resident-corpus enumerate path is deferred (docs/01-product/litectx-enumerate-spec.md) — so we return an
+ * resident-corpus enumerate path is deferred (docs/01-product/prd.md) — so we return an
  * honest incomplete, never a fabricated zero.
  * @param {string} task
  * @param {RecurseCtx} ctx
