@@ -81,11 +81,38 @@ export interface GenerateResult {
   /** Model id the response was produced by; preferred over Provider.model for cost accounting. */
   model?: string | null;
   /**
+   * Why generation ended, normalized across providers (BA-6). Before this, no provider read its native
+   * finish-reason field, so a round the API CUT OFF at the token cap was indistinguishable from one the
+   * model chose to end — and the Loop, whose rule is "no tool calls ⇒ final answer", returned the
+   * truncation as a clean finish with `error: null`.
+   *
+   * - `'end_turn'` — the model finished on its own. The only clean finish.
+   * - `'max_tokens'` — CUT OFF at the output cap. The Loop returns `error: 'truncated:max_tokens'`
+   *   (preserving the partial text) and REFUSES to execute any tool call the round carries: a complete
+   *   call always arrives as `'tool_use'`, so one riding a `'max_tokens'` round was cut off
+   *   mid-generation with arguments missing — the BA-4 file-zeroing mechanism.
+   * - `'tool_use'` — stopped to call a tool, and the call is COMPLETE.
+   * - `'stop_sequence'` / `'refusal'` / `'pause_turn'` / `'context_exceeded'` — reported, not acted on.
+   * - `null` — the provider didn't report one (e.g. CLIPipe) or the value is unrecognized. Reproduces
+   *   pre-BA-6 behavior exactly, so an unmapped provider degrades to the status quo.
+   */
+  stopReason?: string | null;
+  /**
    * True when the requested `temperature` was rejected by the model (400, unsupported/deprecated) and
    * the request was retried without it (BA-10). The response was produced at the model's DEFAULT
    * temperature, not the one requested — callers reporting an effective temperature must honor this.
    */
   temperatureDropped?: boolean;
+  /**
+   * BA-7 — provider-native content blocks the normalized `{text, toolCalls}` shape cannot express
+   * (Anthropic `thinking` / `redacted_thinking`), captured opaquely so the Loop can put them on the
+   * transcript and the provider can replay them on the next round.
+   *
+   * Present only when the response actually carried such blocks — so a provider that returns none
+   * leaves both the result and the resulting message byte-identical to pre-BA-7. See `Message.providerBlocks`
+   * for the replay contract (the provider/model tag is enforced; a signature is model-bound).
+   */
+  providerBlocks?: { provider: string; model: string; blocks: any[] };
   /**
    * Authoritative per-call cost in USD, reported by the provider itself — e.g. CLIPipeProvider
    * `parse:'claude-json'` surfacing the claude CLI's own `total_cost_usd`, a real price with no local
@@ -102,6 +129,25 @@ export interface Message {
   content?: string | null;
   tool_calls?: any[];
   tool_call_id?: string;
+  /**
+   * BA-7 — provider-native content blocks that this OpenAI-shaped message cannot express, carried
+   * verbatim so they can be replayed to the provider that issued them.
+   *
+   * Today this is Anthropic `thinking` / `redacted_thinking`. Anthropic's contract is that such
+   * blocks are echoed back UNCHANGED (`signature` included) when continuing a tool-use conversation;
+   * before BA-7 there was no field on this type that could hold one, so they were silently dropped.
+   *
+   * OPAQUE by design — the Loop never reads `blocks`, and the provider re-emits their bytes rather
+   * than re-serializing a parsed shape (a `redacted_thinking` block cannot survive a round-trip
+   * through parsed fields). The `provider`/`model` tag is enforced on replay: a thinking signature is
+   * bound to the model that produced it, so a mismatch drops the blocks and degrades to the lossy
+   * pre-BA-7 request rather than risking a 400.
+   *
+   * The normalized `content` / `tool_calls` remain the source of truth: only blocks that have no
+   * normalized representation live here, so an `assemble`/`trim` seam that rewrites this message is
+   * never silently undone by a stale cached copy of its text.
+   */
+  providerBlocks?: { provider: string; model: string; blocks: any[] };
   [key: string]: any;
 }
 

@@ -4,6 +4,7 @@ const https = require('https');
 const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
+const { normalizeStopReason } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -73,14 +74,22 @@ class OpenAIProvider {
     const choice = data.choices[0];
     const msg = choice.message;
 
+    /** @type {import('../types').ToolCall[]} */
+    const toolCalls = (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
+      id: tc.id,
+      name: tc.function.name,
+      arguments: JSON.parse(tc.function.arguments),
+    }));
+
     return {
       text: msg.content || '',
-      toolCalls: (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
-        id: tc.id,
-        name: tc.function.name,
-        arguments: JSON.parse(tc.function.arguments),
-      })),
+      toolCalls,
       model: data.model || this.model,
+      // BA-6: `length` ⇒ cut off at the output cap (normalized to 'max_tokens'). Note OpenAI refuses to
+      // emit a tool call it cannot finish — it 400s instead — so a truncated round here carries no
+      // tool calls at all; the Loop's refusal to execute them is a no-op on this provider, and a
+      // load-bearing guard on Anthropic, which DOES emit the cut-off call.
+      stopReason: normalizeStopReason(choice?.finish_reason, 'openai', { hasToolCalls: toolCalls.length > 0 }),
       usage: this._normalizeUsage(data.usage),
       ...(temperatureDropped && { temperatureDropped: true }),
     };

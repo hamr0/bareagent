@@ -3,6 +3,7 @@
 const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
+const { normalizeStopReason } = require('./provider-stop-reason');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -30,17 +31,29 @@ class OllamaProvider {
    * Generate a response from a local Ollama instance.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature).
+   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
+    // Ollama nests generation params under `options` (its `num_predict` is the output cap — the
+    // equivalent of `max_tokens` everywhere else).
+    //
+    // `maxTokens` was NOT forwarded here before, while every other provider honoured it — so a caller
+    // capping output on Ollama was silently ignored and generated unbounded. Found by the BA-6 map
+    // probe: a 16-token cap produced `done_reason: 'stop'` because nothing ever truncated. The map was
+    // right; the cap never reached the wire.
+    /** @type {Record<string, any>} */
+    const genOptions = {
+      ...(options.temperature != null && { temperature: options.temperature }),
+      ...(options.maxTokens != null && { num_predict: options.maxTokens }),
+    };
     /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       messages,
       stream: false,
-      ...(options.temperature != null && { options: { temperature: options.temperature } }),
+      ...(Object.keys(genOptions).length > 0 && { options: genOptions }),
     };
     if (tools.length > 0) {
       body.tools = tools.map(t => ({
@@ -59,16 +72,26 @@ class OllamaProvider {
     });
     const msg = data.message || {};
 
+    /** @type {import('../types').ToolCall[]} */
+    const toolCalls = (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
+      id: tc.id || `call_${Date.now()}`,
+      name: tc.function.name,
+      arguments: typeof tc.function.arguments === 'string'
+        ? JSON.parse(tc.function.arguments)
+        : tc.function.arguments,
+    }));
+
     return {
       text: msg.content || '',
-      toolCalls: (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
-        id: tc.id || `call_${Date.now()}`,
-        name: tc.function.name,
-        arguments: typeof tc.function.arguments === 'string'
-          ? JSON.parse(tc.function.arguments)
-          : tc.function.arguments,
-      })),
+      toolCalls,
       model: data.model || this.model,
+      // BA-6: `length` ⇒ cut off at num_predict. VERIFIED LIVE on qwen2.5:0.5b
+      // (`poc/ba6-stop-reason-gemini-ollama.mjs`): stop→end_turn, length→max_tokens. Lifecycle values
+      // (`load`/`unload`) stay deliberately unmapped rather than forced into the vocabulary.
+      //
+      // Like Gemini, Ollama has NO tool_use done_reason — a complete tool call returns `stop` (measured).
+      // `hasToolCalls` lets the normalizer say so, instead of reporting a tool round as a clean finish.
+      stopReason: normalizeStopReason(data.done_reason, 'ollama', { hasToolCalls: toolCalls.length > 0 }),
       usage: {
         inputTokens: data.prompt_eval_count || 0,
         outputTokens: data.eval_count || 0,

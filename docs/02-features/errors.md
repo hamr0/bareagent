@@ -61,6 +61,19 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 
 **Note:** `[Loop] Tool "X" has a non-string description` is a `console.warn`, not a thrown error.
 
+### `result.error` tokens — returned, never thrown
+
+`Loop.run()` does not throw on a governance exit or a bound firing: it **returns cleanly** with a token in `result.error` and the transcript sealed. **`error` is the sole success signal** — a non-empty `result.text` never means the run converged (every terminating path preserves the last non-empty assistant text, BA-5). Always branch on `error`, not on text.
+
+| `result.error` | When | What to do |
+|-------|------|-----|
+| `null` | The model finished of its own accord — the only clean finish. Also returned by a deliberate `loop.stop()` (a caller-initiated stop is not a fault). | Consume `result.text`. |
+| `truncated:max_tokens` | The API **cut the round off at the output cap**. `result.text` holds the partial output. If the round carried tool calls, they were **refused, not executed** — a complete call always arrives tagged `tool_use`, so a call on a truncated round was cut off mid-generation with arguments missing (the BA-4 file-zeroing shape). | Raise the cap (`loop.run(msgs, tools, { maxTokens: N })` — default 4096), split the task, or shorten it. The library deliberately does **not** auto-retry at a bigger cap: that doubles spend against a budget your gate is enforcing, and the right recovery is yours. |
+| `denied:<tool>` | `maxConsecutiveDenials` (default 3) consecutive policy denials — a deny-spin, short-circuited before it burns the budget to the cap. | Widen scope, re-gate, or escalate. Set `maxConsecutiveDenials: 0` to restore pure-advisory denies. |
+| `stuck:<tool>` | `maxIdenticalToolErrors` (default 3) — the same tool failed that many times in a row with **byte-identical arguments**. The model is re-sending a call that cannot succeed. Only an *identical* repeat counts: a model that varies its arguments is recovering, and a tool error is fed back precisely so it can. | Read the tool's error — it is a real defect (bad path, failed validation), not a transient. Fix the input or the tool. Set `maxIdenticalToolErrors: 0` to disable. |
+| `halt:<rule>` | A bareguard halt (e.g. `halt:limits.maxTurns`, `halt:budget.maxCostUsd`). | Check the rule; raise the bound or accept the partial result. |
+| a provider error message | A provider threw and `throwOnError` is `false`. | Inspect / retry. With `throwOnError: true` it throws instead. |
+
 ## Planner
 
 | Error | When | Fix |

@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.26.2 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
+> v0.27.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -182,6 +182,8 @@ Budget visibility carries through `onLlmResult` (mirror of Evaluator); a governa
 Skills are operator-registered `{ name, description, instructions, tools }` bundles surfaced on demand: only a one-liner per skill sits in context until the agent calls `skill_use({ name })`, which injects the skill's instructions and unlocks its (namespaced) tools for the next round. Pass `skills.activeTools` (a bound thunk) as the Loop's `tools` — it is re-evaluated each round, so freshly-unlocked tools appear automatically. The gate still governs every unlocked tool; skills change discovery, not authorization.
 
 The shipped reference skill is **stash** — compaction-first context hygiene. Its `trim` wires into `Loop({ trim })` and folds finished sub-tasks out of the live transcript (restorable), keeping long runs under budget. Pass a litectx instance as `ctx` for lossless verbatim parking + the `ctx.summarize` lossy path; set `compaction.ceilingTokens` to enable automatic token-pressure folding.
+
+> **⚠️ Interaction with `cacheMessages` (BA-1).** Prompt caching is a **prefix match**: the transcript prefix *is* the cache key. A fold that rewrites the **head** of the transcript invalidates the cache, so the next round re-pays the 1.25× cache-write premium on the whole thing — you can end up paying *more* than with no caching at all. If you run both, **keep the head stable** (fold the MIDDLE, which is what `compaction.keepHeadTurns` is for) so the cached prefix survives the fold. The two features are complementary, but only in that order.
 
 ```javascript
 const { Loop, SkillRegistry, createStashSkill } = require('bare-agent');
@@ -373,6 +375,8 @@ const loop = new Loop({
 const result = await loop.run(messages, tools, { ctx: { userId: 42 } });
 if (result.error?.startsWith('halt:')) {
   // budget / turn cap / gate terminated — handled cleanly, no [HALT:] reached the LLM (BA2)
+  // result.text still holds whatever the model produced before the bound fired (BA-5) — feed it
+  // forward to the next attempt. `error` is the success signal; non-empty text ≠ converged.
 }
 ```
 
@@ -380,7 +384,25 @@ if (result.error?.startsWith('halt:')) {
 
 Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
 
+**A bound that fires PRESERVES the model's work (BA-5, v0.27+).** Every terminating path — governance halt, the deny-spin short-circuit, a provider error under `throwOnError:false`, `loop.stop()`, and the internal hard round limit — returns the **last non-empty assistant text** in `result.text` instead of `''`. If you drive bare-agent from an outer retry loop (`while not-done and under-cap: run the worker`), a bound firing is **normal termination**, not an exception, and that text is your only channel from attempt N to attempt N+1 — before this, a bounded attempt taught its successor nothing. Two rules: **`error` is the sole success signal** (a non-empty `text` never means the run converged — always branch on `error`), and `text` is `''` when the model genuinely produced none (no placeholder is invented, so you can trust emptiness). Under `recurse` this is what finally populates `best` on an incomplete node. Relatedly, **`loop.stop()` now returns `error: null`** — a deliberate stop is not a fault; it previously fell through to the hard-round-limit return and reported that safety warning as its error, indistinguishable from a runaway.
+
+**A TRUNCATED round is reported, never laundered into a finish (BA-6, v0.27+).** Every provider now surfaces `GenerateResult.stopReason` — normalized across all five to one neutral vocabulary (`end_turn`, `max_tokens`, `tool_use`, `stop_sequence`, `refusal`, `pause_turn`, `context_exceeded`; `null` when the provider doesn't report one, e.g. CLIPipe). Before this, **no** provider read its finish-reason field, so a round the API **cut off at the output cap** hit the Loop's *"no tool calls ⇒ final answer"* rule and came back as a **clean finish with `error: null`** — a truncation indistinguishable from a model that chose to stop. It now returns **`result.error === 'truncated:max_tokens'`** with the partial text preserved (BA-5). Check `result.error === null` for success, as always. Note the **default `maxTokens` is 4096** and is deliberately unchanged: raising it silently lifts every adopter's ceiling and bill, which is the same class of sin as the silent truncation. If you run a reasoning model on hard tasks, **raise it yourself** — `loop.run(msgs, tools, { maxTokens: 16000 })` (it's a `run()` option, forwarded to the provider), and now you'll get a loud error instead of a quiet empty answer when you don't.
+
+**A truncated round's tool calls are REFUSED, and this is load-bearing.** A **complete** tool call always arrives tagged `tool_use`, **never** `max_tokens` (measured on the real API). So a tool call riding a truncated round was **cut off mid-generation with arguments missing** — which is exactly how a `shell_write` whose `content` never arrived emptied a 1789-line file (BA-4). The Loop therefore never executes the tool calls of a `max_tokens` round: it returns `truncated:max_tokens` instead. Refusing discards nothing legitimate, and it closes that data-loss path for **every** tool you grant, not just `shell_write`. `pause_turn` (a *resumable* server-tool state), `refusal` and `context_exceeded` are surfaced but deliberately **not** treated as truncations.
+
 **Deny-spin short-circuit (`maxConsecutiveDenials`, default 3, v0.25+).** A *non-halt* deny (a `policy` verdict that isn't `true` — e.g. a `humanChannel: deny`, an allowlist miss, a `content`/`fs.writeScope` block) is **advisory**: it's fed back to the model as a tool result so the model can pivot to a different allowed tool. But a model that keeps retrying the *same* denied action would otherwise spin every round until your `budget.maxCostUsd` finally halts it — burning the whole cap with no progress (this bit a coding agent whose write kept tripping `content.askPatterns`). The Loop now counts **consecutive** denials (any allowed call resets the streak, preserving the pivot) and short-circuits at `maxConsecutiveDenials` with `result.error === 'denied:<tool>'` (a clean return, transcript sealed — never a throw). Check `result.error?.startsWith('denied:')` to distinguish a governance block from a completed run; set `maxConsecutiveDenials: 0` (or `Infinity`) on `new Loop({...})` to restore the pure-advisory behavior. Under `recurse`, a short-circuited worker returns a **labeled** `{ incomplete: true, blocker: 'governance-deny' }` (and `receipts.blocker`) so you can widen scope / re-gate / escalate rather than read it as a model failure.
+
+**Stuck-tool short-circuit (`maxIdenticalToolErrors`, default 3).** The error-side mirror of the deny guard, for the case where the *tool itself* keeps rejecting. A tool error is fed back to the model **on purpose** — that's how it learns the path was wrong and adapts — so the guard fires only on a **byte-identical** repeat: same tool name, same `JSON.stringify(arguments)`, N times in a row. Then the model isn't recovering, it's re-sending a call that cannot succeed, and the Loop returns `result.error === 'stuck:<tool>'` (clean, transcript sealed). This includes a repeated call to a tool that **doesn't exist** — a model that hallucinates the same unknown tool every round gets `[Loop] Unknown tool` fed back and can spin on it exactly as hard as on a throwing tool, so it counts toward the same guard. **Any successful tool call resets the streak**, and a model that *varies* its arguments (or the hallucinated name) never trips it. Counting *any* consecutive tool error instead was tried and rejected — it kills a model legitimately recovering from an `ENOENT` by trying a different path. Set `maxIdenticalToolErrors: 0` (or `Infinity`) on `new Loop({...})` to disable.
+
+> Note the division of labour with **BA-6**: if the tool call was *cut off* by the output cap, you get `truncated:max_tokens` and the tool is **never executed at all** — that path is closed upstream. `stuck:` covers the residual case: a fully-formed call on an untruncated round that fails for its own reasons — the tool executes and rejects it (bad path, failed validation), or the tool name doesn't exist at all — repeated byte-identically.
+
+**Thinking blocks are preserved and replayed (BA-7).** On `claude-sonnet-5` (and Opus 4.7+) **adaptive thinking is the default** — the API returns `thinking` blocks on a good fraction of rounds **whether or not you ask for them** (measured: ~3/10; sending `thinking:{type:'adaptive'}` explicitly changed the rate not at all). Anthropic's contract is that those blocks are echoed back **unchanged, `signature` included**, when a tool-use conversation continues. Before 0.27 bare-agent dropped every one of them, silently — and because the API returns **200** either way, nothing ever surfaced.
+
+The blocks now ride the transcript on `Message.providerBlocks` (`{provider, model, blocks}`) and the Anthropic provider replays them at the front of the assistant turn. **You get this for free — no flag.** Two things to know if you touch the transcript yourself: the blocks are **opaque** (keep the bytes; don't rebuild them from parsed fields — a `redacted_thinking` block won't survive it), and they are **tagged with the model that signed them** — a signature is model-bound, so swapping models mid-transcript drops them rather than sending a signature the new model will reject. If you persist and replay transcripts, keep `providerBlocks` intact through your serializer.
+
+`AnthropicProvider({ thinking })` is a separate, opt-in knob, forwarded to `body.thinking` verbatim (e.g. `{type:'adaptive', display:'summarized'}` to surface the reasoning; the default `display` is `'omitted'`). **It does not "turn thinking on"** — it's already on. Use it to pin the mode or reach `display`/`effort`. It is passed through unvalidated on purpose: `budget_tokens` was removed from the API and now **400s** on sonnet-5/Opus 4.7+, so a library that reshaped this parameter would need a release every time Anthropic moved.
+
+> **Honesty note, and we mean it.** This is a **protocol/data-loss fix, not a capability fix.** A head-to-head with thinking fully preserved vs. stock bare-agent produced **indistinguishable** outcomes. Do not adopt 0.27 expecting better reasoning — you will not get it, and we have the measurement.
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
 
@@ -730,6 +752,26 @@ new OpenAI({ apiKey, model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1' 
 
 // Anthropic
 new Anthropic({ apiKey, model: 'claude-haiku-4-5-20251001' })
+
+// Anthropic + TRANSCRIPT CACHING (BA-1, v0.27+) — if you run a TOOL LOOP, turn this on.
+// Anthropic does NOT auto-cache, so without it your loop re-buys its entire growing transcript at
+// FULL input price every single round. Measured on claude-sonnet-5 with a ~15k-token tool-result
+// transcript: $0.0753 -> $0.0110 per round, 6.8x cheaper in steady state (round 1 pays a 1.25x cache
+// write, once). Opt-in because it changes the wire format; also settable per call via
+// loop.run(msgs, tools, { cacheMessages: true }).
+new Anthropic({ apiKey, model: 'claude-sonnet-5', cacheMessages: true })
+//
+// Two things worth knowing before you rely on it:
+//  1. Caching pays for RE-SENDING, not for GROWING. The 6.8x is what a STABLE prefix buys — the
+//     transcript re-sent round after round. A round that appends large NEW content (another whole-file
+//     read) writes those tokens at 1.25x; no breakpoint makes a token you've never sent before cheap.
+//     Caching is necessary, not sufficient — it compounds with retrieval that stops re-reading files.
+//  2. A destructive `trim`/stash fold that rewrites the transcript PREFIX INVALIDATES the cache (the
+//     prefix IS the cache key). Keep the head stable, or you re-pay the write premium every round.
+//
+// `cacheSystem` is a different, weaker knob: Anthropic's minimum cacheable prefix is 1024-4096 tokens
+// (model-dependent) and a typical system persona is a few hundred — so on its own it silently caches
+// NOTHING. The transcript is where a tool loop's tokens actually live.
 
 // Gemini (native generateContent — needed for prompt-cache token tiers; the OpenAI-compat endpoint drops them)
 new Gemini({ apiKey, model: 'gemini-2.5-flash', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' })
@@ -1191,16 +1233,19 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 
 ### Recipe 8b: Loop + Shell Tools (cross-platform primitives)
 
-`createShellTools()` returns three pure-Node tools that work identically on linux, macOS, and Windows — no external binaries, no platform detection.
+`createShellTools()` returns five pure-Node tools that work identically on linux, macOS, and Windows — no external binaries, no platform detection.
 
 | Tool | Purpose |
 |---|---|
 | `shell_read` | Read a file (utf8, 256KB cap) or list a directory (tab-separated). `~` expands to home. |
+| `shell_write` | Write (or `append:true`) UTF-8 text to a file, creating parent dirs. 5MB cap. No shell, so it gates cleanly through `fs.writeScope` once translated to `{type:'write'}`. **`content` is REQUIRED** — see the truncation guard below. |
 | `shell_grep` | JavaScript regex search across files. Walks directories, skips binary files, returns `{hits: [{file, line, text}], truncated, fileCount}`. |
 | `shell_run` | Run a command with an **argv array** via `child_process.execFile` (no shell, no metacharacter interpretation). Returns `{stdout, stderr, code, timedOut}`. **Use this when you need a policy allowlist.** |
 | `shell_exec` | Run a raw shell command string via `/bin/sh -c` (or `cmd.exe`). Returns the same shape. **Shell metacharacters are interpreted — naive allowlists are bypassable.** Use only when you genuinely need shell features (pipes, redirects, globs). |
 
 **Zero baked-in allowlist.** The library ships the primitives; gating is bareguard's job via the standard `wireGate(gate)` wiring.
+
+> **⚠️ `shell_write` requires `content` — and a gate cannot cover for it (v0.27+).** `content` used to default to `''`, so a tool call that OMITTED it silently overwrote the target with **zero bytes** and returned `"wrote 0 bytes to <path>"` as success. That is the ordinary shape of a model hitting its **output-token cap** mid-generation on a long file — observed live emptying a 1789-line source file. **No policy can catch it:** a 0-byte write is a *legal* write, and bareguard's `fs` primitive judges `{type:'write', path}` without inspecting the body (the gate correctly `allow`s it). `shell_write` now **rejects** an absent, `null`, or non-string `content` and leaves the file byte-identical; the error tells the model to retry with the full content. An explicit `content: ""` still empties the file — that one is deliberate.
 
 > **⚠️ `shell_exec` injection caveat.** `"ls"` passes a base-command allowlist like `args.command.split(/\s+/)[0]`, but so does `"ls;rm -rf /tmp/x"` — the shell runs both. **A base-command allowlist is NOT safe for `shell_exec`.** For policy-gated use, prefer `shell_run({argv})` and allow-list on `args.argv[0]` — there is no shell in that path, so metacharacters are just literal argument bytes. Use `shell_exec` only when the agent needs pipes/redirects/globs, and gate it at a higher level (human approval, narrow intent).
 

@@ -1122,3 +1122,419 @@ describe('A1 — provider-supplied costUsd (CLI authoritative price)', () => {
     assert.equal(result.metrics.unpricedRounds, 1);
   });
 });
+
+// BA-5 (bareloop, HIGH): a governance bound firing is NORMAL operation in a ralph-style loop
+// (`while red and under-cap: run the worker`), not an exception — and the worker's own summary of what
+// it did and ruled out is the ONLY channel from attempt N to attempt N+1. Four of the five return paths
+// used to substitute `text: ''`, so a bounded attempt taught its successor NOTHING: the error tag
+// survived, the work did not. The caller decides what a partial result is worth; the library must not
+// decide it is worth zero. Supersedes the narrower BA-3 (loop.stop()), which is a sub-case.
+describe('Loop — BA-5: a bound that fires PRESERVES the text the model already produced', () => {
+  const { HaltError } = require('../src/errors');
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const readTool = { name: 'read', description: 'reads', execute: async () => 'file body' };
+
+  it('a governance HALT (budget / maxTurns) returns the produced text alongside halt:<rule>', async () => {
+    // The model narrates its progress, then the gate halts on the tool call.
+    const provider = scripted(() => ({ text: 'I ruled out tokenize.js; the bug is in store.js', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('over budget', { rule: 'limits.maxTurns' }); };
+    const result = await new Loop({ provider, policy, throwOnError: true }).run([{ role: 'user', content: 'fix it' }], [readTool]);
+    assert.equal(result.error, 'halt:limits.maxTurns', 'the rule tag still surfaces');
+    assert.equal(result.text, 'I ruled out tokenize.js; the bug is in store.js', 'the halt must NOT erase the work');
+  });
+
+  it('a halt raised while METERING the round (the budget-cap shape) keeps that round\'s text', async () => {
+    // The realistic budget halt: the round completes, onLlmResult forwards its usage to the gate, and the
+    // gate halts on the spend it just recorded. The text of the very round that tripped the cap must survive.
+    const provider = scripted(() => ({ text: 'partial answer before the cap', toolCalls: [], usage }));
+    const onLlmResult = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, onLlmResult, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.text, 'partial answer before the cap');
+  });
+
+  it('a DENY-STREAK short-circuit returns the produced text alongside denied:<tool>', async () => {
+    const provider = scripted((i) => ({ text: `attempt ${i}: still trying to write`, toolCalls: [{ id: 'w' + i, name: 'write', arguments: {} }], usage }));
+    const writeTool = { name: 'write', description: 'writes', execute: async () => 'should never run' };
+    const result = await new Loop({ provider, policy: async () => '[deny] out of scope', throwOnError: true })
+      .run([{ role: 'user', content: 'go' }], [writeTool]);
+    assert.equal(result.error, 'denied:write');
+    assert.equal(result.text, 'attempt 3: still trying to write', 'the last text the model produced, not \'\'');
+  });
+
+  it('a PROVIDER error under throwOnError:false returns the text produced on earlier rounds', async () => {
+    const provider = scripted((i) => {
+      if (i === 1) return { text: 'round one: read the file', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage };
+      throw new Error('upstream 503');
+    });
+    const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.error, 'upstream 503');
+    assert.equal(result.text, 'round one: read the file', 'a mid-run provider failure must not erase prior work');
+  });
+
+  it('loop.stop() returns error:null AND the produced text (BA-3, the caller-initiated sub-case)', async () => {
+    // A deliberate stop is not a fault. Before the fix this fell through to the HARD_ROUND_LIMIT return and
+    // reported the internal safety-limit warning as `error` — indistinguishable from a runaway.
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops the loop', execute: async () => { loop.stop(); return 'stopping'; } };
+    const provider = scripted(() => ({ text: 'work so far: narrowed it to keywords()', toolCalls: [{ id: 's1', name: 'stopper', arguments: {} }], usage }));
+    loop = new Loop({ provider });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, null, 'a caller-initiated stop is not an error');
+    assert.equal(result.text, 'work so far: narrowed it to keywords()');
+  });
+
+  it('NEGATIVE CONTROL: a bound that fires before ANY text was produced still returns text:\'\'', async () => {
+    // Without this, the suite cannot tell "preserved the model's text" from "always returns something
+    // non-empty" — a fix that stuffed a placeholder into `text` would pass every criterion above.
+    const provider = scripted(() => ({ text: '', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, policy, throwOnError: true }).run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.text, '', 'there was nothing to preserve — do not invent text');
+  });
+
+  it('the preserved text is also on the loop:done event (the stream must not disagree with the return)', async () => {
+    const provider = scripted(() => ({ text: 'produced before the halt', toolCalls: [{ id: 't1', name: 'read', arguments: {} }], usage }));
+    const policy = () => { throw new HaltError('cap', { rule: 'limits.maxTurns' }); };
+    const seen = [];
+    const loop = new Loop({ provider, policy, throwOnError: true });
+    loop.on?.('loop:done', (e) => seen.push(e));
+    const result = await loop.run([{ role: 'user', content: 'go' }], [readTool]);
+    assert.equal(result.text, 'produced before the halt');
+  });
+});
+
+// Review findings on the BA-5 stop() exit: the transcript seal must not claim a deliberate stop was a
+// governance halt, and a stop is a clean END (error:null) so it owes the same residual harvest that a
+// naturally-ending run performs — otherwise a stopped run silently loses its un-evicted window.
+describe('Loop — stop() exit hygiene (seal marker + residual harvest)', () => {
+  const { HaltError } = require('../src/errors');
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  it('seals a mid-round stop with [stopped], NOT [halted:…] (a stop is not a governance halt)', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    // Two tool calls in one round: the first stops the loop, the second is left dangling and must be sealed.
+    const provider = scripted(() => ({ text: 'work', toolCalls: [
+      { id: 'a', name: 'stopper', arguments: {} },
+      { id: 'b', name: 'stopper', arguments: {} },
+    ], usage: {} }));
+    loop = new Loop({ provider });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    const sealed = result.msgs.filter(m => m.role === 'tool').map(m => m.content);
+    assert.deepEqual(sealed, ['ok', '[stopped]'], 'the dangling call is sealed as [stopped]');
+    assert.ok(!sealed.some(c => String(c).includes('[halted:')), 'a deliberate stop must never be tagged as halted');
+  });
+
+  it('runs the trim .flush residual harvest on stop (a stop is a clean END, not an abort)', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    const provider = scripted(() => ({ text: 'work', toolCalls: [{ id: 'a', name: 'stopper', arguments: {} }], usage: {} }));
+    let flushed = 0;
+    const trim = async (msgs) => msgs;
+    trim.flush = async () => { flushed += 1; };
+    loop = new Loop({ provider, trim });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, null);
+    assert.equal(flushed, 1, 'the surviving window is harvested — a stopped run must not silently lose it');
+  });
+
+  it('a governance HaltError raised during the stop-flush is a clean return, never a thrown run', async () => {
+    let loop;
+    const stopper = { name: 'stopper', description: 'stops', execute: async () => { loop.stop(); return 'ok'; } };
+    const provider = scripted(() => ({ text: 'work', toolCalls: [{ id: 'a', name: 'stopper', arguments: {} }], usage: {} }));
+    const trim = async (msgs) => msgs;
+    trim.flush = async () => { throw new HaltError('write gate', { rule: 'fs.writeScope' }); };
+    loop = new Loop({ provider, trim, throwOnError: true });
+    // This path sits PAST the outer HaltError handler — an un-converted throw would escape run() and reject.
+    const result = await loop.run([{ role: 'user', content: 'go' }], [stopper]);
+    assert.equal(result.error, 'halt:fs.writeScope', 'converted in place, not thrown');
+    assert.equal(result.text, 'work');
+  });
+});
+
+describe('Loop — BA-6: a TRUNCATED round must never read as a completed one', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  // AC-2: the core defect. A round the API cut off at the cap returned error:null — a clean finish.
+  it('stopReason max_tokens with NO tool calls returns error:truncated:max_tokens, not error:null', async () => {
+    const provider = scripted(() => ({ text: 'partial essay about the his', toolCalls: [], stopReason: 'max_tokens', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'write 2000 words' }]);
+    assert.equal(result.error, 'truncated:max_tokens', 'a truncation is NOT a clean finish');
+    assert.equal(result.text, 'partial essay about the his', 'BA-5: the partial work is preserved, never discarded');
+  });
+
+  // AC-3 (NEGATIVE CONTROL): without this, a fix that errors on EVERY zero-tool-call round would pass —
+  // and would break every consumer's happy path. Proves the check reads the flag, not the weather.
+  it('NEGATIVE CONTROL: stopReason end_turn with no tool calls STILL returns a clean finish', async () => {
+    const provider = scripted(() => ({ text: 'the answer is 42', toolCalls: [], stopReason: 'end_turn', usage }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null, 'a real finish must stay a clean finish');
+    assert.equal(result.text, 'the answer is 42');
+  });
+
+  // AC-4 (NEGATIVE CONTROL): providers that report nothing (CLIPipe) or an unmapped value must behave
+  // EXACTLY as they did pre-BA-6. A wrong/absent mapping degrades to the status quo, not to a false error.
+  it('NEGATIVE CONTROL: a provider that reports NO stopReason behaves exactly as today', async () => {
+    const provider = scripted(() => ({ text: 'done', toolCalls: [], usage })); // no stopReason field at all
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+    assert.equal(result.error, null, 'absent stopReason must not invent a truncation');
+    assert.equal(result.text, 'done');
+  });
+
+  // AC-5 (INVERTED by the POC): a truncated round's tool calls were cut off mid-generation, so their
+  // arguments are missing keys. Executing one is the BA-4 file-zeroing mechanism. A COMPLETE call always
+  // arrives tagged 'tool_use', never 'max_tokens' — so refusing here discards nothing legitimate.
+  it('REFUSES to execute the tool calls of a truncated round (the BA-4 root cause)', async () => {
+    let executed = false;
+    // The exact BA-4 shape: shell_write truncated mid-generation, `content` never arrived.
+    const provider = scripted(() => ({
+      text: '', stopReason: 'max_tokens', usage,
+      toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: '/tmp/store.js' } }], // no `content`!
+    }));
+    const writeTool = { name: 'shell_write', description: 'writes', execute: async () => { executed = true; return 'wrote'; } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'rewrite it' }], [writeTool]);
+    assert.equal(executed, false, 'a half-generated tool call must NEVER reach the tool');
+    assert.equal(result.error, 'truncated:max_tokens');
+  });
+
+  // The transcript must stay wire-valid: a tool_call we refuse to run must not be left orphaned
+  // (a tool_call with no tool_result is a 400 on Anthropic).
+  it('seals the transcript without orphaning the refused tool call', async () => {
+    const provider = scripted(() => ({
+      text: 'I will now write the file', stopReason: 'max_tokens', usage,
+      toolCalls: [{ id: 'w1', name: 'shell_write', arguments: { path: '/tmp/x' } }],
+    }));
+    const writeTool = { name: 'shell_write', description: 'writes', execute: async () => 'wrote' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [writeTool]);
+    const assistantTurns = result.msgs.filter((m) => m.role === 'assistant');
+    assert.ok(assistantTurns.every((m) => !m.tool_calls), 'no tool_call may be pushed — it would have no tool_result');
+    assert.equal(result.msgs.filter((m) => m.role === 'tool').length, 0, 'and no orphan tool result');
+  });
+
+  // pause_turn is a RESUMABLE server-tool state, and context_exceeded is a different failure.
+  // Folding either into the truncation check would break flows that are working as designed.
+  it('does NOT treat pause_turn or refusal as a truncation', async () => {
+    for (const stopReason of ['pause_turn', 'refusal', 'stop_sequence']) {
+      const provider = scripted(() => ({ text: 'x', toolCalls: [], stopReason, usage }));
+      const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }]);
+      assert.equal(result.error, null, `${stopReason} is not an output-cap truncation`);
+    }
+  });
+
+  // The tokens were really spent. A truncation the gate can't see is a budget hole.
+  it('METERS the truncated round before returning (the gate must see the spend)', async () => {
+    const seen = [];
+    const provider = scripted(() => ({ text: 'partial', toolCalls: [], stopReason: 'max_tokens', usage: { inputTokens: 10, outputTokens: 99 } }));
+    const result = await new Loop({ provider, throwOnError: true, onLlmResult: (r) => seen.push(r) })
+      .run([{ role: 'user', content: 'go' }]);
+    assert.equal(seen.length, 1, 'the truncated round still forwards its usage to the gate');
+    assert.equal(result.metrics.tokens.output, 99, 'and is counted by the meter');
+  });
+});
+
+describe('Loop — BA-12: an identical repeated tool ERROR must not spin to the budget cap', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+
+  // The observed spin: the model re-issues the SAME impossible call, verbatim, forever.
+  it('short-circuits with stuck:<tool> after N identical failing calls', async () => {
+    let calls = 0;
+    const provider = scripted((i) => ({
+      text: `attempt ${i}`, usage,
+      toolCalls: [{ id: `w${i}`, name: 'shell_write', arguments: { path: '/tmp/x' } }], // byte-identical every round
+    }));
+    const badTool = {
+      name: 'shell_write', description: 'writes',
+      execute: async () => { calls++; throw new Error('shell_write requires a non-empty "content" string'); },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [badTool]);
+    assert.equal(result.error, 'stuck:shell_write');
+    assert.equal(calls, 3, 'stopped at the threshold — not 100 rounds of burn');
+    assert.equal(result.text, 'attempt 3', 'BA-5: the model\'s work is still preserved');
+  });
+
+  // The unknown-tool variant of the same spin: a model that hallucinates the SAME missing tool name every
+  // round gets an error fed back exactly like a throwing tool, and can spin on it just as hard. Before the
+  // fix this reached the hard round limit (the `!tool` branch continued without counting).
+  it('short-circuits an identical UNKNOWN (hallucinated) tool call too', async () => {
+    const provider = scripted((i) => ({
+      text: `attempt ${i}`, usage,
+      toolCalls: [{ id: `g${i}`, name: 'ghost_tool', arguments: { x: 1 } }], // a tool that does not exist
+    }));
+    const realTool = { name: 'real', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [realTool]);
+    assert.equal(result.error, 'stuck:ghost_tool', 'the spin guard catches an unknown-tool spin, not just a throwing one');
+    assert.doesNotMatch(String(result.error), /safety limit/, 'it must not spin to the hard round limit');
+    assert.equal(result.text, 'attempt 3', 'BA-5: the model text is preserved');
+  });
+
+  // NEGATIVE CONTROL — an unknown tool called ONCE then recovered from must not trip (threshold is 3), and
+  // varying the hallucinated name is recovery, not a spin.
+  it('NEGATIVE CONTROL: a one-off / varied unknown tool is never tripped', async () => {
+    const provider = scripted((i) => (i <= 2
+      ? { text: '', usage, toolCalls: [{ id: `g${i}`, name: `ghost_${i}`, arguments: {} }] } // different name each time
+      : { text: 'recovered', toolCalls: [], usage }));
+    const realTool = { name: 'real', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [realTool]);
+    assert.equal(result.error, null, 'varied unknown names = recovery in progress, not a spin');
+    assert.equal(result.text, 'recovered');
+  });
+
+  // NEGATIVE CONTROL 1 — the whole risk of this guard. A model that ADAPTS its arguments in response to an
+  // error is doing exactly what the error-feedback loop exists to enable, and must never be punished.
+  it('NEGATIVE CONTROL: a model that VARIES its args (genuinely recovering) is never tripped', async () => {
+    const provider = scripted((i) => (i <= 4
+      ? { text: '', usage, toolCalls: [{ id: `r${i}`, name: 'read', arguments: { path: `/try/${i}` } }] } // different args each time
+      : { text: 'found it', toolCalls: [], usage }));
+    const failing = { name: 'read', description: 'reads', execute: async () => { throw new Error('ENOENT'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [failing]);
+    assert.equal(result.error, null, 'varying args = recovery in progress, not a spin');
+    assert.equal(result.text, 'found it');
+  });
+
+  // NEGATIVE CONTROL 2 — a transient failure that recovers must not be killed.
+  it('NEGATIVE CONTROL: a tool that errors then SUCCEEDS resets the streak', async () => {
+    let n = 0;
+    const provider = scripted((i) => (i <= 4
+      ? { text: '', usage, toolCalls: [{ id: `f${i}`, name: 'flaky', arguments: { q: 1 } }] } // identical args!
+      : { text: 'done', toolCalls: [], usage }));
+    // Fails, fails, SUCCEEDS, fails, fails — never 3 identical failures in a row.
+    const flaky = {
+      name: 'flaky', description: 'flaky',
+      execute: async () => { n++; if (n === 3) return 'ok'; throw new Error('transient network blip'); },
+    };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [flaky]);
+    assert.equal(result.error, null, 'a success in the middle clears the streak — a flaky tool still recovers');
+    assert.equal(result.text, 'done');
+  });
+
+  it('a DIFFERENT tool failing in between resets the streak', async () => {
+    const provider = scripted((i) => ({
+      text: '', usage,
+      toolCalls: [{ id: `t${i}`, name: i % 2 ? 'a' : 'b', arguments: { x: 1 } }], // alternating tools
+    }));
+    const a = { name: 'a', description: 'a', execute: async () => { throw new Error('boom'); } };
+    const b = { name: 'b', description: 'b', execute: async () => { throw new Error('boom'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [a, b]);
+    // Never 3 identical in a row, so BA-12 never fires — the run ends on the hard round limit instead.
+    assert.notEqual(result.error, 'stuck:a');
+    assert.notEqual(result.error, 'stuck:b');
+  });
+
+  it('maxIdenticalToolErrors:0 disables the guard (restores pre-BA-12 behavior)', async () => {
+    const provider = scripted((i) => ({ text: '', usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const bad = { name: 'w', description: 'w', execute: async () => { throw new Error('always fails'); } };
+    const result = await new Loop({ provider, throwOnError: true, maxIdenticalToolErrors: 0 })
+      .run([{ role: 'user', content: 'go' }], [bad]);
+    assert.notEqual(result.error, 'stuck:w', 'disabled means disabled — it spins to the hard limit');
+  });
+
+  it('the transcript is sealed provider-valid (no orphan tool_call)', async () => {
+    const provider = scripted((i) => ({ text: 'x', usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const bad = { name: 'w', description: 'w', execute: async () => { throw new Error('nope'); } };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [bad]);
+    assert.equal(result.error, 'stuck:w');
+    const callIds = result.msgs.filter((m) => m.role === 'assistant' && m.tool_calls).flatMap((m) => m.tool_calls.map((c) => c.id));
+    const resultIds = result.msgs.filter((m) => m.role === 'tool').map((m) => m.tool_call_id);
+    assert.deepEqual(callIds.sort(), resultIds.sort(), 'every tool_call has a tool_result');
+  });
+
+  it('BA-11 deny behavior is unchanged (the two guards are independent)', async () => {
+    const provider = scripted((i) => ({ text: `t${i}`, usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const w = { name: 'w', description: 'w', execute: async () => 'never runs' };
+    const result = await new Loop({ provider, policy: async () => '[deny] no', throwOnError: true })
+      .run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'denied:w', 'a deny is still a deny, not a stuck');
+  });
+});
+
+// BA-10: `temperatureDropped` (a round whose non-default temperature the model rejected and retried without)
+// must survive on EVERY terminating return, not only the clean/truncated ones — recurse's refineLeaf reads
+// it to record the EFFECTIVE temperature. A bounded attempt most often ends by halt/deny/stop, so those are
+// exactly the paths that must not silently drop the flag (or the receipt reports the ignored requested temp).
+describe('Loop — BA-10: temperatureDropped is preserved on governance-terminated returns', () => {
+  const { HaltError } = require('../src/errors');
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn(this._i = (this._i || 0) + 1, m, t, o); } });
+  const droppingProvider = () => scripted((i) => ({
+    text: `t${i}`, usage, temperatureDropped: true,
+    toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }],
+  }));
+  const w = { name: 'w', description: 'w', execute: async () => 'ran' };
+
+  it('survives a governance HALT', async () => {
+    const policy = async () => { throw new HaltError('budget', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider: droppingProvider(), policy }).run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.temperatureDropped, true, 'the effective-temperature signal must not be lost on a halt');
+  });
+
+  it('survives a deny-streak short-circuit', async () => {
+    const result = await new Loop({ provider: droppingProvider(), policy: async () => '[deny] no', maxConsecutiveDenials: 3 })
+      .run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'denied:w');
+    assert.equal(result.temperatureDropped, true);
+  });
+
+  it('survives a caller-initiated stop()', async () => {
+    const loop = new Loop({ provider: scripted((i) => {
+      if (i >= 2) loop.stop();
+      return { text: `t${i}`, usage, temperatureDropped: true, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] };
+    }) });
+    const result = await loop.run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, null, 'a deliberate stop is not a fault');
+    assert.equal(result.temperatureDropped, true);
+  });
+
+  it('is ABSENT when no temperature was ever dropped (no false flag)', async () => {
+    const provider = scripted((i) => ({ text: `t${i}`, usage, toolCalls: [{ id: `w${i}`, name: 'w', arguments: {} }] }));
+    const policy = async () => { throw new HaltError('budget', { rule: 'budget.maxCostUsd' }); };
+    const result = await new Loop({ provider, policy }).run([{ role: 'user', content: 'go' }], [w]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd');
+    assert.equal(result.temperatureDropped, undefined, 'the flag appears only when a drop actually happened');
+  });
+});
+
+// BA-7: the Loop's job here is narrow — carry provider-native blocks (Anthropic thinking) onto the
+// assistant turn so the provider can replay them. The transcript, not the provider, was hole #3 in the
+// report: the OpenAI-shaped Message had no field that COULD hold one, so the block died here.
+// The Loop stays OPAQUE — it never reads the blocks, it just refuses to lose them.
+describe('Loop — BA-7: provider-native blocks survive the transcript', () => {
+  const usage = { inputTokens: 1, outputTokens: 1 };
+  const scripted = (fn) => ({ async generate(m, t, o) { return fn((this._i = (this._i || 0) + 1), m, t, o); } });
+  const BLOCKS = { provider: 'anthropic', model: 'claude-sonnet-5', blocks: [{ type: 'thinking', thinking: 'hm', signature: 'SIGBYTES' }] };
+
+  it('carries providerBlocks onto a TOOL-CALL assistant turn (the turn the contract is about)', async () => {
+    const provider = scripted((i) => (i === 1
+      ? { text: '', usage, toolCalls: [{ id: 'a1', name: 'r', arguments: {} }], providerBlocks: BLOCKS }
+      : { text: 'done', usage, toolCalls: [] }));
+    const r = { name: 'r', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [r]);
+    const assistant = result.msgs.find((m) => m.role === 'assistant' && m.tool_calls);
+    assert.deepEqual(assistant.providerBlocks, BLOCKS, 'the block reaches the transcript, signature intact');
+  });
+
+  it('carries providerBlocks onto the FINAL assistant turn (a replayed transcript stays faithful)', async () => {
+    const provider = scripted(() => ({ text: 'done', usage, toolCalls: [], providerBlocks: BLOCKS }));
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], []);
+    const assistant = result.msgs.find((m) => m.role === 'assistant');
+    assert.deepEqual(assistant.providerBlocks, BLOCKS);
+  });
+
+  // NEGATIVE CONTROL: a provider that sends no blocks must leave the transcript byte-identical to
+  // pre-BA-7 — no empty field, no undefined key. This is what proves the carry reads the response.
+  it('NEGATIVE CONTROL: a provider sending no blocks leaves the message unchanged', async () => {
+    const provider = scripted((i) => (i === 1
+      ? { text: '', usage, toolCalls: [{ id: 'a1', name: 'r', arguments: {} }] }
+      : { text: 'done', usage, toolCalls: [] }));
+    const r = { name: 'r', description: 'r', execute: async () => 'ok' };
+    const result = await new Loop({ provider, throwOnError: true }).run([{ role: 'user', content: 'go' }], [r]);
+    for (const m of result.msgs) {
+      assert.equal('providerBlocks' in m, false, 'no stray key on any message');
+    }
+  });
+});

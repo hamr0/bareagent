@@ -90,23 +90,40 @@ async function readEntry(rawPath, maxBytes) {
  * writes through the shell is impractical: redirection is a shell metachar that an argv/bash allowlist denies).
  * Creates parent directories. Caps size as a sanity ceiling. NO shell — so it gates cleanly through bareguard's
  * fs primitive when the adopter translates `shell_write` → `{ type:'write', path }` (see createShellTools doc).
- * @param {{path: string, content?: string, append?: boolean, maxBytes?: number}} args
+ *
+ * `content` is REQUIRED and must be a string (BA-4). It used to default to `''`, which made the ordinary
+ * failure mode of a long generation — the model hits its output-token cap and the tool call arrives with
+ * `content` absent — silently truncate the target to zero bytes and report `"wrote 0 bytes"` as SUCCESS.
+ * No policy can catch that: a 0-byte write is a legal write, and bareguard's fs primitive judges
+ * `{type:'write', path}` without ever inspecting the body. It is a missing precondition in the primitive,
+ * not a governance gap. An explicit `content: ''` still empties the file — the caller meant it.
+ * `content` is typed REQUIRED so the generated `.d.ts` states the real contract — a library caller that omits
+ * it is a type error, not a runtime surprise. The guard below still runs, because the tool-execute boundary
+ * feeds this UNTRUSTED model-authored args (that is the boundary BA-4 was breached at, and where types buy
+ * nothing).
+ * @param {{path: string, content: string, append?: boolean, maxBytes?: number}} args
  * @returns {Promise<string>}
  */
-async function writeFile({ path: rawPath, content = '', append = false, maxBytes }) {
+async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw new Error('shell_write requires a non-empty "path" string');
   }
-  const text = content == null ? '' : String(content);
+  if (typeof content !== 'string') {
+    throw new Error(
+      'shell_write requires a "content" string (pass content:"" to deliberately empty the file). '
+      + `Got ${content === undefined ? 'no content argument' : `content of type ${content === null ? 'null' : typeof content}`}`
+      + ' — refusing to write, the file is unchanged. If your output was cut short, retry with the full content.',
+    );
+  }
   const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
-  const bytes = Buffer.byteLength(text, 'utf8');
+  const bytes = Buffer.byteLength(content, 'utf8');
   if (bytes > cap) {
     throw new Error(`shell_write content is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
   }
   const resolved = path.resolve(expandHome(rawPath));
   await fs.mkdir(path.dirname(resolved), { recursive: true });
-  if (append) await fs.appendFile(resolved, text, 'utf8');
-  else await fs.writeFile(resolved, text, 'utf8');
+  if (append) await fs.appendFile(resolved, content, 'utf8');
+  else await fs.writeFile(resolved, content, 'utf8');
   return `${append ? 'appended' : 'wrote'} ${bytes} bytes to ${resolved}`;
 }
 
@@ -425,13 +442,16 @@ function createShellTools() {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Target file path. ~ expands to home. Parent dirs are created.' },
-          content: { type: 'string', description: 'The full text to write (UTF-8).' },
+          content: { type: 'string', description: 'The full text to write (UTF-8). Required — a call without it is REJECTED, not treated as an empty write. Pass "" only to deliberately empty the file.' },
           append: { type: 'boolean', description: 'Append to the file instead of overwriting it (default false).' },
           maxBytes: { type: 'integer', description: 'Reject a write larger than this many bytes (default 5242880).' },
         },
         required: ['path', 'content'],
       },
-      execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) => writeFile(args),
+      // The args are model-authored and UNTRUSTED — `content` may be absent (an output-token-capped
+      // generation), so the boundary type stays loose and `writeFile` enforces the contract at runtime (BA-4).
+      execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) =>
+        writeFile(/** @type {any} */ (args)),
     },
     {
       name: 'shell_run',

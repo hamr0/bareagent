@@ -73,6 +73,34 @@ describe('OllamaProvider', () => {
     assert.equal(p.model, 'mistral');
     assert.equal(p.url, 'http://gpu-server:11434');
   });
+
+  // REGRESSION. Ollama was the ONLY provider that silently dropped `maxTokens` — every other one
+  // forwarded it — so a caller capping output here generated unbounded and never knew. Ollama's cap is
+  // `options.num_predict`. Found by the BA-6 map probe: a 16-token cap came back `done_reason: 'stop'`
+  // because nothing ever truncated. The stopReason MAP was right; the cap never reached the wire.
+  it('forwards maxTokens as options.num_predict (it used to be silently dropped)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'length' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], [], { maxTokens: 16 });
+      assert.equal(received[0].body.options.num_predict, 16, 'the cap reaches the wire');
+    } finally { server.close(); }
+  });
+
+  it('forwards maxTokens and temperature together (both nest under options)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'stop' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], [], { maxTokens: 16, temperature: 0.7 });
+      assert.deepEqual(received[0].body.options, { temperature: 0.7, num_predict: 16 });
+    } finally { server.close(); }
+  });
+
+  it('sends no options block at all when neither is set (body unchanged)', async () => {
+    const { server, url, received } = await jsonServer({ message: { content: 'ok' }, done_reason: 'stop' });
+    try {
+      await new OllamaProvider({ url }).generate([{ role: 'user', content: 'hi' }], []);
+      assert.equal('options' in received[0].body, false);
+    } finally { server.close(); }
+  });
 });
 
 describe('provider error body exposure', () => {
@@ -243,6 +271,235 @@ describe('Anthropic cacheSystem opt-in (cache_control on the system prompt)', ()
     await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheSystem: true }).generate(MSGS, [], { cacheSystem: false });
     assert.equal(received[0].body.system, 'be terse');
     server.close();
+  });
+});
+
+describe('Anthropic cacheMessages opt-in — BA-1 transcript caching', () => {
+  const RESP = { content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 5, output_tokens: 1 } };
+  // The shape that MATTERS, and the one no caller-side seam can reach: a tool loop's transcript ends on a
+  // tool_result, which _toAnthropicMessage rebuilds from scratch (discarding anything a caller attached).
+  const TOOL_TRANSCRIPT = [
+    { role: 'user', content: 'read it' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 't1', content: 'a very large file body' },
+  ];
+
+  // try/finally, not a trailing close(): a failing assert must still shut the server down, or the test
+  // runner hangs on the open handle instead of reporting the failure.
+  const withServer = async (fn) => {
+    const h = await jsonServer(RESP);
+    try { await fn(h); } finally { h.server.close(); }
+  };
+
+  it('default OFF: the outbound body carries no cache_control at all (opt-in means opt-in)', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate(TOOL_TRANSCRIPT, []);
+      assert.equal(JSON.stringify(received[0].body).includes('cache_control'), false);
+    });
+  });
+
+  it('cacheMessages:true marks the last block of a TOOL_RESULT-terminated transcript', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(TOOL_TRANSCRIPT, []);
+      const msgs = received[0].body.messages;
+      const lastBlock = msgs[msgs.length - 1].content[0];
+      assert.equal(lastBlock.type, 'tool_result', 'the rebuilt tool_result is still the last block');
+      assert.deepEqual(lastBlock.cache_control, { type: 'ephemeral' }, 'and it carries the breakpoint');
+    });
+  });
+
+  it('marks a STRING-content last message by promoting it to a text block', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true })
+        .generate([{ role: 'user', content: 'hi' }], []);
+      const msgs = received[0].body.messages;
+      assert.deepEqual(msgs[msgs.length - 1].content, [{ type: 'text', text: 'hi', cache_control: { type: 'ephemeral' } }]);
+    });
+  });
+
+  it('marks EXACTLY ONE block — Anthropic allows at most 4, and a stray mark shifts the cache key', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(TOOL_TRANSCRIPT, []);
+      const marks = JSON.stringify(received[0].body.messages).split('cache_control').length - 1;
+      assert.equal(marks, 1, 'exactly one rolling breakpoint');
+    });
+  });
+
+  // COPY-ON-WRITE. A caller's content array is passed through by reference: marking it in place would
+  // mutate the caller's OWN transcript, leaving a stale breakpoint that accumulates on every later round.
+  it('does NOT mutate the caller\'s messages (a stale mark would accumulate across rounds)', async () => {
+    await withServer(async ({ url }) => {
+      const caller = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }];
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true }).generate(caller, []);
+      assert.equal(caller[0].content[0].cache_control, undefined, 'the caller\'s own array is untouched');
+    });
+  });
+
+  it('per-call cacheMessages:false overrides an instance default of true', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheMessages: true })
+        .generate(TOOL_TRANSCRIPT, [], { cacheMessages: false });
+      assert.equal(JSON.stringify(received[0].body).includes('cache_control'), false);
+    });
+  });
+
+  it('composes with cacheSystem — system and transcript are marked independently', async () => {
+    await withServer(async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, cacheSystem: true, cacheMessages: true })
+        .generate([{ role: 'system', content: 'be terse' }, ...TOOL_TRANSCRIPT], []);
+      assert.ok(Array.isArray(received[0].body.system), 'system marked');
+      const msgs = received[0].body.messages;
+      assert.ok(msgs[msgs.length - 1].content[0].cache_control, 'transcript marked too');
+    });
+  });
+});
+
+// BA-7. Anthropic echoes `thinking` blocks back UNCHANGED (signature included) when a tool-use
+// conversation continues; bare-agent used to drop every one — the request had no `thinking` key, the
+// response parser kept only text/tool_use, and the OpenAI-shaped Message had no field that could hold
+// one. These assert on the OUTBOUND BODY, because the defect was precisely that nothing reached the wire.
+//
+// HONESTY (measured, poc/ba7-*.mjs): this fixes a PROTOCOL violation and silent data loss. It is NOT a
+// capability fix — the adopter's head-to-head (raw SDK with thinking fully preserved vs. stock
+// bare-agent) produced indistinguishable outcomes. Nothing here should be read as making agents smarter.
+describe('Anthropic thinking blocks — BA-7 preservation + opt-in', () => {
+  const SIG = 'ErUBCkYIBBgCKkBx3n0nS9Vv0PZs+FAKE+SIGNATURE+BYTES==';
+  const THINK = { type: 'thinking', thinking: 'The Tuesday cron is 0 3 * * 2...', signature: SIG };
+  // What the API actually returns on an adaptive-thinking tool round (measured: blocks lead with thinking).
+  const RESP_THINK = {
+    model: 'claude-sonnet-5',
+    stop_reason: 'tool_use',
+    content: [THINK, { type: 'tool_use', id: 't1', name: 'read', input: { path: '/etc/ci/config.yml' } }],
+    usage: { input_tokens: 5, output_tokens: 9 },
+  };
+  const RESP_PLAIN = { model: 'claude-sonnet-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 5, output_tokens: 1 } };
+
+  const withServer = async (resp, fn) => {
+    const h = await jsonServer(resp);
+    try { await fn(h); } finally { h.server.close(); }
+  };
+
+  it('captures thinking blocks off the response instead of dropping them', async () => {
+    await withServer(RESP_THINK, async ({ url }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      const r = await p.generate([{ role: 'user', content: 'go' }], []);
+      assert.deepEqual(r.providerBlocks.blocks, [THINK], 'the block survives, signature and all');
+      assert.equal(r.providerBlocks.provider, 'anthropic');
+      assert.equal(r.providerBlocks.model, 'claude-sonnet-5');
+      assert.deepEqual(r.toolCalls, [{ id: 't1', name: 'read', arguments: { path: '/etc/ci/config.yml' } }],
+        'and the normalized shape is unchanged');
+    });
+  });
+
+  // CRITERION 1 of the ask: round N+1's body must carry round N's BYTE-IDENTICAL thinking blocks.
+  it('replays thinking blocks VERBATIM in the assistant turn on the next request', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      await p.generate([
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 't1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+          providerBlocks: { provider: 'anthropic', model: 'claude-sonnet-5', blocks: [THINK] },
+        },
+        { role: 'tool', tool_call_id: 't1', content: 'schedule: 0 3 * * 2' },
+      ], []);
+      const assistant = received[0].body.messages[1];
+      assert.deepEqual(assistant.content[0], THINK, 'byte-identical, signature included');
+      assert.equal(assistant.content[0].signature, SIG);
+      assert.equal(assistant.content[1].type, 'tool_use', 'thinking LEADS the content array');
+    });
+  });
+
+  it('replays thinking on a tool-call-free assistant turn too', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      await p.generate([
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'my answer', providerBlocks: { provider: 'anthropic', model: 'claude-sonnet-5', blocks: [THINK] } },
+        { role: 'user', content: 'why?' },
+      ], []);
+      const assistant = received[0].body.messages[1];
+      assert.deepEqual(assistant.content, [THINK, { type: 'text', text: 'my answer' }]);
+    });
+  });
+
+  // A signature is bound to the model that issued it. Replaying it to a DIFFERENT model is a 400
+  // waiting to happen — drop the blocks and degrade to the (lossy but valid) pre-BA-7 request.
+  it('does NOT replay blocks tagged for a different model', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-haiku-4-5' });
+      await p.generate([
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'a', providerBlocks: { provider: 'anthropic', model: 'claude-sonnet-5', blocks: [THINK] } },
+        { role: 'user', content: 'b' },
+      ], []);
+      assert.equal(JSON.stringify(received[0].body).includes(SIG), false, 'another model\'s signature never goes on the wire');
+    });
+  });
+
+  it('does NOT replay blocks tagged for a different provider', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      await p.generate([
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'a', providerBlocks: { provider: 'openai', model: 'claude-sonnet-5', blocks: [THINK] } },
+        { role: 'user', content: 'b' },
+      ], []);
+      assert.equal(JSON.stringify(received[0].body).includes(SIG), false);
+    });
+  });
+
+  // OPACITY: a redacted_thinking block has no parseable text — it MUST survive as bytes. A parser that
+  // only understood `type:'thinking'` would silently drop it, which is the very bug being fixed.
+  it('preserves an OPAQUE block type it does not understand (redacted_thinking)', async () => {
+    const redacted = { type: 'redacted_thinking', data: 'EroBCkYIBBgCKkD...opaque...' };
+    await withServer({ ...RESP_THINK, content: [redacted, { type: 'tool_use', id: 't1', name: 'read', input: {} }] }, async ({ url }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      const r = await p.generate([{ role: 'user', content: 'go' }], []);
+      assert.deepEqual(r.providerBlocks.blocks, [redacted], 'kept verbatim without being understood');
+    });
+  });
+
+  // CRITERION 2: the opt-in param reaches body.thinking. Forwarded VERBATIM — `budget_tokens` already
+  // died once; a library that reshapes this needs a release every time Anthropic moves.
+  it('forwards an opt-in thinking option to body.thinking verbatim', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, thinking: { type: 'adaptive', display: 'summarized' } })
+        .generate([{ role: 'user', content: 'go' }], []);
+      assert.deepEqual(received[0].body.thinking, { type: 'adaptive', display: 'summarized' });
+    });
+  });
+
+  it('per-call thinking overrides the instance default', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, thinking: { type: 'adaptive' } })
+        .generate([{ role: 'user', content: 'go' }], [], { thinking: null });
+      assert.equal('thinking' in received[0].body, false, 'per-call null suppresses the instance default');
+    });
+  });
+
+  // CRITERION 3, the negative control: with no thinking option and no blocks, the body must be
+  // byte-identical to pre-BA-7. This is what proves the feature reads its flag and not the weather.
+  it('NEGATIVE CONTROL: no thinking option + no blocks ⇒ the body is unchanged from pre-BA-7', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const p = new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' });
+      const msgs = [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 't1', content: 'body' },
+      ];
+      await p.generate(msgs, []);
+      const body = received[0].body;
+      assert.equal('thinking' in body, false, 'no thinking key');
+      assert.deepEqual(body.messages[1], {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'read', input: {} }],
+      }, 'the assistant turn is exactly what it was before BA-7');
+      const r = await p.generate(msgs, []);
+      assert.equal('providerBlocks' in r, false, 'and a thinking-free response adds no field');
+    });
   });
 });
 

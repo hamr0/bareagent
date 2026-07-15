@@ -167,6 +167,27 @@ describe('recurse — Family B forced fan-out (NB-2)', () => {
     assert.equal(out.receipts.halted, true, 'the node records the governance halt');
   });
 
+  // BA-5 data path: recurse has always returned `best: out.text || null` on its incomplete paths (RC-9),
+  // but the Loop zeroed the worker's text on every bound — so `best` was ALWAYS null and the partial work
+  // recurse was trying to hand back never existed. This asserts the whole path end to end: a worker halted
+  // by governance surfaces its pre-halt reasoning as `best`, while `incomplete` still keys off the error
+  // (a non-empty best NEVER means convergence — that's the RC-9 honesty invariant, unchanged).
+  it('a governance-halted worker surfaces its pre-halt text as `best` (BA-5), still incomplete', async () => {
+    let turn = 0;
+    const sp = scriptedProvider(() => {
+      turn += 1;
+      // Round 1: the worker reasons out loud, then reaches for a tool the gate halts on.
+      if (turn === 1) return { text: 'Ruled out tokenize.js; the regression is in store.js', toolCalls: [{ id: 'r1', name: 'probe', arguments: {} }] };
+      return { text: 'unreachable' };
+    });
+    const probe = { name: 'probe', description: 'probes', execute: async () => 'never runs' };
+    const policy = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
+    const out = await recurse('investigate the failing test', { provider: sp.provider, policy }, { tools: [probe], maxDepth: 1 });
+    assert.equal(out.incomplete, true, 'a halted worker is STILL an honest incomplete — best never fakes a pass');
+    assert.equal(out.best, 'Ruled out tokenize.js; the regression is in store.js', 'the bounded attempt hands its work to the next one');
+    assert.equal(out.receipts.halted, true);
+  });
+
   it('the decomposition call is METERED — its usage forwards to ctx.onLlmResult as kind:"plan"', async () => {
     const sp = scriptedProvider(fanoutHandler());
     const events = [];
@@ -1312,5 +1333,38 @@ describe('recurse — governance deny-spin short-circuit (BA-11 / relayfact F35)
     assert.equal(out.incomplete, undefined, 'a single deny then a pivot is not a spin — the worker converges');
     assert.equal(out.blocker, undefined);
     assert.ok(String(out.result).includes('done'), 'the worker completed normally');
+  });
+});
+
+// Review finding (BA-5 fallout): mergeReduce guarded its LOSSLESS-concat fallback on `out.text` being falsy —
+// an invariant BA-5 removed. A faulted merge Loop now returns its partial, aborted prose, so the old
+// `out.text || concatReduce(results)` silently shipped that fragment as the synthesized answer and lost every
+// child result (the survivor-sum class RC-9 exists to prevent). Reachable because the merge Loop registers NO
+// tools: a hallucinated tool call is fed back as `[Loop] Unknown tool` and the round loop CONTINUES.
+describe('synthesize — a faulted merge falls back to the LOSSLESS concat, never a partial (BA-5 fallout)', () => {
+  const { synthesize } = require('../src/recurse-synthesize');
+  const RESULTS = ['child A answer', 'child B answer', 'child C answer'];
+
+  it('a provider error mid-merge returns every child result, not the aborted prose', async () => {
+    let round = 0;
+    const provider = {
+      name: 'p', model: 'm',
+      async generate() {
+        round += 1;
+        // Round 1: prose + a hallucinated tool call (no tools registered → Unknown tool → loop continues).
+        if (round === 1) return { text: 'PARTIAL MERGE, cut off mid-', toolCalls: [{ id: 'x1', name: 'ghost', arguments: {} }], usage: {} };
+        throw new Error('upstream 503');
+      },
+    };
+    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
+    assert.equal(round, 2, 'the harness really did drive a 2nd round (else this test proves nothing)');
+    for (const r of RESULTS) assert.ok(String(out).includes(r), `lossless concat must retain "${r}"`);
+    assert.ok(!String(out).includes('PARTIAL MERGE'), 'the aborted partial must NOT be returned as the answer');
+  });
+
+  it('a clean merge still returns the model text (the fallback must not fire on success)', async () => {
+    const provider = { name: 'p', model: 'm', async generate() { return { text: 'MERGED OK', toolCalls: [], usage: {} }; } };
+    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
+    assert.equal(out, 'MERGED OK', 'a successful merge is not clobbered by the fallback');
   });
 });
