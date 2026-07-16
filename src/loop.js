@@ -701,6 +701,11 @@ class Loop {
         const generate = () => this.provider.generate(toSend, activeTools, options);
         result = this.retry ? await this.retry.call(generate) : await generate();
       } catch (err) {
+        // A HaltError is a governance exit, not a provider failure — re-throw it (like every other seam) so it
+        // reaches the outer handler, which seals dangling tool_calls and returns error:`halt:<rule>`. Without
+        // this, throwOnError:false laundered a provider-surfaced HaltError into a generic `error:<message>`,
+        // indistinguishable from a real fault (the retry never retries it — DEFAULT_RETRY_ON is false for it).
+        if (err instanceof HaltError) throw err;
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
         // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.

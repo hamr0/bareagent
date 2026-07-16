@@ -21,6 +21,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
   New public surfaces (MINOR): `RefineOptions.attempt` args gain `history`; `refineLeaf.rejectedBuffer`; `receipts.refineLeaf.rejectedBuffer`. +2 mutation-proven tests (adaptive-on-temp-fixed, forced-on-flat-temp-hold, forced-off); full suite green, typecheck clean.
 
+### Fixed
+
+- **A provider-thrown `HaltError` is no longer laundered into a generic fault (honest-termination fidelity).** The Loop's provider `try/catch` was the one error seam missing the `if (err instanceof HaltError) throw err` guard that every other seam already has — so under `throwOnError: false` a governance halt surfaced by `provider.generate()` returned `error:<message>` instead of `error:'halt:<rule>'`, indistinguishable from a real API failure. Now re-thrown to the outer handler, which seals dangling tool calls and returns `error:'halt:<rule>'` with the pre-halt work preserved (BA-5). Surfaced while adding a `refineLeaf` regression test; the retry path never masked it (`DEFAULT_RETRY_ON` is `false` for a `HaltError`). +2 tests (loop-level + a `recurse` end-to-end halt-in-refine).
+- **The `refineLeaf` receipt now rides every terminating path, not just the clean pass.** A leaf that ran attempts then halted / was denied / faulted returned `{ incomplete }` with **no** `receipts.refineLeaf` — silently dropping the attempts that spent tokens and whether the rejected-attempt buffer engaged. The receipt (`iterations`, `passed:false`, effective `temperatures`, `rejectedBuffer`) is now built on the catch paths too — the same invariant as BA-10's `temperatureDropped`. +1 regression test.
+- **`refine.js` `history` JSDoc corrected:** `history.slice()` is a shallow copy whose `{result, verdict}` entries are shared references into refine's internal history (and the returned `outcome.history`) — structural mutation of the copy is safe, but the entries are read-only. Prior wording overstated the isolation.
+
 ## [0.29.0] - 2026-07-15
 
 ### Added

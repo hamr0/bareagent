@@ -625,6 +625,24 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
     assert.ok(Array.isArray(out.receipts.refineLeaf.temperatures), 'the effective-temps array rides the incomplete path');
   });
 
+  it('a governance HALT mid-refine is a clean incomplete with node.halted + an honest receipt (BA-10 invariant)', async () => {
+    // With the loop.js provider-HaltError guard, a leaf Loop surfaces a provider-thrown HaltError as
+    // error:'halt:<rule>' → recurseRefineLeaf rethrows → the HaltError catch branch (halted:true). The receipt
+    // must still ride this path — distinct from the plain-fault path above, which lands in the generic branch.
+    let call = 0;
+    const sp = scriptedProvider(() => {
+      call += 1;
+      if (call >= 2) throw new HaltError('leaf halted by governance', { rule: 'budget.maxCostUsd' });
+      return { text: 'broken answer' };
+    });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, true, 'a governance halt is a clean incomplete');
+    assert.equal(out.receipts.halted, true, 'the node records the governance halt (not a generic fault)');
+    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt rides the halt branch too');
+    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery');
+    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'reports the attempts made before the halt');
+  });
+
   it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {
     const sp = scriptedProvider(refineLeafHandler());
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
