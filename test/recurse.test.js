@@ -538,17 +538,24 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
   // before the provider fix — and (b) report the EFFECTIVE temps (null = dropped), never claim the ignored ones.
   const tempFixedHandler = ({ recoverOnRetry = true } = {}) => (messages, tools, options) => {
     const user = lastUser(messages);
-    const text = (recoverOnRetry && user.includes('previous attempt FAILED')) ? 'here is the FIXED answer' : 'broken answer';
+    // On a temperature-fixed model the ADAPTIVE buffer engages (BA-14: escalation is inert, so the buffer is the
+    // lever), so a recovering worker sees the rejected-attempt ledger; pre-BA-14 it saw the plain critique. Accept
+    // either marker so the stub models a real worker that recovers from whichever feedback shape it's handed.
+    const recovered = recoverOnRetry && (user.includes('previous attempt FAILED') || user.includes('already tried the following'));
+    const text = recovered ? 'here is the FIXED answer' : 'broken answer';
     // Simulate a model that rejected the requested temperature and ran at its default (provider dropped it).
     return { text, temperatureDropped: options && options.temperature != null };
   };
 
-  it('a temperature-fixed model still runs the leaf loop (BA-10: no collapse to incomplete)', async () => {
+  it('a temperature-fixed model still runs the leaf loop and the ADAPTIVE buffer engages (BA-10 + BA-14)', async () => {
     const sp = scriptedProvider(tempFixedHandler());
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
     assert.equal(out.incomplete, undefined, 'the leaf ran — the sensor was reached (pre-fix this was incomplete)');
     assert.ok(String(out.result).includes('FIXED'), 'it recovered via the fed-back gap');
     assert.equal(out.receipts.refineLeaf.passed, true);
+    // BA-14: a dropped temperature (temp-fixed model) is exactly the adaptive trigger — the buffer must engage,
+    // since escalation is inert here and the buffer is the sole recovery lever (poc/ba14: flat-temp 50%→100%).
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, true, 'the rejected-attempt buffer engaged on the temp-fixed model');
   });
 
   it('honest receipt: a dropped temperature is recorded as null (not the ignored requested temp)', async () => {
@@ -558,10 +565,82 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
     assert.deepEqual(out.receipts.refineLeaf.temperatures, [null, null, null], 'effective temps: every attempt dropped');
   });
 
-  it('a temperature-ACCEPTING model records the requested temps (control — effective == requested)', async () => {
+  it('a temperature-ACCEPTING model records the requested temps + adaptive buffer stays OFF (control)', async () => {
     const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false })); // never sets temperatureDropped
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
     assert.deepEqual(out.receipts.refineLeaf.temperatures, [0.2, 0.7, 1.0], 'accepting model → receipt is the requested escalation, byte-identical to before');
+    // BA-14 invariant: adaptive default must NOT touch the temperature-accepting path — escalation (BA-8) stands,
+    // the buffer never engages (ba14: it's redundant with escalation there, B==A). Zero behavior change.
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'adaptive default: buffer stays off when temperature is honored');
+    const buffered = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
+    assert.ok(!buffered, 'no rejected-attempt ledger was ever sent on a temp-accepting model under the default');
+  });
+
+  // A worker that recovers only once it SEES its prior failed attempt surfaced back (the BA-14 buffer prompt).
+  const bufferAwareHandler = () => (messages) => ({
+    text: lastUser(messages).includes('already tried the following') ? 'here is the FIXED answer' : 'broken answer',
+  });
+
+  it('BA-14: rejectedBuffer:true forces the buffer on a temp-ACCEPTING model and HOLDS temperature flat (ba14b)', async () => {
+    const sp = scriptedProvider(bufferAwareHandler());
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, rejectedBuffer: true } });
+    const retry = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
+    assert.ok(retry, 'the rejected-attempt buffer was injected even though temperature was honored (forced on)');
+    assert.ok(lastUser(retry.messages).includes('broken answer'), 'the prior FAILED attempt is surfaced VERBATIM in the ledger');
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, true, 'the receipt records the buffer engaged');
+    // ba14b: temperature is antagonistic to the buffer (100→70→50% across 0.2/0.7/1.0) → held flat at temps[0],
+    // NEVER escalated to 0.7. This is the load-bearing difference from the BA-8 escalation path.
+    const temps = sp.calls.map(c => c.options && c.options.temperature);
+    assert.deepEqual(temps.slice(0, 2), [0.2, 0.2], 'buffer holds temperature flat-low, not escalating');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'recovered via the buffer');
+  });
+
+  it('BA-14: rejectedBuffer:false keeps pure BA-8 escalation even on a temperature-fixed model', async () => {
+    const sp = scriptedProvider(tempFixedHandler()); // temp dropped → adaptive WOULD engage, but forced off
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, rejectedBuffer: false } });
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'forced off — buffer never engaged despite the dropped temp');
+    const buffered = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
+    assert.ok(!buffered, 'no buffer prompt was sent; the worker recovered via the plain critique');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'still recovers via the fed-back critique (BA-8 path intact)');
+  });
+
+  it('the refineLeaf receipt rides the INCOMPLETE (fault) path too — not just the clean pass (BA-10 invariant)', async () => {
+    // The leaf runs one attempt (broken), then the provider FAULTS on the retry (the leaf Loop, throwOnError:false,
+    // surfaces it as error:<msg> → recurseRefineLeaf rethrows → the catch → {incomplete}). Pre-fix the catch
+    // returned {incomplete} with NO refineLeaf receipt, silently dropping the attempts that DID spend + whether the
+    // buffer engaged. The receipt must ride this terminating path too (same invariant as BA-10's temperatureDropped):
+    // passed:false, the attempts made, the effective temps, buffer engagement.
+    let call = 0;
+    const sp = scriptedProvider(() => {
+      call += 1;
+      if (call >= 2) throw new Error('provider exploded mid-retry');
+      return { text: 'broken answer' };
+    });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, true, 'a mid-loop provider fault is a clean incomplete');
+    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt is present on the incomplete path (was undefined pre-fix)');
+    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery — never a faked pass');
+    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'it reports the attempts that ran before the fault');
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'the buffer never engaged on this temp-accepting run');
+    assert.ok(Array.isArray(out.receipts.refineLeaf.temperatures), 'the effective-temps array rides the incomplete path');
+  });
+
+  it('a governance HALT mid-refine is a clean incomplete with node.halted + an honest receipt (BA-10 invariant)', async () => {
+    // With the loop.js provider-HaltError guard, a leaf Loop surfaces a provider-thrown HaltError as
+    // error:'halt:<rule>' → recurseRefineLeaf rethrows → the HaltError catch branch (halted:true). The receipt
+    // must still ride this path — distinct from the plain-fault path above, which lands in the generic branch.
+    let call = 0;
+    const sp = scriptedProvider(() => {
+      call += 1;
+      if (call >= 2) throw new HaltError('leaf halted by governance', { rule: 'budget.maxCostUsd' });
+      return { text: 'broken answer' };
+    });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, true, 'a governance halt is a clean incomplete');
+    assert.equal(out.receipts.halted, true, 'the node records the governance halt (not a generic fault)');
+    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt rides the halt branch too');
+    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery');
+    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'reports the attempts made before the halt');
   });
 
   it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {

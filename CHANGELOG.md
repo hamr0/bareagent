@@ -2,6 +2,31 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.30.0] - 2026-07-16
+
+### Added
+
+- **`refineLeaf.rejectedBuffer` — a rejected-attempt buffer for leaf retries, and temperature held flat when it engages (BA-14).**
+
+  Folded from `bareloop`'s `RSI-LEARNINGS.md`: SkillOpt's *rejected-edit buffer* (retain failed attempts as negative feedback so they aren't silently retried) + the *"delivery ≠ conversion"* finding (being TOLD what's wrong is not the same as ACTING on it). Both map onto `refineLeaf`, which until now fed only the **latest critique** forward — it had no memory of what the model had already tried. On a temperature-fixed model (BA-10, where escalation is inert) that left a single critique as the only lever, and a weak model that regenerates byte-identical wrong code stayed stuck.
+
+  `refine.js`'s `attempt` callback now receives the full **`history`** (a copy of every prior `{result, verdict}`) — the missing seam. `refineLeaf.rejectedBuffer` uses it to surface the model's own failed attempts VERBATIM: *"you already tried these, they failed X — write something STRUCTURALLY DIFFERENT."* This is **directed** diversity (attack the specific repeated mistake), where escalation is **random** diversity (perturb the sample).
+
+  - **Trigger (adaptive + override):** `true` forces it on (also on temperature-accepting models); `false` forces it off (pure BA-8 escalation); **unset = ADAPTIVE** — engage only once a prior attempt's temperature was *dropped* (i.e. a temperature-fixed model where escalation is inert and the buffer is the sole lever). On temperature-accepting models the default leaves BA-8 escalation **byte-identical** — zero behavior change.
+  - **The load-bearing measured finding: temperature and the buffer are ANTAGONISTIC.** Random noise drowns the directed signal. `poc/ba14b-temp-with-buffer.mjs` (10 trials, gpt-4o-mini, buffer held on) measured a **monotonic** collapse as temperature rises — **flat-0.2 100% → 0.7 70% → 1.0 50%** (escalate 90%). So when the buffer engages the retry temperature is **held flat at `temperatures[0]`, never escalated**. This REFINES BA-10's "temperature is *secondary*" into "with a buffer, temperature is *harmful*."
+  - **Efficacy on the rut:** `poc/ba14-rejected-buffer.mjs` — flat-temp + buffer recovered a temperature-fixed fixation rut that critique-only could not (**50% → 100%**), at lower cost and fewer iterations.
+  - **Verified-shipped LIVE on real `claude-sonnet-5`** (`poc/ba14-verify-shipped.mjs`) — the temperature-fixed production model, per the BA-10 lesson that toy fixtures on one model hide production bugs. The shipped `recurse()` was driven end-to-end: sonnet dropped temperature every attempt (`temps=[null,…]`), the adaptive buffer engaged **6/6** on retries, and a wrapped provider confirmed the ledger (marker + prior code verbatim) **reached the Anthropic wire**; bounded, never collapsed to incomplete. **Efficacy was an honest NULL** — sonnet recovers from the buffer AND from plain critique equally (100% vs 100%): the buffer's *lift* is a weak-model / fixation phenomenon, while it stays cost-neutral where a model doesn't fixate. That vindicates the **adaptive** design over always-on (which `poc/ba14` showed is pure token waste where escalation already works).
+  - **Receipt:** `receipts.refineLeaf.rejectedBuffer` reports whether any iteration injected the ledger.
+  - **Deferred, evidence-gated (not dropped):** flat-low + buffer beat shipped escalate + critique **16/16 vs 3/6** on the weak model, hinting the buffer may *dominate* escalation universally — which would make the end state "buffer-on by default at low temp, temperature demoted to the caller's creative/rubric exploration knob." But retiring a live-validated mechanism (BA-8) on one model + one deterministic task is the toy-fixtures trap in reverse; the default flip waits on a second deterministic task + broader model coverage.
+
+  New public surfaces (MINOR): `RefineOptions.attempt` args gain `history`; `refineLeaf.rejectedBuffer`; `receipts.refineLeaf.rejectedBuffer`. +2 mutation-proven tests (adaptive-on-temp-fixed, forced-on-flat-temp-hold, forced-off); full suite green, typecheck clean.
+
+### Fixed
+
+- **A provider-thrown `HaltError` is no longer laundered into a generic fault (honest-termination fidelity).** The Loop's provider `try/catch` was the one error seam missing the `if (err instanceof HaltError) throw err` guard that every other seam already has — so under `throwOnError: false` a governance halt surfaced by `provider.generate()` returned `error:<message>` instead of `error:'halt:<rule>'`, indistinguishable from a real API failure. Now re-thrown to the outer handler, which seals dangling tool calls and returns `error:'halt:<rule>'` with the pre-halt work preserved (BA-5). Surfaced while adding a `refineLeaf` regression test; the retry path never masked it (`DEFAULT_RETRY_ON` is `false` for a `HaltError`). +2 tests (loop-level + a `recurse` end-to-end halt-in-refine).
+- **The `refineLeaf` receipt now rides every terminating path, not just the clean pass.** A leaf that ran attempts then halted / was denied / faulted returned `{ incomplete }` with **no** `receipts.refineLeaf` — silently dropping the attempts that spent tokens and whether the rejected-attempt buffer engaged. The receipt (`iterations`, `passed:false`, effective `temperatures`, `rejectedBuffer`) is now built on the catch paths too — the same invariant as BA-10's `temperatureDropped`. +1 regression test.
+- **`refine.js` `history` JSDoc corrected:** `history.slice()` is a shallow copy whose `{result, verdict}` entries are shared references into refine's internal history (and the returned `outcome.history`) — structural mutation of the copy is safe, but the entries are read-only. Prior wording overstated the isolation.
+
 ## [0.29.0] - 2026-07-15
 
 ### Added

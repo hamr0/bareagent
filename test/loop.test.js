@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Loop } = require('../src/loop');
-const { ProviderError } = require('../src/errors');
+const { ProviderError, HaltError } = require('../src/errors');
 
 // Mock provider that returns scripted responses
 function mockProvider(responses) {
@@ -279,6 +279,26 @@ describe('Loop', () => {
     const result = await loop.run([{ role: 'user', content: 'Hi' }]);
     assert.equal(result.error, 'API down');
     assert.equal(result.text, '');
+  });
+
+  it('a provider-thrown HaltError is a clean governance exit (error:halt:<rule>), NOT laundered to a fault', async () => {
+    // Every other error seam in the loop guards `if (err instanceof HaltError) throw err`; the provider catch
+    // must too, or throwOnError:false turns a governance halt into a generic `error:<message>` indistinguishable
+    // from a real fault. A HaltError is never retried (DEFAULT_RETRY_ON is false for it), so it reaches the catch.
+    let round = 0;
+    const provider = {
+      async generate() {
+        round += 1;
+        // Round 1 makes a tool call so the loop continues; round 2's generate is where the gate halts.
+        if (round >= 2) throw new HaltError('gate stopped the run', { rule: 'budget.maxCostUsd' });
+        return { text: 'partial work', toolCalls: [{ id: 't1', name: 'noop', arguments: {} }], usage: { inputTokens: 4, outputTokens: 2 } };
+      },
+    };
+    const noop = { name: 'noop', description: 'does nothing', execute: async () => 'ok' };
+    const loop = new Loop({ provider, throwOnError: false });
+    const result = await loop.run([{ role: 'user', content: 'Hi' }], [noop]);
+    assert.equal(result.error, 'halt:budget.maxCostUsd', 'the halt rule is preserved on error, not the message');
+    assert.equal(result.text, 'partial work', 'BA-5: the pre-halt work survives the governance exit');
   });
 
   it('throws original ProviderError instance', async () => {
