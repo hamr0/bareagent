@@ -1,5 +1,12 @@
 # RSI-POC backlog — what we can still try from the RSI-learnings fold
 
+> **STATUS: CLOSED (2026-07-16).** All active POC candidates resolved — §2.A structured
+> reflection REJECTED, §2.C sensor-gaming CONFIRMED (in-repo demonstration), §2.B BA-14
+> default-flip REJECTED. Zero code shipped; three validation spikes only. Kept as the record
+> of the 12-learning fold-mapping, the two parked triggers (§2.D rubric-close, §2.E
+> cost-receipt), and the negative decisions with their evidence. Pull §2.D back up only if a
+> rubric/LLM-judged `refineLeaf.sensor` is ever proposed.
+
 *2026-07-15. Companion to bareloop's [`RSI-LEARNINGS.md`](/home/hamr/Documents/PycharmProjects/bareloop/docs/00-context/RSI-LEARNINGS.md)
 (12 field learnings from the thersibook/Recursive corpus). That doc records what the RSI
 field found; **this doc records what, of that, is a candidate POC for bareagent's `recurse`
