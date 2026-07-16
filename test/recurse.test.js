@@ -604,6 +604,27 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
     assert.equal(out.receipts.refineLeaf.passed, true, 'still recovers via the fed-back critique (BA-8 path intact)');
   });
 
+  it('the refineLeaf receipt rides the INCOMPLETE (fault) path too — not just the clean pass (BA-10 invariant)', async () => {
+    // The leaf runs one attempt (broken), then the provider FAULTS on the retry (the leaf Loop, throwOnError:false,
+    // surfaces it as error:<msg> → recurseRefineLeaf rethrows → the catch → {incomplete}). Pre-fix the catch
+    // returned {incomplete} with NO refineLeaf receipt, silently dropping the attempts that DID spend + whether the
+    // buffer engaged. The receipt must ride this terminating path too (same invariant as BA-10's temperatureDropped):
+    // passed:false, the attempts made, the effective temps, buffer engagement.
+    let call = 0;
+    const sp = scriptedProvider(() => {
+      call += 1;
+      if (call >= 2) throw new Error('provider exploded mid-retry');
+      return { text: 'broken answer' };
+    });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
+    assert.equal(out.incomplete, true, 'a mid-loop provider fault is a clean incomplete');
+    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt is present on the incomplete path (was undefined pre-fix)');
+    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery — never a faked pass');
+    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'it reports the attempts that ran before the fault');
+    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'the buffer never engaged on this temp-accepting run');
+    assert.ok(Array.isArray(out.receipts.refineLeaf.temperatures), 'the effective-temps array rides the incomplete path');
+  });
+
   it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {
     const sp = scriptedProvider(refineLeafHandler());
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider });

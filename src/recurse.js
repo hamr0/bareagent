@@ -729,6 +729,11 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     return { result, verdict: outcome.verdict || null, receipts: node };
   } catch (err) {
     node.tokens = tokensSum; // record whatever attempts DID spend, on both the halt and fault paths
+    // The refineLeaf receipt must ride EVERY terminating path, not just the clean one (same invariant as BA-10's
+    // `temperatureDropped`): a leaf that ran attempts then halted/faulted still spent tokens and may have engaged
+    // the buffer. `effectiveTemps[iteration]` is set BEFORE each attempt's throw, so it reflects every attempt
+    // made; `passed:false` because the catch is only reached on a throw (a pass returns from the try above).
+    node.refineLeaf = { iterations: effectiveTemps.length, passed: false, temperatures: effectiveTemps.slice(), rejectedBuffer: bufferUsed };
     if (err instanceof HaltError) {
       node.halted = true;
       node.incomplete = true;
