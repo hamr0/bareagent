@@ -314,7 +314,9 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   passed (false = honest non-recovery, not a faked success). `temperatures` are the EFFECTIVE per-attempt temps
  *   (BA-10): a `null` marks an attempt the model ran at its DEFAULT because it rejected the requested temperature.
  *   `rejectedBuffer` (BA-14): whether any iteration injected the rejected-attempt buffer (prior failed attempts
- *   surfaced verbatim); when true the effective temps are held flat at `temperatures[0]` (ba14b antagonism).
+ *   surfaced verbatim); when it engages the REQUESTED retry temperature is held flat at `temperatures[0]`, never
+ *   escalated (ba14b antagonism) — but a temperature-fixed model still drops it, so the EFFECTIVE temp recorded
+ *   above is `null`, not `temperatures[0]`.
  * @property {string|null} model
  * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
  *   or null/absent for a plain reasoning node.
