@@ -1400,27 +1400,43 @@ mechanism/wiring proof? Audited against `poc/` + `test/recurse.test.js` (citatio
   bounded worker cannot — `rlm-spike2-recursion` claim A); `retrieval:'tools'` per-query face (worker routed
   scan-for-count + search-for-needle vs code-known truth — `rlm-scan-as-tool`); Loop `maxConsecutiveDenials`
   (guard-ON 3 vs guard-OFF 9 denials + verify-shipped — `ba11-*`).
-- **Mechanism-only — FLAGGED unproven-for-outcome (the F26 on-green analogues, both confirmed):**
-  **`persona`** — `rlm-persona-seam` proved ADOPTION (marker at top + carried to a child, control arm
-  marker-free) and non-breakage of decomposition; NO evidence a persona changes any task's outcome class.
-  **Capability-scrub PROMPT WORDING** ("prefer direct action" / "deepest level") — mutation-tested for
-  PRESENCE at the right depths only; the wording's behavioral effect was never toggle-tested (adjacent:
-  RC-4 capability-matched TOOL scoping WAS outcome-tested and ruled out at ~0 gain, `rlm-defer1-capability-match`
-  — the scrub's tool CONTRACTION is a safety invariant, not an outcome claim, so only the prompt-wording leg
-  is unproven). Also mechanism-only: `DECOMPOSITION_POLICY`/NB-5 few-shot wording (no wording on/off pair);
-  `contract` (threading + strip-at-child tested (W1); no contract-vs-loose-goal outcome pair — A3 is borrowed
-  Outcomes doctrine); `refineLeaf.maxIterations` (bound mechanics tested; recovery-needs-≥2 implicit in ba8,
-  never isolated); Loop `maxIdenticalToolErrors` (deterministic outcome tests + negative controls; the live
-  pre-fix spin was observed (sonnet 8/8) but no live guard-on/off pair — documented as such).
+- **The two F26 on-green flags — RESOLVED LIVE (2026-07-20, prereg'd one-knob probes, claude-haiku-4-5,
+  8 trials/arm, pre-worded readouts, code-scored evidence-only outcomes):**
+  - **`persona` → OUTCOME-PROVEN (`poc/audit2-persona-outcome.mjs`).** Through the SHIPPED `recurse()`
+    (`maxDepth:0` forces a single-shot leaf — persona is the only arm difference): a risk-averse-SRE STANCE
+    (never stating the answer) flipped a borderline Friday-deploy judgment **SHIP 8/8 → HOLD 8/8** (delta +8,
+    prereg threshold +3). Scope honesty: two prior cells were NO-HEADROOM, not nulls — a "surface risks"
+    persona showed NO lift on find-the-vulnerability tasks (ORDER-BY injection AND a subtle timing-unsafe
+    HMAC compare, base 8/8 hits both times: haiku security-sweeps any "what should a maintainer know" ask
+    unprompted). So: persona is proven to flip a STANCE-SENSITIVE judgment's outcome class; it is NOT
+    evidence of a quality lift where the model's default behavior already covers the stance.
+  - **Capability-scrub PROMPT WORDING → MEASURED-NULL, bracketed (`poc/audit2-scrub-wording.mjs`).**
+    One-knob pair at the prompt seam (shipped constants, IDENTICAL spawn tool both arms — the tool half is a
+    safety invariant, not under test): the depth-1 "PREFER DIRECT ACTION" suffix on vs off. Two task cells
+    bracket the range: a trivial 3-part task → **0/8 delegation in BOTH arms** (nothing to suppress); a task
+    MIRRORING the policy's own worked example (max legitimate pull) → **8/8 delegation in BOTH arms, 3
+    spawns every trial**, correctness floor 8/8 both. The wording moved NOTHING at either pole — the TOOL
+    CONTRACTION carries the scrub, not the prose. Disposition: wording RETAINED (static text, zero runtime
+    cost, effect may be model-dependent — removing shipped prompt text on one model + two task shapes is the
+    toy-fixtures trap), but any claim that the prose is load-bearing is now DOWNGRADED to measured-null.
+- **Still mechanism-only (not probed — no decision hangs on them today):** `DECOMPOSITION_POLICY`/NB-5
+  few-shot wording (no wording on/off pair); `contract` (threading + strip-at-child tested (W1); no
+  contract-vs-loose-goal outcome pair — A3 is borrowed Outcomes doctrine); `refineLeaf.maxIterations` (bound
+  mechanics tested; recovery-needs-≥2 implicit in ba8, never isolated); Loop `maxIdenticalToolErrors`
+  (deterministic outcome tests + negative controls; the live pre-fix spin was observed (sonnet 8/8) but no
+  live guard-on/off pair — documented as such).
 - **N/A (not outcome toggles):** `evaluate` (caller override seam), `corpus` (data), `concurrency`
   (burst bound, outcome-neutral by design), `provider`/`depth`/`stream`/`litectx` (wiring).
-- **Disposition (lean bar):** the flags are DOCUMENTATION, not build orders — an outcome POC for `persona` or
-  scrub wording only earns its tokens when a decision hangs on it (e.g. an adopter claims persona lifts
-  quality, or a prompt rewrite is proposed — then the pair is: current wording vs candidate, outcome-classed).
+- **Disposition (lean bar):** both flagged knobs were probed live on owner request (above) — ZERO shipped-code
+  changes resulted (persona proven as-is; scrub wording retained with its claim downgraded). The remaining
+  mechanism-only knobs stay documentation, not build orders — probe one only when a decision hangs on it
+  (e.g. a prompt rewrite is proposed — then the pair is: current wording vs candidate, outcome-classed).
   The F26 boundary rule ("never mint a toggle across a version boundary") wants a per-node primitive-version +
   prompt-hash receipt — PARKED: no retro-audit consumer exists today, and a new public receipts surface for a
   hypothetical auditor fails the cost-neutral-when-inert test. Revisit if toggle-minting becomes a recurring
-  practice.
+  practice. Method note (both probes): the first cells returned NO-HEADROOM, not nulls — the harness had to
+  CREATE the precondition (a stance-sensitive judgment; a delegation-tempting task) before either verdict
+  meant anything, the same lesson as the §2.C red-team precondition rule.
 
 ---
 
