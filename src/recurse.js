@@ -238,6 +238,13 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   NEVER a worker side-effect a worker with edit tools could GAME (writing a passing file then returning junk, or
  *   editing the failing test itself). A gameable close is the reward-hacking surface every RSI system in the field
  *   got bitten by; the loop optimizes against WHATEVER the sensor reads, so keep it outside what the worker can write.
+ *   **Broken sensor ≠ failing model (BA-15):** a sensor that THROWS (non-Halt) or returns a MALFORMED verdict
+ *   (anything but `{pass: boolean}` or a valid tri-state `status`) is a faulty ARBITER — the loop stops at the
+ *   FIRST broken close (never retries against it) and returns a labeled `{incomplete, blocker:'broken-sensor'}`
+ *   (+ `receipts.blockerDetail`), with `best` preserving the model's last attempt. A `HaltError` thrown by the
+ *   sensor stays a clean governance halt. The sensor's EXECUTION environment is the caller's: run untrusted /
+ *   model-generated checks in an isolated child process WITH A TIMEOUT — a sensor that hangs forever hangs the
+ *   leaf (no bareguard checkpoint fires between sensor start and return).
  *   **`rejectedBuffer` (BA-14):** a SkillOpt-shaped rejected-attempt buffer — instead of only the LATEST critique,
  *   surface the model's OWN prior failed attempts verbatim ("you wrote these, they failed X — write something
  *   STRUCTURALLY DIFFERENT"). This is DIRECTED diversity (attack the specific repeated mistake), where escalation
@@ -306,8 +313,12 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {Verdict|null} verdict
  * @property {boolean} incomplete
  * @property {boolean} halted
- * @property {string} [blocker] - (BA-11) set to `'governance-deny'` when this node stopped because its Loop
- *   short-circuited a consecutive-policy-deny spin (not a model failure). Mirrors `RecurseResult.blocker`.
+ * @property {string} [blocker] - Set when this node stopped for a specific non-model reason (mirrors
+ *   `RecurseResult.blocker`): `'governance-deny'` (BA-11) — its Loop short-circuited a consecutive-policy-deny
+ *   spin; `'broken-sensor'` (BA-15) — the caller's `refineLeaf.sensor` threw or returned a malformed verdict;
+ *   `'broken-verifier'` (BA-15) — the caller's `opts.evaluate` did (the default Evaluator path is never labeled).
+ * @property {string} [blockerDetail] - (BA-15) with a `broken-*` blocker: what the arbiter did (threw with
+ *   which message, or which malformed shape it returned) — the actionable half of the label.
  * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
  * @property {{iterations: number, passed: boolean, temperatures: (number|null)[], rejectedBuffer: boolean}} [refineLeaf] - (BA-8) when
  *   this leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
@@ -341,6 +352,12 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @property {string} [blocker] - Present when `incomplete` for a specific, actionable reason. `'governance-deny'`
  *   (BA-11): the worker's Loop short-circuited after N consecutive policy denials rather than burn to the
  *   budget cap — the caller can widen scope / re-gate / escalate instead of reading it as a model failure.
+ *   `'broken-sensor'` (BA-15): the caller's `refineLeaf.sensor` threw or returned a malformed verdict — the
+ *   ARBITER is faulty, not the model; fix the sensor and re-run (`receipts.blockerDetail` says what it did).
+ *   `'broken-verifier'` (BA-15): same fault class at the verify slot — the caller's `opts.evaluate` threw
+ *   (non-Halt) or returned a malformed verdict; the default Evaluator path is never labeled (its failures are
+ *   provider-class faults). For both `broken-*` blockers `best` preserves the model's unjudged work (BA-5 —
+ *   the work was never judged, not judged-and-failed).
  * @property {RecurseNode} receipts - The audit node for this call (RC-10).
  */
 
@@ -593,9 +610,10 @@ async function recurse(task, ctx = {}, opts = {}) {
     // caller supplied a verifier, OR the task is critical (the forced-verify safety rail).
     const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
     if (wantVerify) {
-      const verdict = await verify(task, result, ctx, opts);
-      node.verdict = verdict;
-      return { result, verdict, receipts: node };
+      // `await` is LOAD-BEARING inside these try blocks: `return <promise>` would exit the try before the
+      // promise settles, so a verifier HaltError would escape the function's own catch (proven by the POC's
+      // [E4] control arm) instead of landing as a clean {incomplete, halted} return.
+      return await verifyOrBlock(task, result, ctx, opts, node);
     }
 
     return { result, verdict: null, receipts: node };
@@ -625,6 +643,27 @@ async function recurse(task, ctx = {}, opts = {}) {
  * @param {{provider: Provider, system: string, handleTools: ToolDef[], depth: number, critical: boolean, node: RecurseNode, sensor: Function}} state
  * @returns {Promise<RecurseResult>}
  */
+/** Valid tri-state `Verdict.status` values a caller arbiter (sensor/verifier) may return in lieu of a boolean `pass`. */
+const SENSOR_STATUS = new Set(['satisfied', 'needs_revision', 'failed']);
+
+/**
+ * BA-15 — validate a caller arbiter's return at a close seam (the `refineLeaf.sensor` AND the caller
+ * `opts.evaluate` verifier). A verdict is well-formed iff it is an object carrying a boolean `pass` OR a
+ * valid tri-state `status` (the two shapes `refine`/callers branch on). Returns `null` when well-formed,
+ * else a short description of the malformation ("named, never coerced" — a garbage verdict otherwise reads
+ * as pass:false with critique:null at the sensor seam, or rides a converged-shaped return at the verify slot).
+ * @param {any} v
+ * @returns {string|null}
+ */
+function verdictShapeFault(v) {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    return `returned ${v === null ? 'null' : Array.isArray(v) ? 'an array' : `a ${typeof v}`}`;
+  }
+  if (typeof v.pass === 'boolean' || SENSOR_STATUS.has(v.status)) return null;
+  const keys = Object.keys(v).slice(0, 5).join(', ');
+  return `returned an object with neither a boolean \`pass\` nor a valid \`status\` (keys: ${keys || 'none'})`;
+}
+
 async function recurseRefineLeaf(task, ctx, opts, state) {
   const { provider, system, handleTools, depth, critical, node, sensor } = state;
   node.model = provider.model || null;
@@ -665,6 +704,11 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
   // a dropped attempt is stored as `null` ("provider default"). Indexed by iteration (refine calls once each).
   /** @type {(number|null)[]} */
   const effectiveTemps = [];
+  // BA-15/BA-5: the last attempt's text, kept OUTSIDE refine so a broken-sensor stop can still preserve the
+  // model's work — when the ARBITER breaks, the work was never judged; destroying it would punish the model
+  // for the caller's fault (refine's own history is lost on the throw).
+  /** @type {string|null} */
+  let lastAttemptText = null;
   // One attempt = a fresh leaf Loop (no spawn tool: a retry is a direct correction, not a re-decomposition) at the
   // iteration's temperature, with the GAP fed forward as fresh feedback. A governance halt → throw so refine stops.
   const attempt = async ({ iteration, critique, history }) => {
@@ -702,13 +746,33 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     accrueTokens(out.metrics ? out.metrics.tokens : null);
     if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError('refine-leaf attempt halted', { rule: out.error.slice('halt:'.length) });
     if (out.error) throw new Error(out.error); // a non-halt worker fault → honest incomplete
+    lastAttemptText = out.text || lastAttemptText;
     return out.text;
+  };
+
+  // BA-15: the sensor call is WRAPPED so a broken arbiter is NAMED, never coerced. A non-Halt throw (the
+  // caller's test runner crashed — ENOENT, syntax error in the harness) and a malformed return are the same
+  // fault class: "didn't judge", which must never collapse into "judged-and-failed" (the model's fault) or a
+  // bare {incomplete} (indistinguishable from a provider death). The throw stops refine at the FIRST broken
+  // close — retrying against a broken arbiter burns every remaining attempt for nothing (each retry would
+  // carry critique:null, i.e. the plain task again). HaltError passes through untouched (governance, BA-2).
+  const evaluate = async (result, c) => {
+    let v;
+    try {
+      v = await sensor(result, { task, context: opts.context, contract: c.contract });
+    } catch (err) {
+      if (err instanceof HaltError) throw err;
+      throw new Error(`broken-sensor: sensor threw: ${err && err.message ? err.message : String(err)}`);
+    }
+    const fault = verdictShapeFault(v);
+    if (fault) throw new Error(`broken-sensor: sensor ${fault} — a sensor must return {pass: boolean} or {status: 'satisfied'|'needs_revision'|'failed'}`);
+    return v;
   };
 
   try {
     const outcome = await refine({
       attempt,
-      evaluate: (result, c) => sensor(result, { task, context: opts.context, contract: c.contract }),
+      evaluate,
       contract: typeof opts.contract === 'string' ? opts.contract : undefined,
       maxIterations,
     });
@@ -722,9 +786,10 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     // Optional rubric layer on top of the deterministic sensor (RC-7): forced for critical, or a contract/override.
     const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
     if (wantVerify) {
-      const verdict = await verify(task, result, ctx, opts);
-      node.verdict = verdict;
-      return { result, verdict, receipts: node };
+      // `await` is LOAD-BEARING inside these try blocks: `return <promise>` would exit the try before the
+      // promise settles, so a verifier HaltError would escape the function's own catch (proven by the POC's
+      // [E4] control arm) instead of landing as a clean {incomplete, halted} return.
+      return await verifyOrBlock(task, result, ctx, opts, node);
     }
     // No rubric layer ⇒ the sensor's final verdict IS the node verdict (a non-pass is surfaced, not hidden).
     node.verdict = outcome.verdict || null;
@@ -747,6 +812,15 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
       node.incomplete = true;
       node.blocker = 'governance-deny';
       return { incomplete: true, best: null, blocker: 'governance-deny', receipts: node };
+    }
+    // BA-15: the caller's SENSOR broke — a faulty arbiter, not a model failure. Named (like BA-11's
+    // governance-deny) so the caller fixes the sensor instead of debugging the model; `best` preserves the
+    // model's last attempt (BA-5 — the work was never judged, not judged-and-failed).
+    if (typeof err?.message === 'string' && err.message.startsWith('broken-sensor: ')) {
+      node.incomplete = true;
+      node.blocker = 'broken-sensor';
+      node.blockerDetail = err.message.slice('broken-sensor: '.length);
+      return { incomplete: true, best: lastAttemptText, blocker: 'broken-sensor', receipts: node };
     }
     node.incomplete = true;
     return { incomplete: true, best: null, receipts: node };
@@ -824,9 +898,10 @@ async function recurseScan(task, ctx, opts, state) {
     // structured count against the goal/contract (an isolated grader, never the scanner itself).
     const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
     if (wantVerify) {
-      const verdict = await verify(task, result, ctx, opts);
-      node.verdict = verdict;
-      return { result, verdict, receipts: node };
+      // `await` is LOAD-BEARING inside these try blocks: `return <promise>` would exit the try before the
+      // promise settles, so a verifier HaltError would escape the function's own catch (proven by the POC's
+      // [E4] control arm) instead of landing as a clean {incomplete, halted} return.
+      return await verifyOrBlock(task, result, ctx, opts, node);
     }
     return { result, verdict: null, receipts: node };
   } catch (err) {
@@ -943,9 +1018,10 @@ async function recursePartition(task, ctx, opts, state) {
     }
     const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
     if (wantVerify) {
-      const verdict = await verify(task, result, ctx, opts);
-      node.verdict = verdict;
-      return { result, verdict, receipts: node };
+      // `await` is LOAD-BEARING inside these try blocks: `return <promise>` would exit the try before the
+      // promise settles, so a verifier HaltError would escape the function's own catch (proven by the POC's
+      // [E4] control arm) instead of landing as a clean {incomplete, halted} return.
+      return await verifyOrBlock(task, result, ctx, opts, node);
     }
     return { result, verdict: null, receipts: node };
   } catch (err) {
@@ -1083,9 +1159,10 @@ async function recurseFanout(task, ctx, opts, state) {
     // 6) Verify (RC-7): forced for critical, or when a contract/override is supplied.
     const wantVerify = critical || contract != null || typeof opts.evaluate === 'function';
     if (wantVerify) {
-      const verdict = await verify(task, result, ctx, opts);
-      node.verdict = verdict;
-      return { result, verdict, receipts: node };
+      // `await` is LOAD-BEARING inside these try blocks: `return <promise>` would exit the try before the
+      // promise settles, so a verifier HaltError would escape the function's own catch (proven by the POC's
+      // [E4] control arm) instead of landing as a clean {incomplete, halted} return.
+      return await verifyOrBlock(task, result, ctx, opts, node);
     }
     return { result, verdict: null, receipts: node };
   } catch (err) {
@@ -1184,7 +1261,23 @@ function verify(task, result, ctx, opts) {
   // and an agentic critic needs the path to exercise the artifact. A caller `evaluate` gets the RAW task (it owns
   // its own context); only the default isolated grader is contextualized.
   if (typeof opts.evaluate === 'function') {
-    return Promise.resolve(opts.evaluate(result, { contract, task }));
+    // BA-15 (verifier seam): the CALLER-supplied verifier is wrapped exactly like the refineLeaf sensor — a
+    // non-Halt throw or a malformed return is a faulty ARBITER, tagged so the call sites label it (pre-fix a
+    // throw crashed the whole run on the plain-worker path / laundered to a bare {incomplete} under refineLeaf,
+    // and a garbage verdict rode a CONVERGED-shaped {result, verdict} out). The default Evaluator path below is
+    // NOT wrapped: it constructs well-formed Verdicts by design, and its failures are provider-class faults.
+    return (async () => {
+      let v;
+      try {
+        v = await opts.evaluate(result, { contract, task });
+      } catch (err) {
+        if (err instanceof HaltError) throw err;
+        throw new Error(`broken-verifier: evaluate threw: ${err && err.message ? err.message : String(err)}`);
+      }
+      const fault = verdictShapeFault(v);
+      if (fault) throw new Error(`broken-verifier: evaluate ${fault} — a verifier must return {pass: boolean} or {status: 'satisfied'|'needs_revision'|'failed'}`);
+      return v;
+    })();
   }
   const provider = ctx.provider || opts.provider;
   const evaluator = new Evaluator({ provider });
@@ -1197,6 +1290,33 @@ function verify(task, result, ctx, opts) {
     { rubric, contract: contract || undefined },
     { onLlmResult: /** @type {any} */ (ctx.onLlmResult), policy: ctx.policy },
   );
+}
+
+/**
+ * BA-15 (verifier seam) — run the verify slot, converting a tagged broken-verifier fault into a LABELED
+ * `{ incomplete, blocker:'broken-verifier' }` return with `best` preserving the unjudged result (BA-5: the
+ * work exists — it was never judged, not judged-and-failed). One helper so all five dispatch paths (worker /
+ * refineLeaf / scan / partition / fanout) get identical semantics. Anything untagged (HaltError, a default-
+ * Evaluator provider fault) rethrows to the caller's own catch, exactly as before.
+ * @param {string} task
+ * @param {any} result
+ * @param {RecurseCtx} ctx
+ * @param {RecurseOptions} opts
+ * @param {RecurseNode} node
+ * @returns {Promise<RecurseResult>}
+ */
+async function verifyOrBlock(task, result, ctx, opts, node) {
+  try {
+    const verdict = await verify(task, result, ctx, opts);
+    node.verdict = verdict;
+    return { result, verdict, receipts: node };
+  } catch (err) {
+    if (!(typeof err?.message === 'string' && err.message.startsWith('broken-verifier: '))) throw err;
+    node.incomplete = true;
+    node.blocker = 'broken-verifier';
+    node.blockerDetail = err.message.slice('broken-verifier: '.length);
+    return { incomplete: true, best: result, blocker: 'broken-verifier', receipts: node };
+  }
 }
 
 module.exports = { recurse };

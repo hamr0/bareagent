@@ -2,6 +2,23 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A broken `refineLeaf.sensor` is now a named blocker, never coerced into a model failure (BA-15).**
+
+  Adopter feedback (a forbidden-zone audit of the close chain) claimed — and a pre-fix POC confirmed in shipped code (`poc/ba15-broken-sensor.mjs`, deterministic/offline) — two silent coercions at the sensor seam:
+
+  - **A sensor that THROWS** (the caller's test runner crashed: ENOENT, harness syntax error) fell through to the bare `{ incomplete, best: null }` — byte-identical to a provider death, with the model's unjudged work destroyed. "Didn't judge" collapsed into "model failed."
+  - **A sensor that returns a MALFORMED verdict** (`{}`, a string, `{ok:true}` — anything without a boolean `pass` or valid tri-state `status`) read as `pass:false` with `critique:null`, so every retry re-sent the PLAIN task with **zero feedback**, burned all `maxIterations` against the broken arbiter, then surfaced as a **converged-shaped** `{ result, verdict: {} }` — an honest-looking model non-recovery pinned on a broken judge.
+
+  Now the sensor call is wrapped (recurse.js, the seam only — `refine.js` untouched): a non-Halt throw or malformed return **stops the loop at the FIRST broken close** and returns a labeled `{ incomplete, blocker: 'broken-sensor' }` plus `receipts.blockerDetail` (what the sensor did — threw with which message, or which malformed shape), with `best` preserving the model's last attempt (BA-5: the work was never judged, not judged-and-failed). Extends the BA-11 `blocker` taxonomy; a `HaltError` thrown by the sensor stays a clean governance halt; both documented verdict shapes (`{pass: boolean}` / `{status}`) behave byte-identically to before. A hung sensor remains the caller's responsibility (run untrusted checks in an isolated child process with a timeout — documented, no timeout knob).
+
+  **The same fault class was live at the verify slot** (found by a follow-up probe after the sensor fix — the initial "the Evaluator leg has no live laundering path" assessment was wrong for recurse's *caller* seam): a **throwing** caller `opts.evaluate` **crashed the whole `recurse()` run** as an uncaught exception on the plain-worker path (and laundered to a bare `{ incomplete }` under `refineLeaf`), while a **garbage** return rode out **converged-shaped** as `{ result, verdict: {} }`. The caller verifier is now wrapped identically (`blocker: 'broken-verifier'`, first broken close stops, `best` preserves the unjudged result) via one `verifyOrBlock` helper across all five dispatch paths (worker / refineLeaf / scan / partition / fanout). The **default Evaluator rubric path is deliberately not labeled** (it constructs well-formed Verdicts; its failures are provider-class faults — narrowest guard). En route the POC's Halt-control arm caught a real regression in the refactor itself: `return verifyOrBlock(...)` inside a `try` let a verifier `HaltError` escape the catch (a promise returned un-awaited exits the try before settling) — fixed with `return await` + a dedicated regression test.
+
+  New public surfaces (MINOR): `blocker: 'broken-sensor' | 'broken-verifier'` on `RecurseResult`/receipts; `receipts.blockerDetail`. +13 mutation-checked tests (throw / malformed shapes / provider-fault distinguishability / Halt passthrough on both seams / valid-shape controls / fanout-path coverage / the `return await` guard); full suite 756 pass / 0 fail, typecheck clean. Pre-fix evidence: `poc/ba15-broken-sensor.mjs`.
+
 ## [0.30.0] - 2026-07-16
 
 ### Added

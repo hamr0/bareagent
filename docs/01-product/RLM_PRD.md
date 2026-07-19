@@ -1340,6 +1340,48 @@ bareagent's) (`UPSTREAM-FIXES.md` BA-11 / `FINDINGS.md` F35).
   weak-model lift real or noise?) is NOT worth resolving: even if fully real it's dominated by the buffer on cost.
   This closes RSI-POC-BACKLOG §2.A.
 
+**Added (adopter "faulty primitives" feedback, 2026-07-19) → `[Unreleased]`.** The adopter's forbidden-zone
+audit of `refineLeaf`'s close chain (their F25 borrow; named `broken-sensor` / BA-15 here per the
+no-number-reuse rule) claimed the outcomes BETWEEN clean-green and clean-red were silently COERCED instead of
+NAMED. Validated in shipped code before building (`poc/ba15-broken-sensor.mjs`, deterministic/offline, pre-fix
+run kept as evidence):
+
+- **(BA-15) a BROKEN sensor was indistinguishable from a failing model.** Confirmed live, two shapes:
+  **(a) sensor THROWS** (the caller's test runner crashes — ENOENT, harness syntax error): the catch fell
+  through to the bare `{ incomplete, best:null }` — byte-identical to a provider death, and the model's
+  unjudged work was destroyed. **(b) sensor returns a MALFORMED verdict** (`{}`, a string, `{ok:true}`):
+  `refine` read `pass` falsy / `status` invalid with `critique:null`, so every retry re-sent the PLAIN task
+  (zero feedback — the retry-the-broken-arbiter pathology), burned all `maxIterations`, then surfaced as a
+  **converged-shaped** `{ result, verdict:{} }` — an honest-looking model non-recovery pinned on a broken
+  arbiter. The POC's falsifier arm (a well-formed failing sensor DOES thread its critique into the retry)
+  proved the zero-feedback observation was the seam, not the harness. **Fix (recurse.js, the sensor seam
+  only):** the sensor call is wrapped — a non-Halt throw or a malformed return (neither boolean `pass` nor a
+  valid tri-state `status`) stops the loop at the FIRST broken close and returns a labeled `{ incomplete,
+  blocker:'broken-sensor' }` + `receipts.blockerDetail` (what the sensor did), with `best` preserving the last
+  attempt (BA-5: the work was never judged, not judged-and-failed). Extends the BA-11 blocker taxonomy;
+  `HaltError` from the sensor stays a clean governance halt; both documented verdict shapes (`{pass}` /
+  `{status}`) are byte-identical to before. A hung sensor stays the CALLER's responsibility (documented, no
+  timeout knob — the sensor's execution environment is caller-owned; lean-primitive bar). +7 mutation-checked
+  tests, full suite 750 pass / 0 fail, typecheck clean.
+- **(BA-15, verifier seam) the same fault class was LIVE at the verify slot — found on the user's "did you
+  validate all?" follow-up, falsifying the first-pass "no live laundering path" assessment of the Evaluator
+  leg.** A deterministic probe showed: a THROWING caller `opts.evaluate` **crashed the whole `recurse()` run**
+  as an uncaught exception on the plain-worker path (and laundered to a bare `{incomplete}` under
+  `refineLeaf` — inconsistent siblings), while a GARBAGE return rode out **converged-shaped** as
+  `{result, verdict:{}}`. **Fix:** the caller verifier is wrapped exactly like the sensor (throw/malformed →
+  tagged), and one `verifyOrBlock` helper gives all five dispatch paths (worker/refineLeaf/scan/partition/
+  fanout) identical semantics: labeled `{incomplete, blocker:'broken-verifier'}` + `receipts.blockerDetail`,
+  `best` = the unjudged result. The DEFAULT Evaluator rubric path is deliberately NOT labeled (well-formed
+  Verdicts by construction; its failures are provider-class faults — narrowest-guard). The POC's Halt-control
+  arm caught a refactor regression en route: `return verifyOrBlock(...)` inside a try let a verifier
+  `HaltError` escape the catch (un-awaited promise exits the try before settling) — fixed with `return await`
+  + a dedicated regression test. +6 tests on top of the sensor seam's 7; suite 756 pass / 0 fail.
+- **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
+  (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
+  the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
+  `commandSensor` helper and the F26-style toggle-coverage audit are parked as follow-ons, not primitives (no
+  confirmed live gap).
+
 ---
 
 ## Source & cross-refs
