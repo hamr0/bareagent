@@ -26,7 +26,18 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   - **A detached JSDoc block** (the new helpers were inserted between `recurseRefineLeaf`'s doc comment and the function) silently dropped that ~160-line function's `@param` typing; helpers moved above the doc.
   - Plus a defensive `instanceof HaltError` rethrow in `verifyOrBlock`, and the five duplicated "`await` is load-bearing" comments consolidated onto `verifyOrBlock`'s JSDoc.
 
-  New public surfaces (MINOR): `blocker: 'broken-sensor' | 'broken-verifier'` on `RecurseResult`/receipts; `receipts.blockerDetail`. +16 mutation-checked tests; full suite **759 pass / 0 fail**, typecheck clean (verified by exit code). Pre-fix evidence: `poc/ba15-broken-sensor.mjs`.
+  A second review round (a clean 19/19-agent run) then caught four more, including a regression in the first round's own BA-5 fix:
+  - **The BA-5 preservation did not cover the attempt that actually terminated.** `lastAttemptText` was captured *after* the halt/error throws, so a **first-attempt** halt discarded its own text and still returned `best: null` — while the round-1 test only halted on attempt 2, where a prior clean attempt had already populated it. Capture now precedes the throws; mutation-proven.
+  - **`recurseScan`/`recursePartition` destroyed a finished result on a verify-slot halt.** Making `verifyOrBlock` `return await` (round 1) routed a verifier `HaltError` into their catches, which returned `best: null` — throwing away a fully code-counted scan and forcing a re-run that re-pays every window judge call. Both now preserve the computed result.
+  - **A child's blocker was laundered by its parent.** In a nested tree the parent aggregates a dead child into `{incomplete, missingSlices}` and dropped the child's `broken-sensor`/`broken-verifier` label, so a top-level caller branching on `result.blocker` saw nothing — BA-15's own failure mode, one level up. A shared `inheritedBlocker` now carries it at all three aggregation sites (`broken-*` outranks `governance-deny`, being a fault in the caller's own code).
+  - **A verify-slot halt after a passing sensor clobbered the receipt** to `passed: false`, reporting a deterministic close that never happened.
+  Plus: the verdict shape inspection moved inside `runArbiter`'s try (a throwing accessor on a returned Proxy escaped untyped), and `BrokenArbiterError` now carries `cause`.
+
+  **Behavior change for adopters:** `opts.evaluate` is now held to its documented `Verdict` return. A verifier returning a loose object (`{score, critique}`) or a bare boolean — always a contract violation, previously silent — now yields `{incomplete, blocker:'broken-verifier'}` instead of riding out as a converged `{result, verdict}`. That is the point of the change (a converged shape carrying an ungradeable verdict is the laundering being closed), but it is a real break for callers who relied on the loose path; no shim is provided, since one would reopen the hole.
+
+  **Known open (pre-existing, not from this change):** `instanceof HaltError` is realm-sensitive — a `HaltError` from a different module realm (duplicate install, VM context) would not match, at 23 sites that predate this work. Documented rather than force-fixed.
+
+  New public surfaces (MINOR): `blocker: 'broken-sensor' | 'broken-verifier'` on `RecurseResult`/receipts; `receipts.blockerDetail`. +20 mutation-checked tests; full suite **762 pass / 0 fail**, typecheck clean (verified by exit code). Pre-fix evidence: `poc/ba15-broken-sensor.mjs`.
 
 ## [0.30.0] - 2026-07-16
 

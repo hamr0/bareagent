@@ -1399,6 +1399,28 @@ run kept as evidence):
   Also: a defensive `instanceof HaltError` rethrow in `verifyOrBlock`, both arbiter wrappers factored into one
   `runArbiter`, and five duplicated comments consolidated. +3 regression tests (status-only stop, halt-branch
   `best`, fault-branch `best`); suite **759 pass / 0 fail**, typecheck clean by exit code.
+- **(BA-15 review round 2, 2026-07-20) the SAME workflow, re-run clean (19/19 agents, zero errors), caught a
+  regression in round 1's OWN fix — the strongest argument for re-reviewing after a fix round.** Four more
+  confirmed: **(1) the BA-5 preservation missed the terminating attempt** — `lastAttemptText` was captured
+  AFTER the halt/error throws, so a FIRST-attempt halt discarded its own text and still returned `best:null`;
+  round 1's test only halted on attempt 2 (a prior clean attempt had already populated it), so a too-weak
+  test let a broken fix look fixed. Capture now precedes the throws, mutation-proven against exactly that
+  case. **(2) `recurseScan`/`recursePartition` destroyed a finished result** — round 1's `return await` routed
+  a verifier `HaltError` into their catches, which returned `best:null`, discarding a fully code-counted scan
+  (a re-run re-pays every window judge call); both now preserve the computed result. **(3) a child's blocker
+  was laundered by its parent** — the `{incomplete, missingSlices}` aggregation dropped a child's
+  `broken-sensor`/`broken-verifier`, so a nested broken sensor never named itself at the top: BA-15's own
+  failure mode reintroduced one level up. A shared `inheritedBlocker` carries it at all three aggregation
+  sites (`broken-*` outranks `governance-deny` — a fault in the CALLER's code is the more actionable label).
+  **(4) a verify-slot halt after a PASSING sensor clobbered the receipt** to `passed:false`. Plus the verdict
+  shape inspection moved INSIDE `runArbiter`'s try (a throwing accessor on a returned Proxy escaped untyped —
+  the same uncaught-crash class one step later) and `cause` preserved on `BrokenArbiterError`. **Accepted
+  behavior change:** `opts.evaluate` is now held to its documented `Verdict` return — a loose object or bare
+  boolean (always a contract violation, previously silent) now yields `{incomplete, blocker:'broken-verifier'}`;
+  no shim, since one would reopen the laundering hole. **Documented open (pre-existing, 23 sites):**
+  `instanceof HaltError` is realm-sensitive. +4 mutation-proven tests; suite **762 pass / 0 fail**.
+  METHOD LESSON: a regression test that exercises only the multi-step path cannot catch a first-step bug —
+  and a fix round is exactly when a fresh review is most valuable, because the new code is the least-reviewed.
 - **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
   (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
   the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed

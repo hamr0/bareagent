@@ -603,7 +603,10 @@ async function recurse(task, ctx = {}, opts = {}) {
     const missingSlices = node.spawned.filter(c => c.incomplete).map(c => c.task);
     if (missingSlices.length > 0) {
       node.incomplete = true;
-      return { incomplete: true, best: result, missingSlices, receipts: node };
+      // BA-15: carry a child's blocker up, so a nested broken sensor/verifier still names itself at the top.
+      const inherited = inheritedBlocker(node.spawned);
+      if (inherited) Object.assign(node, inherited);
+      return { incomplete: true, best: result, missingSlices, ...(inherited && { blocker: inherited.blocker }), receipts: node };
     }
 
     // Verify: a SEPARATE-context judge, never the generator grading itself. Runs when a contract is given, the
@@ -640,9 +643,10 @@ class BrokenArbiterError extends Error {
   /**
    * @param {'broken-sensor'|'broken-verifier'} tag - which seam broke.
    * @param {string} detail - what the arbiter did (surfaced as `receipts.blockerDetail`).
+   * @param {{cause?: any}} [options] - `cause` preserves the original error (stack/type) for debugging.
    */
-  constructor(tag, detail) {
-    super(`${tag}: ${detail}`);
+  constructor(tag, detail, options = {}) {
+    super(`${tag}: ${detail}`, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'BrokenArbiterError';
     this.tag = tag;
     this.detail = detail;
@@ -684,21 +688,41 @@ function verdictShapeFault(v) {
  */
 async function runArbiter(tag, call) {
   const who = tag === 'broken-sensor' ? 'sensor' : 'evaluate';
-  let v;
+  // The SHAPE INSPECTION runs inside the try too: reading `.status`/`.pass`/`Object.keys` on a returned Proxy
+  // or accessor-backed object can itself throw, and outside the try that escapes as an untyped error — i.e.
+  // the very uncaught-crash this seam exists to prevent, one step later.
   try {
-    v = await call();
+    const v = await call();
+    const fault = verdictShapeFault(v);
+    if (fault) throw new BrokenArbiterError(tag, `${who} ${fault} — a ${who === 'sensor' ? 'sensor' : 'verifier'} must return {pass: boolean} or {status: 'satisfied'|'needs_revision'|'failed'}`);
+    // Derive `pass` from a status-only verdict (copy, never mutate the caller's object) so the advertised
+    // `{status}` shape actually gates `refine`/downstream, which branch on `verdict.pass`.
+    if (typeof v.pass !== 'boolean' && typeof v.status === 'string') {
+      return /** @type {T} */ ({ ...v, pass: v.status === 'satisfied' });
+    }
+    return v;
   } catch (err) {
-    if (err instanceof HaltError) throw err;
-    throw new BrokenArbiterError(tag, `${who} threw: ${err && err.message ? err.message : String(err)}`);
+    if (err instanceof HaltError || err instanceof BrokenArbiterError) throw err;
+    // `cause` keeps the original error (stack + type) reachable for debugging; `detail` stays the short label.
+    throw new BrokenArbiterError(tag, `${who} threw: ${err && err.message ? err.message : String(err)}`, { cause: err });
   }
-  const fault = verdictShapeFault(v);
-  if (fault) throw new BrokenArbiterError(tag, `${who} ${fault} — a ${who === 'sensor' ? 'sensor' : 'verifier'} must return {pass: boolean} or {status: 'satisfied'|'needs_revision'|'failed'}`);
-  // Derive `pass` from a status-only verdict (copy, never mutate the caller's object) so the advertised
-  // `{status}` shape actually gates `refine`/downstream, which branch on `verdict.pass`.
-  if (typeof v.pass !== 'boolean' && typeof v.status === 'string') {
-    return /** @type {T} */ ({ ...v, pass: v.status === 'satisfied' });
-  }
-  return v;
+}
+
+/**
+ * BA-15 — surface a CHILD's blocker at the PARENT. A nested tree aggregates a dead child into
+ * `{incomplete, missingSlices}`; without this the child's `broken-sensor`/`broken-verifier` (or
+ * `governance-deny`) label is dropped at the first parent, so a top-level caller branching on
+ * `result.blocker` sees nothing and debugs the model instead of its own sensor — the exact laundering BA-15
+ * exists to close, reintroduced one level up. A `broken-*` label wins over `governance-deny`: it names a
+ * fault in the CALLER's own code, which is both more actionable and cheaper to fix than a gate decision.
+ * @param {RecurseNode[]} spawned - this node's child receipts.
+ * @returns {{blocker: string, blockerDetail?: string}|null}
+ */
+function inheritedBlocker(spawned) {
+  const pick = spawned.find(c => c.incomplete && (c.blocker === 'broken-sensor' || c.blocker === 'broken-verifier'))
+    || spawned.find(c => c.incomplete && c.blocker);
+  if (!pick || !pick.blocker) return null;
+  return pick.blockerDetail ? { blocker: pick.blocker, blockerDetail: pick.blockerDetail } : { blocker: pick.blocker };
 }
 
 /**
@@ -797,9 +821,14 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     const dropped = /** @type {{temperatureDropped?: boolean}} */ (out).temperatureDropped;
     effectiveTemps[iteration] = dropped ? null : temperature;
     accrueTokens(out.metrics ? out.metrics.tokens : null);
+    // BA-5: capture BEFORE the throws. The Loop returns its last non-empty text on EVERY terminating path
+    // (halt/deny/truncation/refusal), so a throw placed above this line would discard the text of the very
+    // attempt that terminated — leaving `best:null` on a FIRST-attempt halt, the exact loss the catch-branch
+    // preservation exists to prevent. (Caught by review: the earlier tests only halted on attempt 2, where a
+    // prior clean attempt had already populated this.)
+    lastAttemptText = out.text || lastAttemptText;
     if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError('refine-leaf attempt halted', { rule: out.error.slice('halt:'.length) });
     if (out.error) throw new Error(out.error); // a non-halt worker fault → honest incomplete
-    lastAttemptText = out.text || lastAttemptText;
     return out.text;
   };
 
@@ -838,9 +867,13 @@ async function recurseRefineLeaf(task, ctx, opts, state) {
     node.tokens = tokensSum; // record whatever attempts DID spend, on both the halt and fault paths
     // The refineLeaf receipt must ride EVERY terminating path, not just the clean one (same invariant as BA-10's
     // `temperatureDropped`): a leaf that ran attempts then halted/faulted still spent tokens and may have engaged
-    // the buffer. `effectiveTemps[iteration]` is set BEFORE each attempt's throw, so it reflects every attempt
-    // made; `passed:false` because the catch is only reached on a throw (a pass returns from the try above).
-    node.refineLeaf = { iterations: effectiveTemps.length, passed: false, temperatures: effectiveTemps.slice(), rejectedBuffer: bufferUsed };
+    // the buffer. `effectiveTemps[iteration]` is set BEFORE each attempt's throw, so it reflects every attempt made.
+    // NOT unconditional: the refine loop may have COMPLETED (receipt already written, possibly `passed:true`) and
+    // the throw come from the verify layer below it — clobbering that to `passed:false` would report a sensor that
+    // never closed when it did, misattributing a verify-slot halt to a non-converging leaf.
+    if (!node.refineLeaf) {
+      node.refineLeaf = { iterations: effectiveTemps.length, passed: false, temperatures: effectiveTemps.slice(), rejectedBuffer: bufferUsed };
+    }
     // BA-5: EVERY terminating branch preserves the model's last non-empty attempt (`lastAttemptText`), never
     // `null` — matching the plain-worker path (`best: out.text || null`) and the "bounds PRESERVE work"
     // invariant. A refine leaf is the sole cross-attempt text channel in a ralph-style retry; dropping it on a
@@ -918,6 +951,10 @@ async function recurseScan(task, ctx, opts, state) {
     };
   }
 
+  // BA-5: hoisted so a halt thrown BELOW the scan (e.g. from the verify slot) still returns the finished,
+  // code-counted result as `best` instead of destroying it — re-running a scan re-pays every window judge call.
+  /** @type {{count: number, matchedIds: string[]}|null} */
+  let scanResult = null;
   try {
     const scan = await scanCount(task, corpus, {
       provider,
@@ -930,6 +967,7 @@ async function recurseScan(task, ctx, opts, state) {
     node.scan = { window: scan.window, passes: scan.passes, scanned: scan.scanned, matched: scan.count };
     // Structured, CODE-counted result — the count is authoritative; matchedIds carry the evidence (RC-10).
     const result = { count: scan.count, matchedIds: scan.matchedIds };
+    scanResult = result;
 
     // RC-9: a dead window means we did NOT see every slice → the count is a floor, not the answer. Report it
     // incomplete with the partial as `best`, never a clean pass over a hole.
@@ -950,7 +988,9 @@ async function recurseScan(task, ctx, opts, state) {
     if (err instanceof HaltError) {
       node.halted = true;
       node.incomplete = true;
-      return { incomplete: true, best: null, receipts: node };
+      // BA-5: a halt from the verify slot lands here with the scan already finished — return the counted
+      // result, never null (the count survived only in receipts before, forcing a full re-scan).
+      return { incomplete: true, best: scanResult, receipts: node };
     }
     throw err;
   }
@@ -1008,6 +1048,8 @@ async function recursePartition(task, ctx, opts, state) {
   // (never `undefined`) across every dispatch path.
 
   const childResults = [];
+  /** @type {{count: number, matchedIds: string[]}|null} */
+  let partitionResult = null;
   try {
     // 2b) Pre-wave checkpoint — width (the cost) is now known. A governance HaltError halts BEFORE any worker
     //     spends (bounds the burst to zero); a plain deny is advisory (allowlist-safe), same contract as fanout.
@@ -1052,11 +1094,15 @@ async function recursePartition(task, ctx, opts, state) {
       if (child.incomplete) missingSlices.push(label);
     }
     const result = { count: matched.size, matchedIds: [...matched] };
+    partitionResult = result; // BA-5: a halt below this (e.g. verify) returns the full result, not a count-only rebuild
     node.partition.matched = matched.size;
 
     if (missingSlices.length > 0) {
       node.incomplete = true;
-      return { incomplete: true, best: result, missingSlices, receipts: node };
+      // BA-15: carry a child's blocker up (see inheritedBlocker).
+      const inherited = inheritedBlocker(node.spawned);
+      if (inherited) Object.assign(node, inherited);
+      return { incomplete: true, best: result, missingSlices, ...(inherited && { blocker: inherited.blocker }), receipts: node };
     }
     const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
     if (wantVerify) {
@@ -1068,7 +1114,10 @@ async function recursePartition(task, ctx, opts, state) {
     if (err instanceof HaltError) {
       node.halted = true;
       node.incomplete = true;
-      const best = childResults.length ? { count: new Set(childResults.flatMap((v) => (v && Array.isArray(v.matchedIds) ? v.matchedIds : []))).size } : null;
+      // Prefer the finished result (a halt from the verify slot lands here with it already computed); else
+      // rebuild a best-effort count from whatever slices did return (BA-5, never a bare null).
+      const best = partitionResult
+        || (childResults.length ? { count: new Set(childResults.flatMap((v) => (v && Array.isArray(v.matchedIds) ? v.matchedIds : []))).size } : null);
       return { incomplete: true, best, receipts: node };
     }
     throw err;
@@ -1193,7 +1242,10 @@ async function recurseFanout(task, ctx, opts, state) {
     // 5) Honest completeness (RC-9): any missing slice → incomplete, with the partial reduce as `best`.
     if (missingSlices.length > 0) {
       node.incomplete = true;
-      return { incomplete: true, best: result, missingSlices, receipts: node };
+      // BA-15: carry a child's blocker up (see inheritedBlocker).
+      const inherited = inheritedBlocker(node.spawned);
+      if (inherited) Object.assign(node, inherited);
+      return { incomplete: true, best: result, missingSlices, ...(inherited && { blocker: inherited.blocker }), receipts: node };
     }
 
     // 6) Verify (RC-7): forced for critical, or when a contract/override is supplied.

@@ -767,6 +767,49 @@ describe('recurse — broken-sensor blocker (BA-15, "a broken arbiter is named, 
     assert.equal(out.best, 'attempt-1 work', 'a halt on the retry preserves attempt 1 (pre-fix: best:null)');
   });
 
+  it('a FIRST-attempt halt still preserves that attempt\'s text (BA-5 capture-before-throw)', async () => {
+    // Review-caught regression in the previous fix: `lastAttemptText` was assigned AFTER the halt/error throws,
+    // so the attempt that actually terminated had its text discarded — best:null on a first-attempt halt. The
+    // earlier test only halted on attempt 2 (where a prior clean attempt had already populated it), so it
+    // passed while the single-attempt case was broken. The Loop returns its last non-empty text on every
+    // terminating path, so the capture must precede the throws.
+    const sp = scriptedProvider(() => ({ text: 'partial work' }));
+    const ctx = { provider: sp.provider, onLlmResult: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } };
+    const out = await recurse(SIMPLE_TASK, ctx, { refineLeaf: { sensor: () => ({ pass: false, critique: 'x' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.best, 'partial work', 'the halting attempt\'s own text survives (pre-fix: null)');
+  });
+
+  it('a child\'s broken-sensor blocker propagates to the PARENT in a nested tree (BA-15 anti-laundering)', async () => {
+    // A parent aggregates a dead child into {incomplete, missingSlices}; pre-fix the child's blocker label was
+    // dropped there, so a top-level caller branching on result.blocker saw nothing and would debug the model
+    // instead of its own broken sensor — the laundering BA-15 exists to close, reintroduced one level up.
+    const sp = scriptedProvider(decomposingHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      maxDepth: 2,
+      refineLeaf: { sensor: () => { throw new Error('ENOENT: harness missing'); } },
+    });
+    assert.equal(out.incomplete, true, 'a broken sensor at the leaf makes the tree incomplete');
+    assert.equal(out.blocker, 'broken-sensor', 'the child\'s label reaches the top (pre-fix: undefined)');
+    assert.equal(out.receipts.blocker, 'broken-sensor', 'and is recorded on the parent receipts');
+  });
+
+  it('a verify-slot halt after a PASSING sensor does not clobber the refineLeaf receipt to passed:false', async () => {
+    // verifyOrBlock is awaited INSIDE the try, so a halt at the verify slot reaches the catch even though the
+    // refine loop already completed and wrote an honest passed:true receipt. Overwriting it would report a
+    // sensor that never closed when it did.
+    const sp = scriptedProvider(() => ({ text: 'FIXED answer' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: (r) => ({ pass: String(r).includes('FIXED') }) },
+      contract: 'must be fixed',
+      evaluate: () => { throw new HaltError('cap', { rule: 'budget' }); },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'the governance halt is recorded');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor DID close — receipt preserved (pre-fix: false)');
+  });
+
   it('the generic-fault branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
     let call = 0;
     const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new Error('provider exploded'); return { text: 'attempt-1 work' }; });
