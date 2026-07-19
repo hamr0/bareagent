@@ -740,6 +740,42 @@ describe('recurse — broken-sensor blocker (BA-15, "a broken arbiter is named, 
     assert.equal(out2.receipts.refineLeaf.passed, false, 'honest non-pass, not a blocker');
   });
 
+  it('a status-only {status:\'satisfied\'} verdict STOPS the leaf and reports passed — not burned as never-passed', async () => {
+    // The advertised contract lets a sensor return {status:'satisfied'} (no boolean pass). refine.js stops on
+    // verdict.pass, so pre-fix this ran all maxIterations (pass undefined → never stops) and reported
+    // passed:false — a satisfied close mislabeled as non-recovery + 3× the token spend. runArbiter now derives
+    // pass = status==='satisfied', so it stops on the first attempt and reports passed:true.
+    let n = 0;
+    const sp = scriptedProvider(() => ({ text: `attempt_${++n}` }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => ({ status: 'satisfied' }), maxIterations: 3 },
+    });
+    assert.equal(out.blocker, undefined, 'a satisfied status-only verdict is valid, not a blocker');
+    assert.equal(sp.calls.length, 1, 'stops on the first satisfied close (pre-fix: burned all 3)');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'reported as passed (pre-fix: false — pass was undefined)');
+  });
+
+  it('the HaltError branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
+    // Pre-fix the HaltError / governance-deny / generic-fault branches returned best:null even though the leaf
+    // had produced work — a BA-5 violation, inconsistent with the plain-worker path (best: out.text). They now
+    // return lastAttemptText, matching the broken-sensor branch and the plain worker.
+    let call = 0;
+    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new HaltError('cap', { rule: 'budget' }); return { text: 'attempt-1 work' }; });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.best, 'attempt-1 work', 'a halt on the retry preserves attempt 1 (pre-fix: best:null)');
+  });
+
+  it('the generic-fault branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
+    let call = 0;
+    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new Error('provider exploded'); return { text: 'attempt-1 work' }; });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, undefined, 'a plain provider fault is not a labeled blocker');
+    assert.equal(out.best, 'attempt-1 work', 'the fault branch preserves attempt 1 (pre-fix: best:null)');
+  });
+
   it('the refineLeaf receipt rides the broken-sensor path (every-terminating-path invariant)', async () => {
     const sp = scriptedProvider(() => ({ text: 'attempt' }));
     const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {

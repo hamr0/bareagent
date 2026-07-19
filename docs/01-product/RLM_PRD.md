@@ -1358,7 +1358,7 @@ run kept as evidence):
   only):** the sensor call is wrapped — a non-Halt throw or a malformed return (neither boolean `pass` nor a
   valid tri-state `status`) stops the loop at the FIRST broken close and returns a labeled `{ incomplete,
   blocker:'broken-sensor' }` + `receipts.blockerDetail` (what the sensor did), with `best` preserving the last
-  attempt (BA-5: the work was never judged, not judged-and-failed). Extends the BA-11 blocker taxonomy;
+  attempt (BA-5: best-effort work the arbiter never graded). Extends the BA-11 blocker taxonomy;
   `HaltError` from the sensor stays a clean governance halt; both documented verdict shapes (`{pass}` /
   `{status}`) are byte-identical to before. A hung sensor stays the CALLER's responsibility (documented, no
   timeout knob — the sensor's execution environment is caller-owned; lean-primitive bar). +7 mutation-checked
@@ -1376,6 +1376,29 @@ run kept as evidence):
   arm caught a refactor regression en route: `return verifyOrBlock(...)` inside a try let a verifier
   `HaltError` escape the catch (un-awaited promise exits the try before settling) — fixed with `return await`
   + a dedicated regression test. +6 tests on top of the sensor seam's 7; suite 756 pass / 0 fail.
+- **(BA-15 review round, 2026-07-20) a `/code-review` workflow whose agents PARTLY DIED still yielded five
+  real defects — recovered by hand, per the standing "a partial verdict is not a clean bill" rule.** 7 of 16
+  agents (one whole correctness finder + six verifiers) died on a monthly spend limit; the workflow reported
+  only 3 cleanup findings because the dead verifiers never adjudicated the rest. Recovering all 13 raw
+  candidates from `journal.jsonl` and verifying them against the code surfaced, in severity order:
+  **(1) `npm run typecheck` was FAILING** (TS2722/TS18048) — the caller-verifier async IIFE broke narrowing of
+  `opts.evaluate`; CI-gating and publish-blocking. My own prior "typecheck clean" claim was FALSE: it was
+  asserted from a `&& echo` whose echo never fired, and I did not check for the line's absence — the exact
+  "prove, don't assert" failure this repo's doctrine exists to prevent. Now hoisted to a narrowed const and
+  verified BY EXIT CODE. **(2) a status-only `{status:'satisfied'}` verdict burned every iteration** — the
+  advertised contract accepts it, but `refine.js` stops on `verdict.pass`, so a satisfied close never stopped
+  and reported `passed:false`; `runArbiter` now derives `pass = status==='satisfied'` (copy, never mutating
+  the caller's object), matching `evaluator.js`. **(3) a BA-5 violation on sibling branches** — `refineLeaf`'s
+  halt/deny/generic-fault returns were `best:null` while the plain-worker path preserved `best:out.text`; all
+  now preserve the last non-empty attempt. **(4) a DETACHED JSDoc block** — the new helpers were inserted
+  between `recurseRefineLeaf`'s doc comment and the function, silently dropping that ~160-line function's
+  `@param` typing (helpers moved above the doc). **(5) the magic-string fault channel** (the workflow's own
+  top-ranked finding) — `'broken-sensor: '` prefixes encoded into `Error.message` and re-parsed by
+  `startsWith` were replaced with a typed module-local `BrokenArbiterError` (`instanceof` + `.tag`/`.detail`),
+  killing the mis-classification hazard the repo already paid for once in the loop.js HaltError-wrapping bug.
+  Also: a defensive `instanceof HaltError` rethrow in `verifyOrBlock`, both arbiter wrappers factored into one
+  `runArbiter`, and five duplicated comments consolidated. +3 regression tests (status-only stop, halt-branch
+  `best`, fault-branch `best`); suite **759 pass / 0 fail**, typecheck clean by exit code.
 - **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
   (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
   the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
