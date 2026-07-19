@@ -1379,8 +1379,48 @@ run kept as evidence):
 - **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
   (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
   the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
-  `commandSensor` helper and the F26-style toggle-coverage audit are parked as follow-ons, not primitives (no
-  confirmed live gap).
+  `commandSensor` helper is parked as a follow-on, not a primitive (no confirmed live gap).
+
+**Toggle-coverage audit (the feedback's finding #2, F26 borrow — RUN 2026-07-20, token-free, docs-only).**
+Question per knob: does the evidence archive contain ≥1 ONE-KNOB pair with a differing OUTCOME CLASS, or only
+mechanism/wiring proof? Audited against `poc/` + `test/recurse.test.js` (citations verified, not recalled).
+
+- **Outcome-class PROVEN (a one-knob pair exists, live where it matters):** `retrieval` (search recall
+  0.05–0.24 vs scan 0.93 on AG News; naive search→count flipped 3.7%→198%→10%, dropped — `rlm-step7-*`,
+  `rlm-step8-shipped-replay`); `window` (swept → knee ≈8, `rlm-step7-window-knee`; generalization tested on a
+  length-controlled corpus, fixed-8 robust, auto-calibration ruled OUT — `rlm-defer3-calibration-sweep`);
+  `passes` (multi-pass union recall lift + measured precision cost — `rlm-step7-reliability` PART 1); `count`
+  (v2 made the knob LOAD-BEARING: a budget-capped N=1 under-covers, error drops at N≥⌈S/B⌉ —
+  `rlm-nb2-calibrate`); `mode:'partition'`+`workerBudget` (width=3 count 64 vs flat 63 — distributes work,
+  preserves the count — `rlm-resident-scan-e2e`); `synthesize` (code-reduce vs model arithmetic ~10–15% err —
+  spike-1/step-7); `context` (0/3→3/3 — `ba9-context-thread`); `refineLeaf.temperatures` (flat 0/5 vs
+  escalating 2-3/5 — `ba8-leaf-refine`; sonnet critique-only convergence — `ba10-verify-shipped`);
+  `refineLeaf.rejectedBuffer` (on/off 50%→100%, antagonism sweep, honest sonnet null, task-shape reversal —
+  `ba14*`, `bflip-spiral-matrix`); `maxDepth`-as-capability (depth-N covers an 11×-over-budget corpus a single
+  bounded worker cannot — `rlm-spike2-recursion` claim A); `retrieval:'tools'` per-query face (worker routed
+  scan-for-count + search-for-needle vs code-known truth — `rlm-scan-as-tool`); Loop `maxConsecutiveDenials`
+  (guard-ON 3 vs guard-OFF 9 denials + verify-shipped — `ba11-*`).
+- **Mechanism-only — FLAGGED unproven-for-outcome (the F26 on-green analogues, both confirmed):**
+  **`persona`** — `rlm-persona-seam` proved ADOPTION (marker at top + carried to a child, control arm
+  marker-free) and non-breakage of decomposition; NO evidence a persona changes any task's outcome class.
+  **Capability-scrub PROMPT WORDING** ("prefer direct action" / "deepest level") — mutation-tested for
+  PRESENCE at the right depths only; the wording's behavioral effect was never toggle-tested (adjacent:
+  RC-4 capability-matched TOOL scoping WAS outcome-tested and ruled out at ~0 gain, `rlm-defer1-capability-match`
+  — the scrub's tool CONTRACTION is a safety invariant, not an outcome claim, so only the prompt-wording leg
+  is unproven). Also mechanism-only: `DECOMPOSITION_POLICY`/NB-5 few-shot wording (no wording on/off pair);
+  `contract` (threading + strip-at-child tested (W1); no contract-vs-loose-goal outcome pair — A3 is borrowed
+  Outcomes doctrine); `refineLeaf.maxIterations` (bound mechanics tested; recovery-needs-≥2 implicit in ba8,
+  never isolated); Loop `maxIdenticalToolErrors` (deterministic outcome tests + negative controls; the live
+  pre-fix spin was observed (sonnet 8/8) but no live guard-on/off pair — documented as such).
+- **N/A (not outcome toggles):** `evaluate` (caller override seam), `corpus` (data), `concurrency`
+  (burst bound, outcome-neutral by design), `provider`/`depth`/`stream`/`litectx` (wiring).
+- **Disposition (lean bar):** the flags are DOCUMENTATION, not build orders — an outcome POC for `persona` or
+  scrub wording only earns its tokens when a decision hangs on it (e.g. an adopter claims persona lifts
+  quality, or a prompt rewrite is proposed — then the pair is: current wording vs candidate, outcome-classed).
+  The F26 boundary rule ("never mint a toggle across a version boundary") wants a per-node primitive-version +
+  prompt-hash receipt — PARKED: no retro-audit consumer exists today, and a new public receipts surface for a
+  hypothetical auditor fails the cost-neutral-when-inert test. Revisit if toggle-minting becomes a recurring
+  practice.
 
 ---
 
