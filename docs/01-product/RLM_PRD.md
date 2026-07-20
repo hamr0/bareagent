@@ -1340,6 +1340,179 @@ bareagent's) (`UPSTREAM-FIXES.md` BA-11 / `FINDINGS.md` F35).
   weak-model lift real or noise?) is NOT worth resolving: even if fully real it's dominated by the buffer on cost.
   This closes RSI-POC-BACKLOG §2.A.
 
+**Added (adopter "faulty primitives" feedback, 2026-07-19) → `[Unreleased]`.** The adopter's forbidden-zone
+audit of `refineLeaf`'s close chain (their F25 borrow; named `broken-sensor` / BA-15 here per the
+no-number-reuse rule) claimed the outcomes BETWEEN clean-green and clean-red were silently COERCED instead of
+NAMED. Validated in shipped code before building (`poc/ba15-broken-sensor.mjs`, deterministic/offline, pre-fix
+run kept as evidence):
+
+- **(BA-15) a BROKEN sensor was indistinguishable from a failing model.** Confirmed live, two shapes:
+  **(a) sensor THROWS** (the caller's test runner crashes — ENOENT, harness syntax error): the catch fell
+  through to the bare `{ incomplete, best:null }` — byte-identical to a provider death, and the model's
+  unjudged work was destroyed. **(b) sensor returns a MALFORMED verdict** (`{}`, a string, `{ok:true}`):
+  `refine` read `pass` falsy / `status` invalid with `critique:null`, so every retry re-sent the PLAIN task
+  (zero feedback — the retry-the-broken-arbiter pathology), burned all `maxIterations`, then surfaced as a
+  **converged-shaped** `{ result, verdict:{} }` — an honest-looking model non-recovery pinned on a broken
+  arbiter. The POC's falsifier arm (a well-formed failing sensor DOES thread its critique into the retry)
+  proved the zero-feedback observation was the seam, not the harness. **Fix (recurse.js, the sensor seam
+  only):** the sensor call is wrapped — a non-Halt throw or a malformed return (neither boolean `pass` nor a
+  valid tri-state `status`) stops the loop at the FIRST broken close and returns a labeled `{ incomplete,
+  blocker:'broken-sensor' }` + `receipts.blockerDetail` (what the sensor did), with `best` preserving the last
+  attempt (BA-5: best-effort work the arbiter never graded). Extends the BA-11 blocker taxonomy;
+  `HaltError` from the sensor stays a clean governance halt; both documented verdict shapes (`{pass}` /
+  `{status}`) are byte-identical to before. A hung sensor stays the CALLER's responsibility (documented, no
+  timeout knob — the sensor's execution environment is caller-owned; lean-primitive bar). +7 mutation-checked
+  tests, full suite 750 pass / 0 fail, typecheck clean.
+- **(BA-15, verifier seam) the same fault class was LIVE at the verify slot — found on the user's "did you
+  validate all?" follow-up, falsifying the first-pass "no live laundering path" assessment of the Evaluator
+  leg.** A deterministic probe showed: a THROWING caller `opts.evaluate` **crashed the whole `recurse()` run**
+  as an uncaught exception on the plain-worker path (and laundered to a bare `{incomplete}` under
+  `refineLeaf` — inconsistent siblings), while a GARBAGE return rode out **converged-shaped** as
+  `{result, verdict:{}}`. **Fix:** the caller verifier is wrapped exactly like the sensor (throw/malformed →
+  tagged), and one `verifyOrBlock` helper gives all five dispatch paths (worker/refineLeaf/scan/partition/
+  fanout) identical semantics: labeled `{incomplete, blocker:'broken-verifier'}` + `receipts.blockerDetail`,
+  `best` = the unjudged result. The DEFAULT Evaluator rubric path is deliberately NOT labeled (well-formed
+  Verdicts by construction; its failures are provider-class faults — narrowest-guard). The POC's Halt-control
+  arm caught a refactor regression en route: `return verifyOrBlock(...)` inside a try let a verifier
+  `HaltError` escape the catch (un-awaited promise exits the try before settling) — fixed with `return await`
+  + a dedicated regression test. +6 tests on top of the sensor seam's 7; suite 756 pass / 0 fail.
+- **(BA-15 review round, 2026-07-20) a `/code-review` workflow whose agents PARTLY DIED still yielded five
+  real defects — recovered by hand, per the standing "a partial verdict is not a clean bill" rule.** 7 of 16
+  agents (one whole correctness finder + six verifiers) died on a monthly spend limit; the workflow reported
+  only 3 cleanup findings because the dead verifiers never adjudicated the rest. Recovering all 13 raw
+  candidates from `journal.jsonl` and verifying them against the code surfaced, in severity order:
+  **(1) `npm run typecheck` was FAILING** (TS2722/TS18048) — the caller-verifier async IIFE broke narrowing of
+  `opts.evaluate`; CI-gating and publish-blocking. My own prior "typecheck clean" claim was FALSE: it was
+  asserted from a `&& echo` whose echo never fired, and I did not check for the line's absence — the exact
+  "prove, don't assert" failure this repo's doctrine exists to prevent. Now hoisted to a narrowed const and
+  verified BY EXIT CODE. **(2) a status-only `{status:'satisfied'}` verdict burned every iteration** — the
+  advertised contract accepts it, but `refine.js` stops on `verdict.pass`, so a satisfied close never stopped
+  and reported `passed:false`; `runArbiter` now derives `pass = status==='satisfied'` (copy, never mutating
+  the caller's object), matching `evaluator.js`. **(3) a BA-5 violation on sibling branches** — `refineLeaf`'s
+  halt/deny/generic-fault returns were `best:null` while the plain-worker path preserved `best:out.text`; all
+  now preserve the last non-empty attempt. **(4) a DETACHED JSDoc block** — the new helpers were inserted
+  between `recurseRefineLeaf`'s doc comment and the function, silently dropping that ~160-line function's
+  `@param` typing (helpers moved above the doc). **(5) the magic-string fault channel** (the workflow's own
+  top-ranked finding) — `'broken-sensor: '` prefixes encoded into `Error.message` and re-parsed by
+  `startsWith` were replaced with a typed module-local `BrokenArbiterError` (`instanceof` + `.tag`/`.detail`),
+  killing the mis-classification hazard the repo already paid for once in the loop.js HaltError-wrapping bug.
+  Also: a defensive `instanceof HaltError` rethrow in `verifyOrBlock`, both arbiter wrappers factored into one
+  `runArbiter`, and five duplicated comments consolidated. +3 regression tests (status-only stop, halt-branch
+  `best`, fault-branch `best`); suite **759 pass / 0 fail**, typecheck clean by exit code.
+- **(BA-15 review round 2, 2026-07-20) the SAME workflow, re-run clean (19/19 agents, zero errors), caught a
+  regression in round 1's OWN fix — the strongest argument for re-reviewing after a fix round.** Four more
+  confirmed: **(1) the BA-5 preservation missed the terminating attempt** — `lastAttemptText` was captured
+  AFTER the halt/error throws, so a FIRST-attempt halt discarded its own text and still returned `best:null`;
+  round 1's test only halted on attempt 2 (a prior clean attempt had already populated it), so a too-weak
+  test let a broken fix look fixed. Capture now precedes the throws, mutation-proven against exactly that
+  case. **(2) `recurseScan`/`recursePartition` destroyed a finished result** — round 1's `return await` routed
+  a verifier `HaltError` into their catches, which returned `best:null`, discarding a fully code-counted scan
+  (a re-run re-pays every window judge call); both now preserve the computed result. **(3) a child's blocker
+  was laundered by its parent** — the `{incomplete, missingSlices}` aggregation dropped a child's
+  `broken-sensor`, so a nested broken sensor never named itself at the top: BA-15's own
+  failure mode reintroduced one level up. A shared `inheritedBlocker` carries it at all three aggregation
+  sites (`broken-sensor` outranks `governance-deny` — a fault in the CALLER's code is the more actionable label).
+  **(4) a verify-slot halt after a PASSING sensor clobbered the receipt** to `passed:false`. Plus the verdict
+  shape inspection moved INSIDE `runArbiter`'s try (a throwing accessor on a returned Proxy escaped untyped —
+  the same uncaught-crash class one step later) and `cause` preserved on `BrokenArbiterError`. **Accepted
+  behavior change:** `opts.evaluate` is now held to its documented `Verdict` return — a loose object or bare
+  boolean (always a contract violation, previously silent) now yields `{incomplete, blocker:'broken-verifier'}`;
+  no shim, since one would reopen the laundering hole. **Documented open (pre-existing, 23 sites):**
+  `instanceof HaltError` is realm-sensitive. +4 mutation-proven tests; suite **762 pass / 0 fail**.
+  METHOD LESSON: a regression test that exercises only the multi-step path cannot catch a first-step bug —
+  and a fix round is exactly when a fresh review is most valuable, because the new code is the least-reviewed.
+- **2026-07-20 — BA-15 review round 3 (clean 40/40 at a DEEPER setting): ten more, three of them regressions
+  this branch introduced.** Rounds 1–2 ran `/code-review medium` and found 5 then 4; round 3 ran **xhigh**
+  (6 finders + a gap sweep) and found **15** — so the yield rose because the review got deeper, NOT because
+  the code got worse. Every finding was reproduced against the unfixed branch by `poc/ba15-round3-validate.mjs`
+  BEFORE any edit, and every fix mutation-proven. **Regressions introduced by BA-15 itself:** (1) the
+  status-only normalization used an object SPREAD, which copies own-enumerable props only — a class-instance
+  verdict with prototype getters passed the shape check then came out with `status`/`critique` ERASED,
+  reinstating the zero-feedback burn for a shape the validator blessed (now a descriptor copy onto the same
+  prototype); (2) a strict-boolean `pass` gate hard-blocked previously-CONVERGING sensors returning `{pass:1}`
+  (now: a PRESENT `pass` counts, any type — `refine` always branched on truthiness); (3) round 1's typecheck
+  fix DETACHED `opts.evaluate`, so a method-reference verifier went from `this===opts` to `this===undefined`
+  and threw (re-bound to `opts`; the honest limit — `this` is never the grader instance — is now tested).
+  **BA-15's guarantee failing at uncovered boundaries:** the three `HaltError` catches never called
+  `inheritedBlocker` (only the `missingSlices` branches did); the spawn tool flattened a blocked child into a
+  generic `[incomplete]`, letting a parent re-delegate into the same broken judge (BA-15's own spend-burn one
+  level up); `Object.assign(node, inherited)` stamped the label onto EVERY ancestor, so receipts accused nodes
+  whose sensor never ran and one denied child re-labelled its parent `governance-deny`; and `recurseFanout`
+  never got round 2's BA-5 hoist, discarding a computed reduce on a verify-slot halt. All six aggregation/halt
+  paths now route through one `incompleteWithBlocker` (which also deletes the 3× copy-paste whose next edit
+  would have missed a path); the inherited label rides `blockerFrom` + a new `blockerTask`, never the
+  ancestor's own `blocker`. Also: `inheritedBlocker`'s `'broken-verifier'` arm was UNREACHABLE (`forChild`
+  strips `evaluate`) while CHANGELOG and JSDoc asserted it worked — dead arm deleted, claims corrected.
+  **KNOWN LIMIT, documented not fixed:** a halt DURING `scanCount` still returns `best:null` — `scanCount`
+  throws without surfacing the windows it judged, so nothing exists at this seam to preserve; the comment that
+  implied BA-5 coverage was corrected instead of left to mislead. Suite **889 pass / 0 fail**, typecheck clean
+  by exit code, +28 mutation-checked tests. METHOD LESSONS: (a) review DEPTH, not code age, drove the yield —
+  "the last round found less" is not evidence of convergence when the rounds ran at different settings;
+  (b) two of the harness's own first-pass checks were CONFOUNDED (a malformed Planner stub ended the run
+  before the path under test, and a defensively-rewritten test stopped exercising the crash it existed to
+  catch) — both surfaced only because every fix was mutation-proven, not merely re-run.
+- **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
+  (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
+  the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
+  `commandSensor` helper is parked as a follow-on, not a primitive (no confirmed live gap).
+
+**Toggle-coverage audit (the feedback's finding #2, F26 borrow — RUN 2026-07-20, token-free, docs-only).**
+Question per knob: does the evidence archive contain ≥1 ONE-KNOB pair with a differing OUTCOME CLASS, or only
+mechanism/wiring proof? Audited against `poc/` + `test/recurse.test.js` (citations verified, not recalled).
+
+- **Outcome-class PROVEN (a one-knob pair exists, live where it matters):** `retrieval` (search recall
+  0.05–0.24 vs scan 0.93 on AG News; naive search→count flipped 3.7%→198%→10%, dropped — `rlm-step7-*`,
+  `rlm-step8-shipped-replay`); `window` (swept → knee ≈8, `rlm-step7-window-knee`; generalization tested on a
+  length-controlled corpus, fixed-8 robust, auto-calibration ruled OUT — `rlm-defer3-calibration-sweep`);
+  `passes` (multi-pass union recall lift + measured precision cost — `rlm-step7-reliability` PART 1); `count`
+  (v2 made the knob LOAD-BEARING: a budget-capped N=1 under-covers, error drops at N≥⌈S/B⌉ —
+  `rlm-nb2-calibrate`); `mode:'partition'`+`workerBudget` (width=3 count 64 vs flat 63 — distributes work,
+  preserves the count — `rlm-resident-scan-e2e`); `synthesize` (code-reduce vs model arithmetic ~10–15% err —
+  spike-1/step-7); `context` (0/3→3/3 — `ba9-context-thread`); `refineLeaf.temperatures` (flat 0/5 vs
+  escalating 2-3/5 — `ba8-leaf-refine`; sonnet critique-only convergence — `ba10-verify-shipped`);
+  `refineLeaf.rejectedBuffer` (on/off 50%→100%, antagonism sweep, honest sonnet null, task-shape reversal —
+  `ba14*`, `bflip-spiral-matrix`); `maxDepth`-as-capability (depth-N covers an 11×-over-budget corpus a single
+  bounded worker cannot — `rlm-spike2-recursion` claim A); `retrieval:'tools'` per-query face (worker routed
+  scan-for-count + search-for-needle vs code-known truth — `rlm-scan-as-tool`); Loop `maxConsecutiveDenials`
+  (guard-ON 3 vs guard-OFF 9 denials + verify-shipped — `ba11-*`).
+- **The two F26 on-green flags — RESOLVED LIVE (2026-07-20, prereg'd one-knob probes, claude-haiku-4-5,
+  8 trials/arm, pre-worded readouts, code-scored evidence-only outcomes):**
+  - **`persona` → OUTCOME-PROVEN (`poc/audit2-persona-outcome.mjs`).** Through the SHIPPED `recurse()`
+    (`maxDepth:0` forces a single-shot leaf — persona is the only arm difference): a risk-averse-SRE STANCE
+    (never stating the answer) flipped a borderline Friday-deploy judgment **SHIP 8/8 → HOLD 8/8** (delta +8,
+    prereg threshold +3). Scope honesty: two prior cells were NO-HEADROOM, not nulls — a "surface risks"
+    persona showed NO lift on find-the-vulnerability tasks (ORDER-BY injection AND a subtle timing-unsafe
+    HMAC compare, base 8/8 hits both times: haiku security-sweeps any "what should a maintainer know" ask
+    unprompted). So: persona is proven to flip a STANCE-SENSITIVE judgment's outcome class; it is NOT
+    evidence of a quality lift where the model's default behavior already covers the stance.
+  - **Capability-scrub PROMPT WORDING → MEASURED-NULL, bracketed (`poc/audit2-scrub-wording.mjs`).**
+    One-knob pair at the prompt seam (shipped constants, IDENTICAL spawn tool both arms — the tool half is a
+    safety invariant, not under test): the depth-1 "PREFER DIRECT ACTION" suffix on vs off. Two task cells
+    bracket the range: a trivial 3-part task → **0/8 delegation in BOTH arms** (nothing to suppress); a task
+    MIRRORING the policy's own worked example (max legitimate pull) → **8/8 delegation in BOTH arms, 3
+    spawns every trial**, correctness floor 8/8 both. The wording moved NOTHING at either pole — the TOOL
+    CONTRACTION carries the scrub, not the prose. Disposition: wording RETAINED (static text, zero runtime
+    cost, effect may be model-dependent — removing shipped prompt text on one model + two task shapes is the
+    toy-fixtures trap), but any claim that the prose is load-bearing is now DOWNGRADED to measured-null.
+- **Still mechanism-only (not probed — no decision hangs on them today):** `DECOMPOSITION_POLICY`/NB-5
+  few-shot wording (no wording on/off pair); `contract` (threading + strip-at-child tested (W1); no
+  contract-vs-loose-goal outcome pair — A3 is borrowed Outcomes doctrine); `refineLeaf.maxIterations` (bound
+  mechanics tested; recovery-needs-≥2 implicit in ba8, never isolated); Loop `maxIdenticalToolErrors`
+  (deterministic outcome tests + negative controls; the live pre-fix spin was observed (sonnet 8/8) but no
+  live guard-on/off pair — documented as such).
+- **N/A (not outcome toggles):** `evaluate` (caller override seam), `corpus` (data), `concurrency`
+  (burst bound, outcome-neutral by design), `provider`/`depth`/`stream`/`litectx` (wiring).
+- **Disposition (lean bar):** both flagged knobs were probed live on owner request (above) — ZERO shipped-code
+  changes resulted (persona proven as-is; scrub wording retained with its claim downgraded). The remaining
+  mechanism-only knobs stay documentation, not build orders — probe one only when a decision hangs on it
+  (e.g. a prompt rewrite is proposed — then the pair is: current wording vs candidate, outcome-classed).
+  The F26 boundary rule ("never mint a toggle across a version boundary") wants a per-node primitive-version +
+  prompt-hash receipt — PARKED: no retro-audit consumer exists today, and a new public receipts surface for a
+  hypothetical auditor fails the cost-neutral-when-inert test. Revisit if toggle-minting becomes a recurring
+  practice. Method note (both probes): the first cells returned NO-HEADROOM, not nulls — the harness had to
+  CREATE the precondition (a stance-sensitive judgment; a delegation-tempting task) before either verdict
+  meant anything, the same lesson as the §2.C red-team precondition rule.
+
 ---
 
 ## Source & cross-refs

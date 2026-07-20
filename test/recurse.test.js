@@ -661,6 +661,413 @@ describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)'
   });
 });
 
+describe('recurse — broken-sensor blocker (BA-15, "a broken arbiter is named, never coerced")', () => {
+  // Pre-BA-15 pathologies these tests are mutated against: (a) a sensor THROW fell through to the bare
+  // {incomplete, best:null} — byte-identical to a provider death, and the model's work was destroyed; (b) a
+  // MALFORMED verdict ({}, 'ok', {ok:true}) read as pass:false with critique:null, so refine burned every
+  // remaining attempt re-sending the PLAIN task (zero feedback), then the run surfaced as an honest-looking
+  // model non-recovery — or worse, a converged-shaped {result, verdict:{}}.
+  const OK = () => ({ status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] });
+
+  it('a THROWING sensor → labeled {incomplete, blocker:\'broken-sensor\'} with the detail, work preserved (BA-5)', async () => {
+    const sp = scriptedProvider(() => ({ text: 'the model actually did the work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => { throw new Error('ENOENT: vitest not found'); } },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, 'broken-sensor', 'the faulty arbiter is NAMED (pre-fix: unlabeled, read as model failure)');
+    assert.equal(out.receipts.blocker, 'broken-sensor', 'receipts mirror the blocker (BA-11 pattern)');
+    assert.match(out.receipts.blockerDetail, /sensor threw: ENOENT: vitest not found/, 'the detail says WHAT broke');
+    assert.equal(out.best, 'the model actually did the work', 'best preserves the unjudged attempt — the sensor broke, not the model');
+    assert.equal(sp.calls.length, 1, 'stops at the first broken close');
+  });
+
+  it('a MALFORMED verdict stops the loop at the FIRST broken close — attempts are not burned with zero feedback', async () => {
+    const sp = scriptedProvider(() => ({ text: 'attempt' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => ({}), maxIterations: 3 },
+    });
+    assert.equal(out.blocker, 'broken-sensor', 'a garbage verdict is named, never coerced to pass:false');
+    assert.match(out.receipts.blockerDetail, /neither a usable `pass` nor a valid `status`/);
+    assert.equal(sp.calls.length, 1, 'pre-fix: 3 attempts burned, every retry a feedback-free re-send of the plain task');
+    assert.equal(out.result, undefined, 'never a converged-shaped return riding a garbage verdict');
+  });
+
+  it('malformed shapes are each caught: undefined, string, array, {ok:true}', async () => {
+    for (const bad of [() => undefined, () => 'ok', () => ['pass'], () => ({ ok: true })]) {
+      const sp = scriptedProvider(() => ({ text: 'attempt' }));
+      const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: bad } });
+      assert.equal(out.blocker, 'broken-sensor', `sensor ${bad} must be flagged`);
+      assert.equal(sp.calls.length, 1, 'one attempt only');
+    }
+  });
+
+  it('a genuine PROVIDER fault stays distinguishable — incomplete WITHOUT the broken-sensor label', async () => {
+    const sp = scriptedProvider(() => { throw new Error('connection reset by peer'); });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: OK } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, undefined, 'a model/provider fault must NOT be pinned on the sensor');
+  });
+
+  it('a HaltError thrown by the sensor stays a clean governance halt, never relabeled broken-sensor', async () => {
+    const sp = scriptedProvider(() => ({ text: 'attempt' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'governance halt recorded');
+    assert.equal(out.blocker, undefined, 'a governance halt is not a sensor fault');
+  });
+
+  it('well-formed verdict shapes are untouched: minimal {pass} retries with critique; {status:\'failed\'} is terminal', async () => {
+    // Minimal {pass:false, critique} (no status) must still drive a retry carrying the critique — the
+    // validator accepts BOTH documented shapes, not just the full Verdict.
+    let n = 0;
+    const sp = scriptedProvider(() => ({ text: `attempt_${++n}` }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: (r) => (String(r).includes('_2') ? { pass: true } : { pass: false, critique: 'NEEDS_V2' }), maxIterations: 3 },
+    });
+    assert.equal(out.blocker, undefined, 'minimal {pass} shape is valid');
+    assert.ok(lastUser(sp.calls[1].messages).includes('NEEDS_V2'), 'the critique still reaches the retry');
+    assert.equal(out.receipts.refineLeaf.passed, true);
+
+    const sp2 = scriptedProvider(() => ({ text: 'attempt' }));
+    const out2 = await recurse(SIMPLE_TASK, { provider: sp2.provider }, {
+      refineLeaf: { sensor: () => ({ status: 'failed', critique: 'wrong approach' }) },
+    });
+    assert.equal(out2.blocker, undefined, 'status-only shape is valid');
+    assert.equal(sp2.calls.length, 1, 'terminal failed still stops after one attempt');
+    assert.equal(out2.receipts.refineLeaf.passed, false, 'honest non-pass, not a blocker');
+  });
+
+  it('a status-only {status:\'satisfied\'} verdict STOPS the leaf and reports passed — not burned as never-passed', async () => {
+    // The advertised contract lets a sensor return {status:'satisfied'} (no boolean pass). refine.js stops on
+    // verdict.pass, so pre-fix this ran all maxIterations (pass undefined → never stops) and reported
+    // passed:false — a satisfied close mislabeled as non-recovery + 3× the token spend. runArbiter now derives
+    // pass = status==='satisfied', so it stops on the first attempt and reports passed:true.
+    let n = 0;
+    const sp = scriptedProvider(() => ({ text: `attempt_${++n}` }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => ({ status: 'satisfied' }), maxIterations: 3 },
+    });
+    assert.equal(out.blocker, undefined, 'a satisfied status-only verdict is valid, not a blocker');
+    assert.equal(sp.calls.length, 1, 'stops on the first satisfied close (pre-fix: burned all 3)');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'reported as passed (pre-fix: false — pass was undefined)');
+  });
+
+  it('the HaltError branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
+    // Pre-fix the HaltError / governance-deny / generic-fault branches returned best:null even though the leaf
+    // had produced work — a BA-5 violation, inconsistent with the plain-worker path (best: out.text). They now
+    // return lastAttemptText, matching the broken-sensor branch and the plain worker.
+    let call = 0;
+    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new HaltError('cap', { rule: 'budget' }); return { text: 'attempt-1 work' }; });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.best, 'attempt-1 work', 'a halt on the retry preserves attempt 1 (pre-fix: best:null)');
+  });
+
+  it('a FIRST-attempt halt still preserves that attempt\'s text (BA-5 capture-before-throw)', async () => {
+    // Review-caught regression in the previous fix: `lastAttemptText` was assigned AFTER the halt/error throws,
+    // so the attempt that actually terminated had its text discarded — best:null on a first-attempt halt. The
+    // earlier test only halted on attempt 2 (where a prior clean attempt had already populated it), so it
+    // passed while the single-attempt case was broken. The Loop returns its last non-empty text on every
+    // terminating path, so the capture must precede the throws.
+    const sp = scriptedProvider(() => ({ text: 'partial work' }));
+    const ctx = { provider: sp.provider, onLlmResult: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } };
+    const out = await recurse(SIMPLE_TASK, ctx, { refineLeaf: { sensor: () => ({ pass: false, critique: 'x' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true);
+    assert.equal(out.best, 'partial work', 'the halting attempt\'s own text survives (pre-fix: null)');
+  });
+
+  it('a child\'s broken-sensor blocker propagates to the PARENT in a nested tree (BA-15 anti-laundering)', async () => {
+    // A parent aggregates a dead child into {incomplete, missingSlices}; pre-fix the child's blocker label was
+    // dropped there, so a top-level caller branching on result.blocker saw nothing and would debug the model
+    // instead of its own broken sensor — the laundering BA-15 exists to close, reintroduced one level up.
+    const sp = scriptedProvider(decomposingHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      maxDepth: 2,
+      refineLeaf: { sensor: () => { throw new Error('ENOENT: harness missing'); } },
+    });
+    assert.equal(out.incomplete, true, 'a broken sensor at the leaf makes the tree incomplete');
+    assert.equal(out.blocker, 'broken-sensor', 'the child\'s label reaches the top (pre-fix: undefined)');
+    // The parent's OWN `blocker` stays clear: it means "THIS node's arbiter broke", and the parent's never ran.
+    // Stamping the descendant's label onto every ancestor made the receipts tree accuse innocent nodes, so the
+    // inherited label rides `blockerFrom` (with `blockerTask` naming the culprit) instead.
+    assert.equal(out.receipts.blocker, undefined, 'the parent is not accused of its child\'s fault');
+    assert.equal(out.receipts.blockerFrom.blocker, 'broken-sensor', 'recorded on the parent as INHERITED');
+    assert.equal(typeof out.blockerTask, 'string', 'and the culprit subtask is named');
+  });
+
+  it('a verify-slot halt after a PASSING sensor does not clobber the refineLeaf receipt to passed:false', async () => {
+    // verifyOrBlock is awaited INSIDE the try, so a halt at the verify slot reaches the catch even though the
+    // refine loop already completed and wrote an honest passed:true receipt. Overwriting it would report a
+    // sensor that never closed when it did.
+    const sp = scriptedProvider(() => ({ text: 'FIXED answer' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: (r) => ({ pass: String(r).includes('FIXED') }) },
+      contract: 'must be fixed',
+      evaluate: () => { throw new HaltError('cap', { rule: 'budget' }); },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'the governance halt is recorded');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor DID close — receipt preserved (pre-fix: false)');
+  });
+
+  it('the generic-fault branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
+    let call = 0;
+    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new Error('provider exploded'); return { text: 'attempt-1 work' }; });
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, undefined, 'a plain provider fault is not a labeled blocker');
+    assert.equal(out.best, 'attempt-1 work', 'the fault branch preserves attempt 1 (pre-fix: best:null)');
+  });
+
+  it('the refineLeaf receipt rides the broken-sensor path (every-terminating-path invariant)', async () => {
+    const sp = scriptedProvider(() => ({ text: 'attempt' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => { throw new Error('boom'); } },
+    });
+    assert.ok(out.receipts.refineLeaf, 'receipt present');
+    assert.equal(out.receipts.refineLeaf.passed, false);
+    assert.equal(out.receipts.refineLeaf.iterations, 1, 'records the attempt that ran before the broken close');
+  });
+
+  // ---- Verifier seam (same fault class at the verify slot: a caller opts.evaluate is an arbiter too).
+  // Pre-fix pathologies: a THROWING caller verifier CRASHED the whole run as an exception on the plain-worker
+  // path (and laundered to a bare {incomplete} under refineLeaf); a GARBAGE return rode a CONVERGED-shaped
+  // {result, verdict:{}} out. The default Evaluator rubric path is deliberately NOT labeled (well-formed by
+  // construction; its failures are provider-class faults) — narrowest guard.
+
+  it('a THROWING caller verifier (opts.evaluate) → labeled broken-verifier, work preserved, never a crash', async () => {
+    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      contract: 'must do the thing', evaluate: () => { throw new Error('rubric grader exploded'); },
+    });
+    assert.equal(out.incomplete, true, 'pre-fix this line was unreachable — recurse() threw');
+    assert.equal(out.blocker, 'broken-verifier', 'the faulty verifier is NAMED');
+    assert.match(out.receipts.blockerDetail, /evaluate threw: rubric grader exploded/);
+    assert.equal(out.best, 'the actual work', 'the unjudged result is preserved as best (BA-5)');
+  });
+
+  it('a GARBAGE caller verdict never rides out converged-shaped', async () => {
+    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      contract: 'must do the thing', evaluate: () => ({}),
+    });
+    assert.equal(out.blocker, 'broken-verifier', 'pre-fix: {result, verdict:{}} — a converged shape riding garbage');
+    assert.equal(out.result, undefined, 'no result field on the labeled incomplete');
+    assert.match(out.receipts.blockerDetail, /neither a usable `pass` nor a valid `status`/);
+  });
+
+  it('under refineLeaf a broken verifier is labeled broken-VERIFIER (distinct from broken-sensor)', async () => {
+    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: OK },
+      contract: 'must do the thing', evaluate: () => { throw new Error('grader dead'); },
+    });
+    assert.equal(out.blocker, 'broken-verifier', 'the label says WHICH arbiter broke (sensor passed, verifier died)');
+    assert.equal(out.best, 'the actual work', 'work preserved');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor receipt is honest — the leaf loop itself succeeded');
+  });
+
+  it('a verifier HaltError is a clean governance halt — the return await regression guard', async () => {
+    // verifyOrBlock is called as `return await ...` INSIDE each path's try: a bare `return <promise>` exits
+    // the try before settling, so the HaltError would escape recurse() as an uncaught throw (caught live by
+    // the POC's [E4] control arm). This test fails if the await is dropped.
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      contract: 'must do the thing', evaluate: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); },
+    });
+    assert.equal(out.incomplete, true, 'a clean incomplete, not a thrown run');
+    assert.equal(out.receipts.halted, true, 'recorded as a governance halt');
+    assert.equal(out.blocker, undefined, 'never relabeled broken-verifier');
+  });
+
+  it('a well-formed FAILING verdict from opts.evaluate stays judged-and-failed — {result, verdict}, no blocker', async () => {
+    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      contract: 'must do the thing', evaluate: () => ({ status: 'needs_revision', pass: false, score: 3, critique: 'gap', suggestions: [] }),
+    });
+    assert.equal(out.blocker, undefined);
+    assert.equal(out.result, 'the actual work', 'a judged failure still returns the result + verdict');
+    assert.equal(out.verdict.pass, false);
+  });
+
+  it('the broken-verifier label rides the FANOUT dispatch path too (one helper, five paths)', async () => {
+    const sp = scriptedProvider(fanoutHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      count: 2, evaluate: () => { throw new Error('grader dead on fanout'); },
+    });
+    assert.equal(out.blocker, 'broken-verifier', 'the fanout path labels a broken verifier identically');
+    assert.ok(out.best, 'the reduced slices are preserved as best');
+  });
+
+  // ---------------------------------------------------------------- round-3 review regressions
+  // Each of the following reproduces a defect the third review round found in BA-15's OWN fixes, validated
+  // against the pre-fix code by `poc/ba15-round3-validate.mjs` before being fixed here.
+
+  it('a PROTOTYPE-backed verdict keeps its status/critique (spread would erase accessor fields)', async () => {
+    // A class-instance verdict passes the shape check by reading `.status` through a getter, but an object
+    // spread copies OWN enumerable props only — so status/critique came out ERASED: the critique never reached
+    // the retry prompt (zero-feedback burn, the exact thing BA-15 exists to stop) and `verdict.status` read
+    // undefined to the caller. Regression-proof: revert to `{...v, pass}` and both asserts go red.
+    class V {
+      constructor(s, c) { this._s = s; this._c = c; }
+      get status() { return this._s; }
+      get critique() { return this._c; }
+    }
+    const sp = scriptedProvider(() => ({ text: 'the work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      contract: 'must do the thing', evaluate: () => new V('satisfied', 'looks good'),
+    });
+    assert.equal(out.verdict.status, 'satisfied', 'prototype getter survives normalization');
+    assert.equal(out.verdict.critique, 'looks good', 'the critique is not erased');
+    assert.equal(out.verdict.pass, true, 'and `pass` is still derived from the status');
+  });
+
+  it('a TRUTHY non-boolean `pass` is accepted, not hard-blocked as a faulty arbiter', async () => {
+    // `{pass: 1}` is a long-standing yes/no convention and `refine` has always branched on truthiness, so a
+    // strict-boolean gate silently flipped previously-CONVERGING adopter sensors to a permanent first-attempt
+    // block. BA-15's job is a verdict with NO usable signal — not one answering clearly in another dialect.
+    const sp = scriptedProvider(() => ({ text: 'attempt output' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => ({ pass: 1, critique: '' }), maxIterations: 3 },
+    });
+    assert.equal(out.blocker, undefined, 'a truthy pass is a real verdict, not a broken arbiter');
+    assert.equal(out.incomplete, undefined, 'the leaf converges as it did before BA-15');
+    assert.equal(out.receipts.refineLeaf.passed, true, 'and is recorded as an honest pass');
+  });
+
+  it('a NON-ERROR throw still yields an actionable blockerDetail (never [object Object])', async () => {
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => { throw { code: 'ENOENT', path: '/usr/bin/vitest' }; } },
+    });
+    assert.equal(out.blocker, 'broken-sensor');
+    assert.doesNotMatch(out.receipts.blockerDetail, /\[object Object\]/, 'the detail must identify something');
+    assert.match(out.receipts.blockerDetail, /ENOENT/, 'the thrown value is described');
+  });
+
+  it('blockerDetail is BOUNDED and does not dump the thrown object wholesale (audit-log safety)', async () => {
+    // A thrown non-Error is typically a spawn/exec RESULT carrying a full stdout buffer and an env snapshot.
+    // blockerDetail rides into `receipts`, which a wired gate serializes VERBATIM to a plaintext audit log —
+    // so a whole-object JSON dump writes caller secrets to disk (the F16/BA-1 leak class). Only conventional
+    // diagnostic fields are taken, clamped. Mutation-proof: restore `JSON.stringify(err)` and both go red.
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: {
+        sensor: () => { throw { code: 'ENOENT', stdout: 'x'.repeat(50000), env: { SECRET_TOKEN: 'sk-live-abc123' } }; },
+      },
+    });
+    assert.ok(out.receipts.blockerDetail.length < 400, 'the detail is bounded, never an unbounded buffer dump');
+    assert.doesNotMatch(out.receipts.blockerDetail, /sk-live-abc123/, 'caller secrets never reach the audit record');
+    assert.match(out.receipts.blockerDetail, /ENOENT/, 'while still naming the actual fault');
+  });
+
+  it('an UNREADABLE returned verdict is named as such, not reported as the sensor throwing', async () => {
+    // A sensor returning a Proxy whose accessors throw RETURNED NORMALLY — reporting "sensor threw" sends the
+    // operator hunting a `throw` that does not exist. NB the fault surfaces during the `await`'s own `.then`
+    // probe, so the two cases must be separated around the await, not just around the shape inspection.
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: () => new Proxy({}, { get() { throw new Error('trap'); } }) },
+    });
+    assert.equal(out.blocker, 'broken-sensor');
+    assert.match(out.receipts.blockerDetail, /could not be read/, 'the fault is the RETURNED VALUE, not a throw');
+    assert.doesNotMatch(out.receipts.blockerDetail, /threw: trap/, 'must not accuse the sensor body');
+  });
+
+  it('a method-reference verifier does not hard-fail as a broken arbiter (receiver restored)', async () => {
+    // `const evaluate = opts.evaluate` DETACHED the method; the call had always been `opts.evaluate(...)`, so
+    // `this` was the OPTIONS object. Detached, `this` became undefined and the first `this.x` read THREW —
+    // flipping a working (if degraded) integration to a hard broken-verifier. Binding back to `opts` restores
+    // the prior behavior exactly. NOTE the honest limit that restores: `this` is the options object, never the
+    // grader instance, so a method depending on its own fields still reads undefined. A caller wanting its own
+    // receiver must bind (`evaluate: g.check.bind(g)`) — asserted below so the contract is not overstated.
+    class Grader {
+      constructor() { this.threshold = 0.5; }
+      // UNGUARDED on purpose: detached (`this === undefined`) this THROWS, which is the regression. Bound to
+      // `opts` it reads undefined and degrades to false — exactly the pre-BA-15 behavior being restored.
+      check() { return { pass: this.threshold > 0, critique: '' }; }
+    }
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const g = new Grader();
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: g.check });
+    assert.equal(out.blocker, undefined, 'a method reference must not become a broken-verifier (pre-fix: it did)');
+    assert.equal(out.verdict.pass, false, 'degraded exactly as before: `this` is opts, so threshold is undefined');
+
+    const bound = await recurse(SIMPLE_TASK, { provider: scriptedProvider(() => ({ text: 'work' })).provider }, {
+      contract: 'c', evaluate: g.check.bind(g),
+    });
+    assert.equal(bound.verdict.pass, true, 'a caller-bound method sees its own fields — the documented way');
+  });
+
+  it('a HALT after a broken-sensor child still names the child\'s blocker (halt catch inherits too)', async () => {
+    // The halt branches skipped the inherit entirely, so a gate tripping AFTER the children ran (here: mid-
+    // synthesize) dropped the label — the caller read a governance problem where their own sensor had crashed.
+    const sp = scriptedProvider(decomposingHandler());
+    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      maxDepth: 2,
+      refineLeaf: { sensor: () => { throw new Error('child sensor boom'); } },
+      synthesize: () => { throw new HaltError('budget cap', { rule: 'budget' }); },
+    });
+    assert.equal(out.incomplete, true);
+    assert.equal(out.receipts.halted, true, 'it really was a halt');
+    assert.equal(out.blocker, 'broken-sensor', 'the child\'s label survives the halt (pre-fix: undefined)');
+  });
+
+  it('the spawn boundary tells the parent a child was BLOCKED, not just incomplete', async () => {
+    // Collapsed to a bare `[incomplete]`, the parent model cannot tell "the model failed" from "the judge is
+    // broken", so it re-delegates the same subtask into the same broken sensor, burning a full leaf attempt
+    // each time — BA-15's own spend-burn, one level up.
+    const sp = scriptedProvider(decomposingHandler());
+    await recurse(COMPLEX_TASK, { provider: sp.provider }, {
+      maxDepth: 2,
+      refineLeaf: { sensor: () => { throw new Error('child sensor boom'); } },
+    });
+    const toolResults = sp.calls.flatMap(c => c.messages.filter(m => m.role === 'tool').map(m => m.content));
+    const blocked = toolResults.find(t => typeof t === 'string' && t.includes('broken-sensor'));
+    assert.ok(blocked, 'the parent model is told the ARBITER broke, not merely that the child failed');
+    assert.match(blocked, /do NOT re-delegate/i, 'and is told retrying hits the same broken check');
+  });
+
+  it('a broken-sensor child OUTRANKS a governance-denied sibling, and the parent is not accused', async () => {
+    // Two rules that had NO test before: (a) broken-* wins over governance-deny (a fault in the CALLER's own
+    // code is more actionable than a gate decision); (b) the inherited label rides `blockerFrom`, never the
+    // parent's own `blocker`. Driven through the public API, not an exported internal.
+    //   slice 0 → spins on a denied tool  ⇒ governance-deny  (and is FIRST, so a naive single `find` picks it)
+    //   slice 1 → its sensor throws       ⇒ broken-sensor
+    // Mutation-proof for (a): collapse inheritedBlocker to one `find(c => c.incomplete && c.blocker)` and the
+    // first assert goes red (governance-deny wins on array order).
+    const editTool = { name: 'edit', description: 'edit a file', execute: async () => 'edited' };
+    const sp = scriptedProvider((messages, tools, options, i) => {
+      if (isPlanner(messages)) {
+        return { text: JSON.stringify([0, 1].map(j => ({ id: `s${j}`, action: `SLICE ${j}: count the alpha records`, dependsOn: [] }))) };
+      }
+      if (isVerify(messages)) return { text: SATISFIED };
+      // slice 0's worker keeps calling the denied tool → the Loop's deny-spin guard short-circuits it
+      if (lastUser(messages).includes('SLICE 0')) return { toolCalls: [{ id: 'e' + i, name: 'edit', arguments: { n: i } }] };
+      return { text: 'slice 1 output' };
+    });
+    const out = await recurse(COMPLEX_TASK, {
+      provider: sp.provider,
+      policy: (tool) => (tool === 'edit' ? '[deny: fs.writeScope] out of scope' : true),
+    }, {
+      count: 2,
+      tools: [editTool],
+      refineLeaf: { sensor: (_r, c) => { if (String(c.task).includes('SLICE 1')) throw new Error('slice-1 sensor boom'); return { pass: true }; } },
+    });
+
+    assert.equal(out.incomplete, true);
+    assert.equal(out.blocker, 'broken-sensor', 'broken-sensor outranks the FIRST-listed governance-deny sibling');
+    assert.match(out.blockerTask, /SLICE 1/, 'and names WHICH sub-task broke');
+    assert.equal(out.receipts.blocker, undefined, 'the parent is not accused of its child\'s fault');
+    assert.equal(out.receipts.blockerFrom.blocker, 'broken-sensor', 'the inherited label is recorded separately');
+  });
+});
+
 describe('recurse — topology knob & capability-scrub (RC-11 / RC-12 / NB-4)', () => {
   it('RC-11: maxDepth=1 ⇒ flat fan-out — the child is offered NO spawn tool (no nesting)', async () => {
     const sp = scriptedProvider(decomposingHandler({ subtask: 'leaf subtask' }));
