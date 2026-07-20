@@ -950,6 +950,22 @@ describe('recurse — broken-sensor blocker (BA-15, "a broken arbiter is named, 
     assert.match(out.receipts.blockerDetail, /ENOENT/, 'the thrown value is described');
   });
 
+  it('blockerDetail is BOUNDED and does not dump the thrown object wholesale (audit-log safety)', async () => {
+    // A thrown non-Error is typically a spawn/exec RESULT carrying a full stdout buffer and an env snapshot.
+    // blockerDetail rides into `receipts`, which a wired gate serializes VERBATIM to a plaintext audit log —
+    // so a whole-object JSON dump writes caller secrets to disk (the F16/BA-1 leak class). Only conventional
+    // diagnostic fields are taken, clamped. Mutation-proof: restore `JSON.stringify(err)` and both go red.
+    const sp = scriptedProvider(() => ({ text: 'work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
+      refineLeaf: {
+        sensor: () => { throw { code: 'ENOENT', stdout: 'x'.repeat(50000), env: { SECRET_TOKEN: 'sk-live-abc123' } }; },
+      },
+    });
+    assert.ok(out.receipts.blockerDetail.length < 400, 'the detail is bounded, never an unbounded buffer dump');
+    assert.doesNotMatch(out.receipts.blockerDetail, /sk-live-abc123/, 'caller secrets never reach the audit record');
+    assert.match(out.receipts.blockerDetail, /ENOENT/, 'while still naming the actual fault');
+  });
+
   it('an UNREADABLE returned verdict is named as such, not reported as the sensor throwing', async () => {
     // A sensor returning a Proxy whose accessors throw RETURNED NORMALLY — reporting "sensor threw" sends the
     // operator hunting a `throw` that does not exist. NB the fault surfaces during the `await`'s own `.then`

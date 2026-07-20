@@ -686,6 +686,9 @@ function verdictShapeFault(v) {
   return `returned an object with neither a usable \`pass\` nor a valid \`status\` (keys: ${keys || 'none'})`;
 }
 
+/** Upper bound on a `blockerDetail` fragment — it rides into receipts and, via a wired gate, onto disk. */
+const DETAIL_MAX = 200;
+
 /**
  * BA-15 — a readable one-liner for ANYTHING thrown by a caller arbiter. `String(err)` on a non-Error throw
  * (a test harness rejecting with a raw `{code:'ENOENT', path}` result is the common case) yields the useless
@@ -694,12 +697,20 @@ function verdictShapeFault(v) {
  * @returns {string}
  */
 function describeThrown(err) {
-  if (err instanceof Error && err.message) return err.message;
-  if (err === null || typeof err !== 'object') return String(err);
+  const clamp = (s) => (s.length > DETAIL_MAX ? `${s.slice(0, DETAIL_MAX)}… (truncated)` : s);
+  if (err instanceof Error && typeof err.message === 'string' && err.message) return clamp(err.message);
+  if (err === null || typeof err !== 'object') return clamp(String(err));
+  // Deliberately NOT a whole-object dump. A thrown non-Error is typically a spawn/exec RESULT, which routinely
+  // carries a full stdout buffer and an env snapshot — and `blockerDetail` rides into `receipts`, which a wired
+  // gate serializes VERBATIM into a plaintext audit log (the F16/BA-1 lesson: never let caller data of unknown
+  // shape reach the audit unfiltered). Take only the conventional diagnostic fields, clamped.
   try {
-    const json = JSON.stringify(err);
-    if (json && json !== '{}') return json;
-  } catch { /* circular, or a throwing toJSON — fall through to the tag */ }
+    const picked = ['name', 'code', 'errno', 'syscall', 'path', 'status', 'signal', 'message']
+      .filter(k => typeof err[k] === 'string' || typeof err[k] === 'number')
+      .map(k => `${k}=${String(err[k])}`)
+      .join(' ');
+    if (picked) return clamp(picked);
+  } catch { /* a throwing accessor / Proxy trap — fall through to the type tag */ }
   return Object.prototype.toString.call(err);
 }
 
