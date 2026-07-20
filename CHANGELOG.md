@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.31.0] - 2026-07-20
 
 ### Fixed
 
