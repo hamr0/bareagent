@@ -1409,9 +1409,9 @@ run kept as evidence):
   a verifier `HaltError` into their catches, which returned `best:null`, discarding a fully code-counted scan
   (a re-run re-pays every window judge call); both now preserve the computed result. **(3) a child's blocker
   was laundered by its parent** — the `{incomplete, missingSlices}` aggregation dropped a child's
-  `broken-sensor`/`broken-verifier`, so a nested broken sensor never named itself at the top: BA-15's own
+  `broken-sensor`, so a nested broken sensor never named itself at the top: BA-15's own
   failure mode reintroduced one level up. A shared `inheritedBlocker` carries it at all three aggregation
-  sites (`broken-*` outranks `governance-deny` — a fault in the CALLER's code is the more actionable label).
+  sites (`broken-sensor` outranks `governance-deny` — a fault in the CALLER's code is the more actionable label).
   **(4) a verify-slot halt after a PASSING sensor clobbered the receipt** to `passed:false`. Plus the verdict
   shape inspection moved INSIDE `runArbiter`'s try (a throwing accessor on a returned Proxy escaped untyped —
   the same uncaught-crash class one step later) and `cause` preserved on `BrokenArbiterError`. **Accepted
@@ -1421,6 +1421,36 @@ run kept as evidence):
   `instanceof HaltError` is realm-sensitive. +4 mutation-proven tests; suite **762 pass / 0 fail**.
   METHOD LESSON: a regression test that exercises only the multi-step path cannot catch a first-step bug —
   and a fix round is exactly when a fresh review is most valuable, because the new code is the least-reviewed.
+- **2026-07-20 — BA-15 review round 3 (clean 40/40 at a DEEPER setting): ten more, three of them regressions
+  this branch introduced.** Rounds 1–2 ran `/code-review medium` and found 5 then 4; round 3 ran **xhigh**
+  (6 finders + a gap sweep) and found **15** — so the yield rose because the review got deeper, NOT because
+  the code got worse. Every finding was reproduced against the unfixed branch by `poc/ba15-round3-validate.mjs`
+  BEFORE any edit, and every fix mutation-proven. **Regressions introduced by BA-15 itself:** (1) the
+  status-only normalization used an object SPREAD, which copies own-enumerable props only — a class-instance
+  verdict with prototype getters passed the shape check then came out with `status`/`critique` ERASED,
+  reinstating the zero-feedback burn for a shape the validator blessed (now a descriptor copy onto the same
+  prototype); (2) a strict-boolean `pass` gate hard-blocked previously-CONVERGING sensors returning `{pass:1}`
+  (now: a PRESENT `pass` counts, any type — `refine` always branched on truthiness); (3) round 1's typecheck
+  fix DETACHED `opts.evaluate`, so a method-reference verifier went from `this===opts` to `this===undefined`
+  and threw (re-bound to `opts`; the honest limit — `this` is never the grader instance — is now tested).
+  **BA-15's guarantee failing at uncovered boundaries:** the three `HaltError` catches never called
+  `inheritedBlocker` (only the `missingSlices` branches did); the spawn tool flattened a blocked child into a
+  generic `[incomplete]`, letting a parent re-delegate into the same broken judge (BA-15's own spend-burn one
+  level up); `Object.assign(node, inherited)` stamped the label onto EVERY ancestor, so receipts accused nodes
+  whose sensor never ran and one denied child re-labelled its parent `governance-deny`; and `recurseFanout`
+  never got round 2's BA-5 hoist, discarding a computed reduce on a verify-slot halt. All six aggregation/halt
+  paths now route through one `incompleteWithBlocker` (which also deletes the 3× copy-paste whose next edit
+  would have missed a path); the inherited label rides `blockerFrom` + a new `blockerTask`, never the
+  ancestor's own `blocker`. Also: `inheritedBlocker`'s `'broken-verifier'` arm was UNREACHABLE (`forChild`
+  strips `evaluate`) while CHANGELOG and JSDoc asserted it worked — dead arm deleted, claims corrected.
+  **KNOWN LIMIT, documented not fixed:** a halt DURING `scanCount` still returns `best:null` — `scanCount`
+  throws without surfacing the windows it judged, so nothing exists at this seam to preserve; the comment that
+  implied BA-5 coverage was corrected instead of left to mislead. Suite **889 pass / 0 fail**, typecheck clean
+  by exit code, +28 mutation-checked tests. METHOD LESSONS: (a) review DEPTH, not code age, drove the yield —
+  "the last round found less" is not evidence of convergence when the rounds ran at different settings;
+  (b) two of the harness's own first-pass checks were CONFOUNDED (a malformed Planner stub ended the run
+  before the path under test, and a defensively-rewritten test stopped exercising the crash it existed to
+  catch) — both surfaced only because every fix was mutation-proven, not merely re-run.
 - **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
   (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
   the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
