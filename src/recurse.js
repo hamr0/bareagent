@@ -244,7 +244,7 @@ function auditSafeCtx(ctx, overrides = {}) {
  *   (+ `receipts.blockerDetail`), with `best` preserving the model's last attempt. A `HaltError` thrown by the
  *   sensor stays a clean governance halt. The sensor's EXECUTION environment is the caller's: run untrusted /
  *   model-generated checks in an isolated child process WITH A TIMEOUT — a sensor that hangs forever hangs the
- *   leaf (no bareguard checkpoint fires between sensor start and return).
+ *   leaf (no bareguard checkpoint fires between sensor start and return; confirmed by `poc/rlmplans-hung-sensor.mjs`).
  *   **`rejectedBuffer` (BA-14):** a SkillOpt-shaped rejected-attempt buffer — instead of only the LATEST critique,
  *   surface the model's OWN prior failed attempts verbatim ("you wrote these, they failed X — write something
  *   STRUCTURALLY DIFFERENT"). This is DIRECTED diversity (attack the specific repeated mistake), where escalation
