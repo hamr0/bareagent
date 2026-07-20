@@ -1451,7 +1451,7 @@ run kept as evidence):
   (b) two of the harness's own first-pass checks were CONFOUNDED (a malformed Planner stub ended the run
   before the path under test, and a defensively-rewritten test stopped exercising the crash it existed to
   catch) — both surfaced only because every fix was mutation-proven, not merely re-run.
-- **Predicate coercion — REASSESSED and BUILT (0.31.1), reversing the BA-15 park.** BA-15 parked the
+- **Predicate coercion — REASSESSED and BUILT (0.32.0), reversing the BA-15 park.** BA-15 parked the
   DIRECT-Evaluator `!!predicate()` coercion as "the predicate's documented boolean contract," on the SAME wrong
   premise the feedback carried — that a garbage return coerced to `pass:false`. A later POC
   (`poc/rlmplans-predicate-coercion.mjs`) proved the opposite: a truthy non-boolean (a test-runner result

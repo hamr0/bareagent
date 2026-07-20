@@ -2,6 +2,7 @@
 
 const { spawn } = require('child_process');
 const { ProviderError } = require('./errors');
+const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol } = require('./provider-clipipe-tools');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -17,6 +18,8 @@ const { ProviderError } = require('./errors');
  * @property {string} [systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
  * @property {(chunk: string) => void} [onChunk] - Called with each stdout chunk as it streams.
  * @property {'claude-json'|((stdout: string) => Partial<GenerateResult>)} [parse] - Opt-in structured-output parser for stdout. Default (unset) returns stdout verbatim as `text` with zero usage (no behavior change). `'claude-json'` is a shipped preset for `claude -p --output-format json`: it maps the CLI's result envelope onto `GenerateResult` (text←`result`, usage←`usage.*`, model←first `modelUsage` key, costUsd←`total_cost_usd`) and throws `ProviderError` on malformed JSON or an error envelope (`is_error`/non-success subtype). A function is the CLI-agnostic escape hatch: it receives trimmed stdout and returns a partial `GenerateResult` (merged over defaults); throw to signal a parse failure.
+ * @property {'claude'} [toolProtocol] - Opt into TOOL MODE (v0.32.0). A subscription CLI is a plain turn-provider with no native tool channel; this enables schema-validated tool EMULATION so a caller's `tools` work over the CLI (letting a Claude/etc. subscription drive an agentic Loop without metered-API spend). When set, ANY `generate(msgs, tools)` call with a non-empty `tools` array auto-uses emulation (the caller's own system stance + a tool manifest + a JSON envelope, parsed back into normalized `toolCalls`); an empty `tools` array is unchanged plain-text. When NOT set, `tools` are IGNORED (plain-text mode, the long-standing behavior — a non-tool-calling CLI can legitimately sit in a Loop that has tools mounted) with a one-time `console.warn` for visibility. Claude-only for now (`'claude'`); the claude-specific flags/schema/parse live in `provider-clipipe-tools.js` so a second CLI slots in behind the same seam. NOTE: tool mode requires a capable model — weak models (e.g. haiku) answer in prose instead of calling tools; see `probeCapability`.
+ * @property {boolean} [probeCapability=true] - (tool mode only) On the first tool-mode `generate`, run ONE cheap upfront probe that asks the model to obtain unknowable info via a tool. If it answers in prose instead of emitting a tool_call, throw a loud `ProviderError` naming the model — FAIL FAST rather than silently degrade mid-run (the weak-model failure mode). Behaviour-based, never a model name-list (a roster goes stale, BA-10). The verdict is cached per instance (one probe per provider, not per turn). Set `false` to skip when the caller already knows the model is capable.
  */
 
 class CLIPipeProvider {
@@ -38,12 +41,22 @@ class CLIPipeProvider {
       throw new Error("[CLIPipeProvider] options.parse must be 'claude-json' or a function");
     }
     this.parse = options.parse || null;
+    // Tool mode (v0.32.0). Resolve the protocol adapter eagerly so an unknown name fails at
+    // construction, not mid-run. `_toolCapability` caches the upfront probe verdict per instance
+    // (null = not yet probed; a Promise while in flight; true once confirmed capable).
+    this.toolProtocol = options.toolProtocol ? resolveToolProtocol(options.toolProtocol) : null;
+    this.probeCapability = options.probeCapability !== false;
+    /** @type {Promise<void>|null} */
+    this._toolCapability = null;
   }
 
   /**
-   * Generate a response by piping messages to the CLI command.
+   * Generate a response by piping messages to the CLI command. With a `toolProtocol` configured and
+   * a non-empty `tools` array, routes to schema-validated tool EMULATION (v0.32.0); otherwise the
+   * plain-text path below (unchanged). Passing `tools` with no `toolProtocol` throws — a silent
+   * no-tools degrade is exactly the failure tool mode exists to prevent.
    * @param {Message[]} messages - Conversation messages in OpenAI format.
-   * @param {ToolDef[]} [tools=[]] - Unused (CLI commands don't support tools).
+   * @param {ToolDef[]} [tools=[]] - Caller tools. Honored only in tool mode (`toolProtocol` set).
    * @param {Record<string, any>} [options={}] - Unused.
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[CLIPipeProvider] failed to spawn "cmd": ...` — when the command cannot be found or executed.
@@ -52,6 +65,24 @@ class CLIPipeProvider {
    * @throws {Error} `[CLIPipeProvider] process produced no output` — when stdout is empty.
    */
   async generate(messages, tools = [], options = {}) {
+    if (Array.isArray(tools) && tools.length > 0) {
+      if (this.toolProtocol) return this._generateWithTools(messages, tools);
+      // No protocol configured → plain-text mode, tools IGNORED — the long-standing behavior, kept
+      // for backward compatibility (a non-tool-calling CLI legitimately coexists in a Loop that has
+      // tools mounted, e.g. via MCP; the Loop's contract lets a provider simply not call them).
+      // A silent ignore is the trap the caller might not notice, so warn ONCE per instance (the
+      // provider-temperature BA-10 pattern) — visible, not fatal. Genuine loud-failure for tool
+      // mode lives in the capability probe, where a weak model that SHOULD call tools cannot.
+      if (!this._warnedNoProtocol) {
+        this._warnedNoProtocol = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[CLIPipeProvider] received tools but no toolProtocol is configured — tools are IGNORED ' +
+          "(plain-text mode). Construct with { toolProtocol: 'claude' } to enable tool emulation.",
+        );
+      }
+    }
+
     /** @type {string[]} */
     let extraArgs = [];
     let promptMessages = messages;
@@ -83,6 +114,79 @@ class CLIPipeProvider {
       toolCalls: [],
       usage: { inputTokens: 0, outputTokens: 0 },
     };
+  }
+
+  /**
+   * Tool mode (v0.32.0) — one turn of schema-validated tool emulation. Renders the Loop's
+   * OpenAI-shaped transcript to text, injects the caller's system stance + a tool manifest + the
+   * envelope contract, spawns the CLI under the protocol's flags, and parses the envelope back into
+   * normalized `toolCalls` (a `tool_call`) or `text` (a `final_answer`). The Loop drives the cycle.
+   * @param {Message[]} messages
+   * @param {ToolDef[]} tools
+   * @returns {Promise<GenerateResult>}
+   */
+  async _generateWithTools(messages, tools) {
+    await this._ensureToolCapability();
+    const proto = this.toolProtocol;
+    if (!proto) throw new ProviderError('[CLIPipeProvider] tool mode not configured', /** @type {any} */ ({ status: 0 })); // unreachable: only called from the tools branch
+    const sysMsg = messages.find((m) => m.role === 'system');
+    const systemPrompt = buildToolSystemPrompt(sysMsg && typeof sysMsg.content === 'string' ? sysMsg.content : null, tools);
+    const stdout = await this._spawn(renderTranscript(messages), proto.turnArgs(systemPrompt));
+    const parsed = proto.parseResult(stdout);
+
+    /** @type {GenerateResult} */
+    const result = { text: '', toolCalls: [], usage: parsed.usage, model: parsed.model ?? null };
+    if (Number.isFinite(parsed.costUsd)) result.costUsd = parsed.costUsd;
+    if (parsed.action === 'tool_call') {
+      this._toolCallSeq = (this._toolCallSeq || 0) + 1;
+      result.toolCalls = [{ id: `cli_${this._toolCallSeq}`, name: parsed.toolName || '', arguments: parsed.toolArguments || {} }];
+    } else {
+      result.text = parsed.answer || '';
+    }
+    return result;
+  }
+
+  /**
+   * Run the upfront capability probe ONCE per instance (cached), unless `probeCapability` is off.
+   * A model that answers the probe in prose instead of emitting a tool_call throws a loud
+   * `ProviderError` — fail fast, never silently degrade to a no-tools run mid-conversation.
+   * @returns {Promise<void>}
+   */
+  _ensureToolCapability() {
+    if (!this.probeCapability) return Promise.resolve();
+    // Cache the in-flight promise so concurrent first-calls share one probe, and a resolved
+    // capable verdict is never re-probed.
+    if (this._toolCapability) return this._toolCapability;
+    const proto = this.toolProtocol;
+    if (!proto) return Promise.resolve(); // unreachable: only called from the tools branch
+    this._toolCapability = (async () => {
+      const stdout = await this._spawn(proto.probe.user, proto.turnArgs(proto.probe.system));
+      let parsed;
+      try {
+        parsed = proto.parseResult(stdout);
+      } catch (err) {
+        // A malformed probe response is itself an incapability signal — name it as such.
+        this._toolCapability = null; // allow a retry on a transient parse failure
+        throw new ProviderError(`[CLIPipeProvider] tool-mode capability probe failed to parse: ${/** @type {Error} */ (err).message}`, /** @type {any} */ ({ status: 0 }));
+      }
+      if (!proto.probe.isCapable(parsed)) {
+        const model = this._modelFromArgs();
+        throw new ProviderError(
+          `[CLIPipeProvider] the CLI model${model ? ` '${model}'` : ''} is not capable of tool use: the ` +
+          'capability probe answered in prose instead of emitting a tool_call. Weak models (e.g. haiku) ' +
+          'cannot drive tool emulation reliably — use a stronger model for tool mode, or run without ' +
+          'tools for plain-text. (Set { probeCapability: false } to skip this check.)',
+          /** @type {any} */ ({ status: 0 }),
+        );
+      }
+    })();
+    return this._toolCapability;
+  }
+
+  /** Best-effort model id from `--model X` in the base args, for a clearer probe-failure message. */
+  _modelFromArgs() {
+    const i = this.args.indexOf('--model');
+    return i >= 0 && i + 1 < this.args.length ? this.args[i + 1] : null;
   }
 
   /**

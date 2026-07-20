@@ -2,7 +2,17 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [0.31.1] - 2026-07-21
+## [0.32.0] - 2026-07-21
+
+### Added
+
+- **CLIPipe TOOL MODE — a subscription CLI (`claude -p`, …) can now drive an agentic Loop with the caller's tools, not just one-shot text.** The point: run bareagent/bareloop against a Claude (etc.) *subscription* instead of buying metered API credits, without giving up the Loop's governance. Opt in with `new CLIPipeProvider({ command:'claude', args:['-p','--model','sonnet'], toolProtocol:'claude' })`; any `generate(msgs, tools)` with a non-empty `tools` array then auto-uses **schema-validated tool emulation** — Option C (NOT an MCP callback):
+
+  - The caller's tools are described in the system prompt, the CLI is constrained to a JSON envelope (`--json-schema`), and the envelope is parsed back into normalized `toolCalls`. **bareagent's own `Loop` keeps ownership of the agentic cycle** — round accounting, `maxConsecutiveDenials`, `maxIdenticalToolErrors`, stop-reason classification all still apply (an MCP-callback design would hand turns to the CLI and lose them). Proven end-to-end through a real Loop, multi-round, on the SHIPPED code (`poc/clipipe-tools-05-shipped.mjs`).
+  - **The CLI is reduced to a bare turn-provider** — `--tools '' --strict-mcp-config` strip its built-in + MCP tools; `--setting-sources ''` suppresses cwd `CLAUDE.md`/memory/settings auto-discovery, a **MEASURED ~18× cost drop** (37,423 → 2,026 input tokens/turn — the default would re-send this project's context every call). `--system-prompt` replaces the CLI's own prompt.
+  - **Weak models fail LOUDLY and upfront, never silently degrade** (`probeCapability`, default on). On the first tool-mode turn one cheap probe asks the model to obtain unknowable info via a tool; a model that answers in prose instead of emitting a tool_call throws a `ProviderError` naming the model, before any real work. The probe mirrors real-task shape — a trivial "call this tool" instruction is a false positive (haiku passes it 4/4 yet fails real tool tasks 0/5); the question shape sorts cleanly (sonnet 4/4 capable, haiku 0/4). Behaviour-based, never a model name-list (BA-10). Verdict cached per instance. Set `probeCapability:false` to skip. **Documented model floor: tool mode needs sonnet-class or better; haiku stays valid for plain-text one-shot.**
+  - A malformed envelope is a loud `ProviderError`, never returned as prose (the BA-6 failure shape closed at the parse boundary). Passing `tools` with **no** `toolProtocol` keeps the long-standing plain-text behavior (tools ignored — a non-tool-calling CLI legitimately sits in a Loop with mounted tools) with a **one-time `console.warn`** for visibility (the provider-temperature warn-once pattern).
+  - Claude-only for now (`toolProtocol:'claude'`); the CLI-specific flags/schema/parse/probe live in `src/provider-clipipe-tools.js` so a second CLI (codex/gemini) slots in behind the same seam without touching the generic provider. +18 offline deterministic tests (stubbed `_spawn`) + a live shipped smoke.
 
 ### Fixed
 

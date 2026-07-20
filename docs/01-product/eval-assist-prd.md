@@ -111,7 +111,7 @@ const v2 = await evaluator.evaluate(goal, result, {
  */
 ```
 
-- **Predicate path:** the predicate MUST return a boolean → `pass` is that boolean, `score = null`, `critique = ''` (or a caller-supplied message). A non-boolean return throws a `ValidationError` (0.31.1, BA-15 family) rather than coercing — the old `!!predicate(result)` laundered a truthy test-runner result / summary string / failure count into a fake PASS. Synchronous predicate or one returning a Promise both accepted. No provider needed.
+- **Predicate path:** the predicate MUST return a boolean → `pass` is that boolean, `score = null`, `critique = ''` (or a caller-supplied message). A non-boolean return throws a `ValidationError` (0.32.0, BA-15 family) rather than coercing — the old `!!predicate(result)` laundered a truthy test-runner result / summary string / failure count into a fake PASS. Synchronous predicate or one returning a Promise both accepted. No provider needed.
 - **Rubric path:** sends `{goal, result, rubric}` to `provider.generate(..., { temperature: 0 })`, parses a JSON `Verdict` from the response (same defensive parse as `Planner._parse`). Unparseable output throws (consistent with Planner) so a `refine` loop can decide whether to abort.
 
 **Budget visibility (rubric path).** The rubric call spends tokens, so — matching the `ctx.summarize` / BA1 lineage in `loop.js` — its usage must be forwardable to the gate. The `Evaluator` accepts an optional `onLlmResult` hook (or reuses the one wired via `wireGate`) so judge tokens count against `budget.maxCostUsd` and are never invisible. A `HaltError` from that hook propagates as a clean governance exit.
