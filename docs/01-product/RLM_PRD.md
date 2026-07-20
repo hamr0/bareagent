@@ -1451,10 +1451,16 @@ run kept as evidence):
   (b) two of the harness's own first-pass checks were CONFOUNDED (a malformed Planner stub ended the run
   before the path under test, and a defensively-rewritten test stopped exercising the crash it existed to
   catch) — both surfaced only because every fix was mutation-proven, not merely re-run.
-- **Assessed, NOT built (same feedback, lean bar):** the DIRECT-Evaluator predicate coercion claim
-  (`!!predicate()`) is the predicate's documented boolean contract and a throw there is a visible exception to
-  the direct caller (the laundering only arose one level up, at recurse's seam — fixed above); the proposed
-  `commandSensor` helper is parked as a follow-on, not a primitive (no confirmed live gap).
+- **Predicate coercion — REASSESSED and BUILT (0.31.1), reversing the BA-15 park.** BA-15 parked the
+  DIRECT-Evaluator `!!predicate()` coercion as "the predicate's documented boolean contract," on the SAME wrong
+  premise the feedback carried — that a garbage return coerced to `pass:false`. A later POC
+  (`poc/rlmplans-predicate-coercion.mjs`) proved the opposite: a truthy non-boolean (a test-runner result
+  object, a summary string, a failure count) coerced to a fake **PASS** — the dangerous direction, and BA-15's
+  own `verdictShapeFault` could not catch it because the Evaluator laundered the garbage into a well-formed
+  verdict one layer BELOW the guard. Fixed: the predicate MUST return a boolean; a non-boolean throws a
+  `ValidationError` (type named, value never leaked — F16/BA-1), routing to `broken-verifier` at recurse's seam
+  and a loud error standalone. The proposed `commandSensor` helper stays parked as a follow-on, not a primitive
+  (no confirmed live gap).
 
 **Toggle-coverage audit (the feedback's finding #2, F26 borrow — RUN 2026-07-20, token-free, docs-only).**
 Question per knob: does the evidence archive contain ≥1 ONE-KNOB pair with a differing OUTCOME CLASS, or only
