@@ -60,7 +60,8 @@ Eight entry points:
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Get real usage + cost from a CLI provider | CLIPipeProvider({ parse: 'claude-json' }) |
-| Drive tools over a CLI subscription (no metered API) | CLIPipeProvider({ toolProtocol: 'claude' }) |
+| Drive tools over a CLI subscription — NATIVE, cheapest (no metered API) | CLIPipeProvider({ toolProtocol: 'claude-mcp', policy }) |
+| Drive tools over a CLI with no MCP support (emulation) | CLIPipeProvider({ toolProtocol: 'claude' }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
@@ -801,13 +802,26 @@ new CLIPipe({ command: 'claude', args: ['--print'], systemPromptFlag: '--system-
 new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 // CLIPipe structured output (v0.26.0+) — map a CLI's JSON envelope to real usage + cost
 new CLIPipe({ command: 'claude', args: ['-p', '--output-format', 'json'], parse: 'claude-json' })
-// CLIPipe TOOL MODE (v0.32.0+) — drive a Loop's tools over a CLI SUBSCRIPTION (no metered API).
-// toolProtocol enables schema-validated tool emulation; the Loop keeps governance/round-accounting.
-// Tools are auto-used when passed; a weak model (e.g. haiku) is rejected UPFRONT by a capability
-// probe (needs sonnet-class+ for tools; haiku is fine for plain text). setting-sources '' is applied
-// internally for an ~18x cost drop. Claude-only for now.
+// CLIPipe TOOL MODE — drive a Loop's tools over a CLI SUBSCRIPTION (no metered API). TWO modes:
+// 'claude-mcp' (BA-16, NATIVE — prefer on the claude CLI) vs 'claude' (v0.32.0, EMULATION). The
+// difference is COST, not capability. Emulation re-sends the whole transcript every round
+// ($0.25-0.55/round measured); native runs one CLI session that caches session-side (~$0.006/turn).
+// Native: caller tools ride an MCP bridge back to your in-process closures; the CLI owns the cycle.
+// Gate + BA-11/BA-12 guards + turn bound live on the PROVIDER (not the Loop) — see below.
+new CLIPipe({ command: 'claude', args: ['-p', '--model', 'sonnet'], toolProtocol: 'claude-mcp', policy, onTurn, maxTurns: 20 })
+// Emulation (v0.32.0) — still right for a CLI with NO MCP support. Weak models rejected upfront by a
+// capability probe (needs sonnet-class+; haiku fine for plain text). setting-sources '' cuts ~18x cost.
 new CLIPipe({ command: 'claude', args: ['-p', '--model', 'sonnet'], toolProtocol: 'claude' })
 ```
+
+**CLIPipe NATIVE tool mode (BA-16, `toolProtocol:'claude-mcp'`).** The claude CLI has a real tool channel; native mode uses it instead of emulating one. The CLI runs its OWN multi-turn session per `generate()` call and executes your `tools` natively over an MCP bridge that calls back into your in-process `execute` closures. Because the CLI owns the inner cycle, the Loop's per-round machinery cannot run — so the governance you'd wire on `Loop` moves to the **provider**, at the one seam every tool call crosses:
+- `policy` — the SAME `(tool, args, ctx) => true|string` chokepoint as `Loop({policy})`, so a wired `wireGate(gate).policy` writes **audit rows of identical shape, zero gate changes**. A deny is a tool result (advisory); the handler never runs. **Required here** — a `Loop({policy})` in native mode would be a fence that is silently not there, so the Loop throws.
+- `maxConsecutiveDenials` (3) / `maxIdenticalToolErrors` (3) — BA-11/BA-12 guards at the bridge, same narrowest triggers; end the session `denied:<tool>` / `stuck:<tool>`.
+- `maxTurns` — maps to the CLI's `--max-turns`; the bound stop is `error:'max_turns'`, never a silent success.
+- `onTurn` — streams each completed turn's usage (four cache tiers, `costUsd:null` — the CLI prices the session) as it arrives, then one closing `kind:'session'` event with the authoritative total. Shape mirrors `onLlmResult`, so `wireGate(gate).onLlmResult` drops in; when wired the Loop skips its own forward (billed once, never starved).
+- `sessionTimeout` (600s) / `bridgeTimeoutMs` (120s) — whole-session and per-handler ceilings.
+
+`GenerateResult.session` (`{turns, toolCalls, error, usageReported}`) carries what really happened; `metrics.sessionTurns` reports the real turn count so a 14-turn session never reads as one round. A terminal the CLI detects inside the session (bound, guard, or a **broken tool bridge** — a dead bridge still ends `subtype:'success'`, so it is caught parent-side by attempted-vs-served tool calls) surfaces as the run's `error`, never a laundered clean finish. `assemble`/`trim`/`cacheMessages` and a Loop-level `policy` all THROW at construction in native mode (no silently-dead knobs — the CLI owns the transcript). The bridge is a unix socket (0600 in a 0700 dir), never a listening port. Claude-only for now; the CLI-specific parts live in `src/provider-clipipe-mcp.js` + `src/mcp-bridge-stub.js` behind the same seam as emulation.
 
 All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model?, costUsd? }`. The optional `model` (v0.16.1+) is the id the response was produced by — Loop prefers it over `provider.model` for cost accounting. By default CLIPipe returns `toolCalls: []` and zero usage (CLI tools don't report tokens) and omits `model`. **Structured output (v0.26.0+):** set `parse: 'claude-json'` (a preset for `claude -p --output-format json`) — or a `(stdout) => Partial<GenerateResult>` function for any other CLI — and CLIPipe maps the CLI's JSON envelope onto real `usage`, `model`, and `costUsd`, throwing `ProviderError` on a malformed/error envelope (never a silent raw-text fall-back). `costUsd` (optional `GenerateResult` field) is an **authoritative** per-call price the provider reports itself; when finite the Loop prefers it over the internal rate-table `estimateCost`, so a CLI-piped run enforces a bareguard USD cap with no local pricing table (a `0` counts as priced, distinct from null/unpriced). `toolCalls` stays `[]` regardless (CLIPipe is tool-free).
 
