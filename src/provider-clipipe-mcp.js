@@ -120,7 +120,6 @@ async function createBridge({ tools, policy = null, ctx = undefined, maxConsecut
   const sockPath = path.join(dir, 'bridge.sock');
 
   const state = {
-    /** @type {{name: string, denied: boolean}[]} */ calls: [],
     toolCalls: 0,
     consecutiveDenials: 0,
     /** @type {{key: string, count: number}} */ lastError: { key: '', count: 0 },
@@ -135,6 +134,13 @@ async function createBridge({ tools, policy = null, ctx = undefined, maxConsecut
   /**
    * Handle one `tools/call`. Every outcome is a RESULT the model can act on; the only thing that
    * ends the session is a guard tripping, which is reported through `state.terminal`.
+   *
+   * The CLI can fire PARALLEL tool calls (multiple `tool_use` blocks in one turn), so two of these
+   * can be in flight across their `await` points. That is safe here: `state.toolCalls++` is a
+   * synchronous atomic bump, and the two guard counters are ADVISORY bounds whose precondition — a
+   * SEQUENTIAL retry spin — does not apply to calls the model issued simultaneously. The worst case
+   * (an early `stuck:` on genuinely-identical parallel failures) is benign and gate-bounded, so no
+   * per-call lock is warranted.
    */
   async function handleCall(name, args) {
     state.toolCalls++;
@@ -155,7 +161,6 @@ async function createBridge({ tools, policy = null, ctx = undefined, maxConsecut
       }
       if (verdict !== true) {
         state.consecutiveDenials++;
-        state.calls.push({ name, denied: true });
         const reason = typeof verdict === 'string' ? verdict : `denied by policy: ${name}`;
         // BA-11: a single deny stays ADVISORY so the model can pivot to an allowed tool
         // (allowlist-safe). Only a STREAK with no allowed call in between ends the session.
@@ -168,7 +173,6 @@ async function createBridge({ tools, policy = null, ctx = undefined, maxConsecut
       state.consecutiveDenials = 0; // any allowed call resets the streak
     }
 
-    state.calls.push({ name, denied: false });
     try {
       const out = await tool.execute(args || {});
       state.lastError = { key: '', count: 0 }; // success resets the identical-error streak
