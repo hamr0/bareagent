@@ -119,6 +119,36 @@ function renderTranscript(messages) {
 }
 
 /**
+ * Map the claude `--output-format json` OUTER envelope's usage / model / cost onto neutral shapes.
+ * Shared by tool-mode {@link CLAUDE_TOOL_PROTOCOL.parseResult} and the plain-text `_parseClaudeJson`
+ * preset so the claude usage contract (token tiers, `modelUsage` first-key, `total_cost_usd`) lives
+ * in exactly ONE place — a future CLI format change touches this function, not two copies.
+ * @param {any} outer - the parsed outer CLI envelope (already validated non-null by the caller).
+ * @returns {{usage: import('../types').Usage, model: string|null, costUsd?: number}}
+ */
+function mapClaudeMeta(outer) {
+  const u = (outer.usage && typeof outer.usage === 'object') ? outer.usage : {};
+  /** @type {import('../types').Usage} */
+  const usage = {
+    inputTokens: Number(u.input_tokens) || 0,
+    outputTokens: Number(u.output_tokens) || 0,
+  };
+  // Absent cache tiers mean the model didn't cache — omit rather than emit a synthetic 0 (per Usage docs).
+  if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
+  if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
+  // `modelUsage` is an object keyed by model id (e.g. {"claude-opus-4-8[1m]": {...}}) — take the first key.
+  const model = (outer.modelUsage && typeof outer.modelUsage === 'object')
+    ? (Object.keys(outer.modelUsage)[0] ?? null)
+    : null;
+  /** @type {{usage: import('../types').Usage, model: string|null, costUsd?: number}} */
+  const meta = { usage, model };
+  // The CLI's own price is authoritative (a subscription run reports an equivalent cost even at $0
+  // marginal) — feeds bareguard's USD axis with no local rate table. Only a finite number counts.
+  if (Number.isFinite(outer.total_cost_usd)) meta.costUsd = outer.total_cost_usd;
+  return meta;
+}
+
+/**
  * @typedef {object} ParsedEnvelope
  * @property {'tool_call'|'final_answer'} action
  * @property {string} [toolName]
@@ -187,19 +217,10 @@ const CLAUDE_TOOL_PROTOCOL = {
       throw new ProviderError('[CLIPipeProvider] tool-mode tool_call envelope has no tool_name', /** @type {any} */ ({ status: 0 }));
     }
 
-    const u = (outer.usage && typeof outer.usage === 'object') ? outer.usage : {};
-    /** @type {import('../types').Usage} */
-    const usage = {
-      inputTokens: Number(u.input_tokens) || 0,
-      outputTokens: Number(u.output_tokens) || 0,
-    };
-    if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
-    if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
-    const model = (outer.modelUsage && typeof outer.modelUsage === 'object') ? (Object.keys(outer.modelUsage)[0] ?? null) : null;
-
+    const { usage, model, costUsd } = mapClaudeMeta(outer);
     /** @type {ParsedEnvelope} */
     const parsed = { action: env.action, usage, model };
-    if (Number.isFinite(outer.total_cost_usd)) parsed.costUsd = outer.total_cost_usd;
+    if (costUsd !== undefined) parsed.costUsd = costUsd;
     if (env.action === 'tool_call') {
       parsed.toolName = env.tool_name;
       parsed.toolArguments = (env.tool_arguments && typeof env.tool_arguments === 'object') ? env.tool_arguments : {};
@@ -244,6 +265,7 @@ module.exports = {
   toolLine,
   buildToolSystemPrompt,
   renderTranscript,
+  mapClaudeMeta,
   CLAUDE_TOOL_PROTOCOL,
   resolveToolProtocol,
 };

@@ -2,7 +2,7 @@
 
 const { spawn } = require('child_process');
 const { ProviderError } = require('./errors');
-const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol } = require('./provider-clipipe-tools');
+const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol, mapClaudeMeta } = require('./provider-clipipe-tools');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -53,8 +53,9 @@ class CLIPipeProvider {
   /**
    * Generate a response by piping messages to the CLI command. With a `toolProtocol` configured and
    * a non-empty `tools` array, routes to schema-validated tool EMULATION (v0.32.0); otherwise the
-   * plain-text path below (unchanged). Passing `tools` with no `toolProtocol` throws — a silent
-   * no-tools degrade is exactly the failure tool mode exists to prevent.
+   * plain-text path below (unchanged). Passing `tools` with no `toolProtocol` warns ONCE and ignores
+   * them (a non-tool-calling CLI legitimately coexists in a Loop with tools mounted); the loud
+   * failure for a genuinely tool-incapable model lives in the tool-mode capability probe.
    * @param {Message[]} messages - Conversation messages in OpenAI format.
    * @param {ToolDef[]} [tools=[]] - Caller tools. Honored only in tool mode (`toolProtocol` set).
    * @param {Record<string, any>} [options={}] - Unused.
@@ -150,6 +151,9 @@ class CLIPipeProvider {
    * Run the upfront capability probe ONCE per instance (cached), unless `probeCapability` is off.
    * A model that answers the probe in prose instead of emitting a tool_call throws a loud
    * `ProviderError` — fail fast, never silently degrade to a no-tools run mid-conversation.
+   * NOTE: the probe is a single internal CLI turn whose token usage/cost is NOT surfaced to the Loop
+   * (it never flows to `onLlmResult`), so a wired budget gate does not see it — negligible for the
+   * subscription use case this exists for (flat cost, one probe per instance), by design.
    * @returns {Promise<void>}
    */
   _ensureToolCapability() {
@@ -213,21 +217,7 @@ class CLIPipeProvider {
       throw new ProviderError(`[CLIPipeProvider] claude CLI reported failure (subtype='${obj.subtype}'): ${detail}`, /** @type {any} */ ({ status: 0 }));
     }
 
-    const u = (obj.usage && typeof obj.usage === 'object') ? obj.usage : {};
-    /** @type {import('../types').Usage} */
-    const usage = {
-      inputTokens: Number(u.input_tokens) || 0,
-      outputTokens: Number(u.output_tokens) || 0,
-    };
-    // Absent cache tiers mean the model didn't cache — omit rather than emit a synthetic 0 (per Usage docs).
-    if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
-    if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
-
-    // `modelUsage` is an object keyed by model id (e.g. {"claude-opus-4-8[1m]": {...}}) — take the first key.
-    const model = (obj.modelUsage && typeof obj.modelUsage === 'object')
-      ? (Object.keys(obj.modelUsage)[0] ?? null)
-      : null;
-
+    const { usage, model, costUsd } = mapClaudeMeta(obj);
     /** @type {GenerateResult} */
     const result = {
       text: typeof obj.result === 'string' ? obj.result : '',
@@ -235,9 +225,7 @@ class CLIPipeProvider {
       usage,
       model,
     };
-    // The CLI's own price is authoritative (subscription runs report an equivalent cost even at $0
-    // marginal) — feeds bareguard's USD axis with no local rate table. Only a finite number counts.
-    if (Number.isFinite(obj.total_cost_usd)) result.costUsd = obj.total_cost_usd;
+    if (costUsd !== undefined) result.costUsd = costUsd;
     return result;
   }
 
