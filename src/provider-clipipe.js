@@ -1,8 +1,9 @@
 'use strict';
 
 const { spawn } = require('child_process');
-const { ProviderError } = require('./errors');
+const { ProviderError, HaltError } = require('./errors');
 const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol, mapClaudeMeta } = require('./provider-clipipe-tools');
+const { createBridge, resolveSessionError, runSession } = require('./provider-clipipe-mcp');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -18,8 +19,51 @@ const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol, mapClaudeM
  * @property {string} [systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
  * @property {(chunk: string) => void} [onChunk] - Called with each stdout chunk as it streams.
  * @property {'claude-json'|((stdout: string) => Partial<GenerateResult>)} [parse] - Opt-in structured-output parser for stdout. Default (unset) returns stdout verbatim as `text` with zero usage (no behavior change). `'claude-json'` is a shipped preset for `claude -p --output-format json`: it maps the CLI's result envelope onto `GenerateResult` (text←`result`, usage←`usage.*`, model←first `modelUsage` key, costUsd←`total_cost_usd`) and throws `ProviderError` on malformed JSON or an error envelope (`is_error`/non-success subtype). A function is the CLI-agnostic escape hatch: it receives trimmed stdout and returns a partial `GenerateResult` (merged over defaults); throw to signal a parse failure.
- * @property {'claude'} [toolProtocol] - Opt into TOOL MODE (v0.32.0). A subscription CLI is a plain turn-provider with no native tool channel; this enables schema-validated tool EMULATION so a caller's `tools` work over the CLI (letting a Claude/etc. subscription drive an agentic Loop without metered-API spend). When set, ANY `generate(msgs, tools)` call with a non-empty `tools` array auto-uses emulation (the caller's own system stance + a tool manifest + a JSON envelope, parsed back into normalized `toolCalls`); an empty `tools` array is unchanged plain-text. When NOT set, `tools` are IGNORED (plain-text mode, the long-standing behavior — a non-tool-calling CLI can legitimately sit in a Loop that has tools mounted) with a one-time `console.warn` for visibility. Claude-only for now (`'claude'`); the claude-specific flags/schema/parse live in `provider-clipipe-tools.js` so a second CLI slots in behind the same seam. NOTE: tool mode requires a capable model — weak models (e.g. haiku) answer in prose instead of calling tools; see `probeCapability`.
- * @property {boolean} [probeCapability=true] - (tool mode only) On the first tool-mode `generate`, run ONE cheap upfront probe that asks the model to obtain unknowable info via a tool. If it answers in prose instead of emitting a tool_call, throw a loud `ProviderError` naming the model — FAIL FAST rather than silently degrade mid-run (the weak-model failure mode). Behaviour-based, never a model name-list (a roster goes stale, BA-10). The verdict is cached per instance (one probe per provider, not per turn). Set `false` to skip when the caller already knows the model is capable.
+ * @property {'claude'|'claude-mcp'} [toolProtocol] - Opt into TOOL MODE. Two modes, and the choice is
+ *   about COST, not capability. `'claude-mcp'` (BA-16, NATIVE — prefer this on the claude CLI): one CLI
+ *   session per call, the caller's `tools` exposed to it as a real MCP server whose handlers call back
+ *   into your own in-process closures. The CLI owns the inner cycle and caches its transcript
+ *   session-side. `'claude'` (v0.32.0, EMULATION): one CLI spawn per round with the whole transcript
+ *   re-rendered and re-sent, parsed back through a JSON envelope. Emulation re-buys the full prefix
+ *   every turn, which the adopter measured at **$0.25–0.55/round** against **~$0.006/turn** native — so
+ *   it is the right instrument only for a CLI with NO MCP support, not a default. NOT claimed for
+ *   native: better output quality (n=2 suggestive evidence exists and is deliberately unminted).
+ *   Native mode sets {@link CLIPipeProvider#ownsCycle}, which makes the Loop REFUSE options it could
+ *   never honor (`assemble`/`trim`/`cacheMessages`, and a Loop-level `policy`) instead of leaving them
+ *   silently dead. See the native-only properties below.
+ * @property {(tool: string, args: any, ctx?: any) => any} [policy] - (native mode) The gate, same contract as `Loop({policy})`: only `true`
+ *   allows, a string is the deny reason fed back verbatim, a thrown `HaltError` is a clean governance
+ *   exit. REQUIRED here rather than on the Loop, because in native mode no tool call ever reaches the
+ *   Loop — a `Loop({policy})` would be a fence that is silently not there (the Loop throws instead).
+ *   Wiring the same `wireGate(gate).policy` keeps audit rows byte-shape-identical, with zero gate changes.
+ * @property {Function} [onTurn] - (native mode) Called with `{model, provider, usage, costUsd, pricing,
+ *   durationMs, ctx, kind}` for EACH completed CLI turn as it arrives (`kind:'turn'`, four cache tiers,
+ *   `costUsd:null` — the CLI prices the session, not the turn), then once at session end
+ *   (`kind:'session'`) carrying the authoritative total cost with zero usage. Streaming, never
+ *   sum-at-end: a session that dies mid-run must already have surfaced every completed turn's spend or
+ *   the gate loses all of it. The event shape mirrors `Loop({onLlmResult})`, so `wireGate(gate).onLlmResult`
+ *   drops straight in — and when it is wired the Loop skips its own forward, so nothing is billed twice.
+ * @property {number} [maxTurns] - (native mode) Maps to the CLI's `--max-turns`. The bound stop is NAMED
+ *   (`error_max_turns` → `session.error:'max_turns'`), never a silent clean success.
+ * @property {number} [maxConsecutiveDenials=3] - (native mode) BA-11 at the bridge: a single deny stays
+ *   advisory so the model can pivot to an allowed tool; N in a row with no allowed call between ends the
+ *   session with `denied:<tool>`. `0`/`Infinity` disables.
+ * @property {number} [maxIdenticalToolErrors=3] - (native mode) BA-12 at the bridge: only a BYTE-IDENTICAL
+ *   repeat (name + JSON args) counts, so a model varying its args while recovering is never punished. N in
+ *   a row ends the session with `stuck:<tool>`. `0`/`Infinity` disables.
+ * @property {number} [sessionTimeout=600000] - (native mode) Wall-clock ceiling for one whole session. The
+ *   30s `timeout` default is for one-shot text and would kill an agentic session mid-run.
+ * @property {number} [bridgeTimeoutMs] - (native mode) Ceiling for ONE tool-handler round-trip across the
+ *   bridge. A hung handler becomes an error tool result rather than a hung session (default 120s).
+ *
+ *   Either mode: a non-empty `tools` array on `generate()` routes to tool mode; an empty one stays
+ *   plain text. With NO `toolProtocol`, `tools` are IGNORED (plain-text, the long-standing behavior —
+ *   a non-tool-calling CLI legitimately sits in a Loop with tools mounted) plus a one-time `console.warn`.
+ *   Emulation additionally requires a capable model (weak ones answer in prose; see `probeCapability`);
+ *   native mode needs no such probe, because the CLI's own tool channel does not depend on the model
+ *   agreeing to fill in a JSON questionnaire. The claude-specific parts of each live in
+ *   `provider-clipipe-tools.js` / `provider-clipipe-mcp.js`, so a second CLI slots in behind the same seams.
+ * @property {boolean} [probeCapability=true] - (EMULATION tool mode only) On the first tool-mode `generate`, run ONE cheap upfront probe that asks the model to obtain unknowable info via a tool. If it answers in prose instead of emitting a tool_call, throw a loud `ProviderError` naming the model — FAIL FAST rather than silently degrade mid-run (the weak-model failure mode). Behaviour-based, never a model name-list (a roster goes stale, BA-10). The verdict is cached per instance (one probe per provider, not per turn). Set `false` to skip when the caller already knows the model is capable.
  */
 
 class CLIPipeProvider {
@@ -44,10 +88,40 @@ class CLIPipeProvider {
     // Tool mode (v0.32.0). Resolve the protocol adapter eagerly so an unknown name fails at
     // construction, not mid-run. `_toolCapability` caches the upfront probe verdict per instance
     // (null = not yet probed; a Promise while in flight; true once confirmed capable).
-    this.toolProtocol = options.toolProtocol ? resolveToolProtocol(options.toolProtocol) : null;
+    // BA-16 native tool mode. `claude-mcp` is NOT an envelope protocol — the CLI runs its own
+    // multi-turn session and executes the caller's tools natively over MCP — so it is resolved on a
+    // separate axis rather than being forced through `resolveToolProtocol`'s emulation shape.
+    this.nativeTools = options.toolProtocol === 'claude-mcp';
+    /**
+     * Declares to the Loop that this provider runs its OWN turn cycle. The Loop reads it to refuse
+     * options it could never honor (assemble/trim/cacheMessages) and to require the fence be wired
+     * where it can actually run. Generic provider-contract flag; nothing here is claude-specific.
+     */
+    this.ownsCycle = this.nativeTools;
+    this.toolProtocol = (options.toolProtocol && !this.nativeTools) ? resolveToolProtocol(options.toolProtocol) : null;
     this.probeCapability = options.probeCapability !== false;
     /** @type {Promise<void>|null} */
     this._toolCapability = null;
+
+    if (this.nativeTools) {
+      // The gate CANNOT ride on the Loop in native mode: no tool call ever reaches the Loop, so a
+      // `Loop({policy})` would be a fence that silently is not there. It must be wired HERE, at the
+      // bridge, which is the one seam every tool call crosses.
+      if (options.policy != null && typeof options.policy !== 'function') {
+        throw new Error('[CLIPipeProvider] options.policy must be a function (tool, args, ctx) => true|string');
+      }
+      this.policy = options.policy || null;
+      this.onTurn = options.onTurn || null;
+      if (this.onTurn != null && typeof this.onTurn !== 'function') {
+        throw new Error('[CLIPipeProvider] options.onTurn must be a function');
+      }
+      this.maxTurns = options.maxTurns ?? null;
+      this.maxConsecutiveDenials = options.maxConsecutiveDenials;
+      this.maxIdenticalToolErrors = options.maxIdenticalToolErrors;
+      // A session is a whole agentic run, not one prompt — the 30s one-shot default would kill it.
+      this.sessionTimeout = options.sessionTimeout ?? 600000;
+      this.bridgeTimeoutMs = options.bridgeTimeoutMs ?? null;
+    }
   }
 
   /**
@@ -67,6 +141,7 @@ class CLIPipeProvider {
    */
   async generate(messages, tools = [], options = {}) {
     if (Array.isArray(tools) && tools.length > 0) {
+      if (this.nativeTools) return this._generateWithMcp(messages, tools, options);
       if (this.toolProtocol) return this._generateWithTools(messages, tools);
       // No protocol configured → plain-text mode, tools IGNORED — the long-standing behavior, kept
       // for backward compatibility (a non-tool-calling CLI legitimately coexists in a Loop that has
@@ -144,6 +219,133 @@ class CLIPipeProvider {
     } else {
       result.text = parsed.answer || '';
     }
+    return result;
+  }
+
+  /**
+   * BA-16 native tool mode — run ONE whole CLI session and report it honestly as one call.
+   *
+   * The CLI owns the inner cycle here: it calls the caller's tools natively over an MCP bridge and
+   * keeps going until it answers or hits a bound. So this returns `toolCalls: []` always (there is
+   * nothing left for the Loop to execute) plus a `session` block describing what really happened —
+   * the real turn count, the real tool-call count, and any terminal the Loop must surface as the
+   * run's `error`.
+   *
+   * Ordering of terminals is deliberate. A governance halt outranks everything (it is a clean exit,
+   * not a fault). A tripped guard outranks the CLI's own subtype, because the guard is why we killed
+   * the session. And `bridgeDown` outranks a reported `success`, because a session whose tools were
+   * all broken still ends `subtype:'success'` — measured, and the reason this block exists.
+   *
+   * @param {Message[]} messages
+   * @param {ToolDef[]} tools
+   * @param {Record<string, any>} options - the Loop's run options (`ctx` is read from here).
+   * @returns {Promise<GenerateResult>}
+   */
+  async _generateWithMcp(messages, tools, options = {}) {
+    if (options.cacheMessages) {
+      throw new Error(
+        '[CLIPipeProvider] cacheMessages cannot apply in native tool mode — the CLI owns the transcript '
+        + 'and caches it session-side, so there is no request body for a breakpoint to ride on. Remove the option.',
+      );
+    }
+    const sysMsg = messages.find((m) => m.role === 'system');
+    const systemPrompt = (sysMsg && typeof sysMsg.content === 'string' && sysMsg.content)
+      || 'You are an agent. Use the tools provided over MCP when they are needed.';
+
+    const bridge = await createBridge({
+      tools,
+      policy: this.policy,
+      ctx: options.ctx,
+      maxConsecutiveDenials: this.maxConsecutiveDenials,
+      maxIdenticalToolErrors: this.maxIdenticalToolErrors,
+    });
+
+    let r;
+    try {
+      r = await runSession({
+        command: this.command,
+        baseArgs: this.args,
+        systemPrompt,
+        task: renderTranscript(messages),
+        sockPath: bridge.sockPath,
+        maxTurns: this.maxTurns,
+        timeoutMs: this.sessionTimeout,
+        bridgeTimeoutMs: this.bridgeTimeoutMs,
+        onTurn: this.onTurn,
+        ctx: options.ctx,
+        cwd: this.cwd,
+        env: this.env,
+      });
+    } finally {
+      bridge.close();
+    }
+
+    const st = bridge.state;
+    // A governance halt is a CLEAN exit and must reach the Loop as a HaltError, not as a session
+    // error tag — the Loop is the thing that knows a halt seals the transcript rather than faulting.
+    if (st.halt) throw st.halt;
+    if (r.turnHalt) throw r.turnHalt;
+    if (r.spawnError) {
+      throw new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${r.spawnError.message}`, /** @type {any} */ ({ status: 0 }));
+    }
+
+    /** @type {import('../types').Usage} */
+    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    for (const t of r.turns) {
+      usage.inputTokens += t.inputTokens || 0;
+      usage.outputTokens += t.outputTokens || 0;
+      usage.cacheReadTokens += t.cacheReadTokens || 0;
+      usage.cacheCreationTokens += t.cacheCreationTokens || 0;
+    }
+
+    const { stopReason, error } = resolveSessionError({
+      terminal: st.terminal,
+      bridgeDown: st.bridgeDown,
+      attempted: r.attempted,
+      served: st.toolCalls,
+      timedOut: Boolean(r.timedOut),
+      subtype: r.final && r.final.subtype,
+    });
+
+    const costUsd = (r.final && Number.isFinite(r.final.total_cost_usd)) ? r.final.total_cost_usd : null;
+
+    // The authoritative price arrives only at session end (the CLI prices the SESSION, not the turn),
+    // so when per-turn streaming is wired it gets one closing event carrying the cost with zero
+    // usage — the tokens were already streamed, and double-counting either axis would be a lie.
+    if (this.onTurn) {
+      try {
+        await this.onTurn({
+          model: (r.final && r.final.model) || null,
+          provider: 'clipipe',
+          usage: { inputTokens: 0, outputTokens: 0 },
+          costUsd,
+          pricing: costUsd === null ? 'unpriced' : 'priced',
+          durationMs: r.ms,
+          ctx: options.ctx,
+          kind: 'session',
+        });
+      } catch (err) {
+        if (err instanceof HaltError) throw err;
+      }
+    }
+
+    /** @type {GenerateResult} */
+    const result = {
+      text: (r.final && typeof r.final.result === 'string') ? r.final.result : '',
+      toolCalls: [],
+      usage,
+      model: (r.final && r.final.model) || null,
+      stopReason,
+      session: {
+        turns: r.turns.length,
+        toolCalls: st.toolCalls,
+        error,
+        // Only true when we ACTUALLY streamed — unwired, the Loop must still forward the total or
+        // the gate would see this session as free.
+        usageReported: Boolean(this.onTurn),
+      },
+    };
+    if (costUsd !== null) result.costUsd = costUsd;
     return result;
   }
 

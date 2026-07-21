@@ -34,6 +34,13 @@ export interface RunMetrics {
   turns: number;
   /** Total tool calls the model made (every invocation, including denied/unknown). */
   toolCalls: number;
+  /**
+   * BA-16 — turns that happened INSIDE a cycle-owning provider's own session (CLIPipe native tool
+   * mode). Such a session is ONE Loop round however many turns it really took, so `turns` alone
+   * would report a 14-turn session as 1 — a round count that reads far cheaper and shorter than the
+   * run actually was. 0 for every provider whose cycle the Loop drives.
+   */
+  sessionTurns: number;
   /** Per-tool invocation counts, keyed by tool name. */
   byTool: Record<string, number>;
   /** Cumulative token spend across all rounds (incl. summarize calls), by tier. */
@@ -97,6 +104,26 @@ export interface GenerateResult {
    *   pre-BA-6 behavior exactly, so an unmapped provider degrades to the status quo.
    */
   stopReason?: string | null;
+  /**
+   * BA-16 — present ONLY when the provider ran its own multi-turn session for this single call
+   * (`Provider.ownsCycle`), e.g. CLIPipe native tool mode, where the CLI executes the caller's tools
+   * natively over MCP and keeps going until it answers or hits a bound.
+   *
+   * It exists so the Loop can stay honest about a call that was not one turn:
+   * - `turns` / `toolCalls` — what really happened, so `metrics` cannot report a 14-turn session as 1.
+   * - `error` — a terminal the provider detected INSIDE the session (a turn bound, a deny/stuck
+   *   streak, a broken tool bridge). The Loop surfaces it as the run's `error`, never merely as a
+   *   field: every downstream consumer branches on `error` as the sole success signal, so surfacing
+   *   alone would let a session in which no tool call ever succeeded propagate as converged.
+   * - `usageReported` — the provider ALREADY forwarded this call's usage per internal turn, so the
+   *   Loop must not forward the summed total again and bill the gate twice.
+   */
+  session?: {
+    turns: number;
+    toolCalls: number;
+    error: string | null;
+    usageReported: boolean;
+  };
   /**
    * True when the requested `temperature` was rejected by the model (400, unsupported/deprecated) and
    * the request was retried without it (BA-10). The response was produced at the model's DEFAULT
@@ -165,6 +192,19 @@ export interface Provider {
   model?: string | null;
   /** Provider name, surfaced in onLlmResult. */
   name?: string | null;
+  /**
+   * BA-16 — true when the provider runs its OWN multi-turn cycle inside a single `generate()` call
+   * (CLIPipe native tool mode), executing the caller's tools itself rather than returning
+   * `toolCalls` for the Loop to run.
+   *
+   * The Loop reads this to REFUSE options it could never honor rather than accept them and leave
+   * them silently dead: `assemble`/`trim` (the provider owns the transcript) and, most importantly,
+   * a Loop-level `policy` — no tool call reaches the Loop, so that fence would simply not be there
+   * while the run still looked governed. Such a provider must carry its own `policy`.
+   */
+  ownsCycle?: boolean;
+  /** Gate chokepoint for a cycle-owning provider — same contract as `Loop({policy})`. */
+  policy?: ((tool: string, args: any, ctx?: any) => any) | null;
   generate(
     messages: Message[],
     tools?: ToolDef[],

@@ -277,6 +277,30 @@ class Loop {
       throw new Error('[Loop] options.trim must be a function (msgs, ctx) => msgs (e.g. unitTrimmer({ trim, onHarvest, policy }))');
     }
     this.trim = options.trim || null;
+    // BA-16: a CYCLE-OWNING provider (one that runs its own multi-turn session internally, e.g.
+    // CLIPipe native tool mode) has no per-round seam for the Loop to hand a transcript to — the
+    // transcript lives inside the provider's session. `assemble`/`trim` would therefore be accepted
+    // and then silently never called, which is precisely the "silently-dead knob" shape this repo
+    // keeps paying for. Fail at CONSTRUCTION instead: an unhonorable option is a configuration
+    // error, not a no-op.
+    if (this.provider && this.provider.ownsCycle && (this.assemble || this.trim)) {
+      const named = [this.assemble && 'assemble', this.trim && 'trim'].filter(Boolean).join(' and ');
+      throw new Error(
+        `[Loop] provider '${this.provider.name || 'unknown'}' owns its own turn cycle, so ${named} can never run `
+        + '(the provider owns the transcript, not the Loop). Remove the option, or use a provider whose cycle the Loop drives.',
+      );
+    }
+    // The same rule, applied to the option where being silently dead is WORST. With a cycle-owning
+    // provider no tool call ever reaches the Loop, so a `Loop({policy})` is a fence that is simply
+    // not there — the run looks governed and is not. Refuse it: the gate must be wired on the
+    // provider, where every tool call actually crosses.
+    if (this.provider && this.provider.ownsCycle && this.policy && !this.provider.policy) {
+      throw new Error(
+        `[Loop] provider '${this.provider.name || 'unknown'}' owns its own turn cycle, so Loop-level policy would `
+        + 'NEVER run — no tool call reaches the Loop. Wire the gate on the provider instead '
+        + '(e.g. new CLIPipeProvider({ toolProtocol: \'claude-mcp\', policy })).',
+      );
+    }
     if (options.onLlmResult != null && typeof options.onLlmResult !== 'function') {
       throw new Error('[Loop] options.onLlmResult must be a function');
     }
@@ -491,6 +515,12 @@ class Loop {
     const metrics = {
       turns: 0,
       toolCalls: 0,
+      // BA-16 — turns that happened INSIDE a cycle-owning provider's own session (CLIPipe native tool
+      // mode). Such a session is ONE Loop round no matter how many turns it really took, so `turns`
+      // alone would report a 14-turn session as 1 — a round count that reads far cheaper and far
+      // shorter than the run actually was. Reporting the real number keeps the meter honest; 0 for
+      // every provider whose cycle the Loop drives.
+      sessionTurns: 0,
       /** @type {Record<string, number>} */
       byTool: {},
       tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
@@ -525,6 +555,7 @@ class Loop {
     /** Snapshot the meter for a return — finalizes the run-scoped fields. @returns {RunMetrics} */
     const finalizeMetrics = () => ({
       turns: metrics.turns,
+      sessionTurns: metrics.sessionTurns,
       toolCalls: metrics.toolCalls,
       byTool: metrics.byTool,
       tokens: { ...metrics.tokens },
@@ -742,11 +773,22 @@ class Loop {
       metrics.turns++;
       addUsage(result.usage);
       if (roundCost === null) metrics.unpricedRounds++; else pricedAny = true;
+      // BA-16: a cycle-owning provider reports what really happened inside its session.
+      const session = (result.session && typeof result.session === 'object') ? result.session : null;
+      if (session) {
+        if (Number.isFinite(session.turns)) metrics.sessionTurns += session.turns;
+        if (Number.isFinite(session.toolCalls)) metrics.toolCalls += session.toolCalls;
+      }
 
       // BA1: forward LLM usage to gate.record (via wireGate) so budget.maxCostUsd
       // covers token-heavy / tool-light workloads. Callback errors route through
       // _reportError but never kill the loop — governance failure ≠ run failure.
-      if (this.onLlmResult) {
+      // BA-16: when a cycle-owning provider has ALREADY streamed this call's usage per internal turn
+      // (so a session that dies mid-run has surfaced every completed turn's spend rather than losing
+      // all of it), forwarding the summed total here too would bill the gate twice for one session.
+      // The provider only sets this when it genuinely reported; unwired, it stays false and the
+      // normal forward below runs — so the gate is never silently starved either.
+      if (this.onLlmResult && !(session && session.usageReported === true)) {
         try {
           await this.onLlmResult({
             model,
@@ -764,6 +806,20 @@ class Loop {
           if (err instanceof HaltError) throw err;
           this._reportError('onLlmResult', err, { round });
         }
+      }
+
+      // BA-16: a cycle-owning provider detected a terminal INSIDE its own session — a turn bound, a
+      // guard streak, or a broken tool bridge. It is reported as the run's `error` (never merely
+      // surfaced) because every downstream consumer — `recurse`, the bareloop adopter — branches on
+      // `error` as the SOLE success signal. Surfacing alone would let a session in which no tool call
+      // ever succeeded propagate as converged. `lastText` (BA-5) preserves the partial work: a bound
+      // firing is normal termination for a bounded attempt, and that text is the only channel from
+      // attempt N to N+1.
+      if (session && typeof session.error === 'string' && session.error) {
+        sealDanglingToolCalls(msgs, `[halted:${session.error}]`);
+        this._reportError('session', new Error(`provider session terminated: ${session.error}`), { rule: session.error, sessionTurns: session.turns ?? null });
+        this._safeEmit({ type: 'loop:done', data: { text: lastText, rule: session.error, sessionTurns: session.turns ?? null, cost: totalCost } });
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: session.error, stopReason: lastStopReason, msgs, metrics: finalizeMetrics(), ...(temperatureDropped && { temperatureDropped: true }) };
       }
 
       // BA-13: classify this round's terminal signal against the neutral stop-reason vocabulary. BA-6

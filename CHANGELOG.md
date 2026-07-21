@@ -2,6 +2,30 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.33.0] - 2026-07-21
+
+### Added
+
+- **CLIPipe NATIVE tool mode (BA-16) — `toolProtocol:'claude-mcp'`.** The claude CLI has a real tool channel; v0.32.0's envelope emulation was built as if it did not. Native mode runs **one CLI session per call** and exposes the caller's `tools` to it as an **MCP server whose handlers call back into your own in-process closures** over a unix-socket bridge. The CLI owns the inner cycle and caches its transcript session-side.
+
+  **The claim is COST, and it is measured.** Emulation re-spawns the CLI and re-sends the whole rendered transcript every round, so it pays fresh `cache_creation` on the full prefix: the adopter measured **$0.25–0.55/round** on a real ~40-round job transcript, against **$0.0055–0.0074/turn** native (reproduced independently here). **NOT CLAIMED: better output quality** — there is n=2 suggestive evidence that emulation's JSON-questionnaire framing makes a model act less, it is deliberately **unminted**, and it must not be sold as a capability win (the BA-7 precedent). Emulation is **retained**, not retired: it is still the right instrument for a CLI with no MCP support. Native is the documented default for the claude CLI.
+
+  **What the Loop gives up, and what is bought back.** The CLI owns the turns, so the Loop's per-round machinery cannot run on them. That is stated rather than papered over, and everything load-bearing is re-established at the `tools/call` bridge — the one seam every call crosses:
+  - **The gate** rides the SAME `policy(tool, args, ctx)` chokepoint the Loop uses, so a wired bareguard writes **audit rows of identical shape with zero gate changes**. A deny is returned as a tool RESULT (advisory, allowlist-safe pivoting preserved); the handler never runs.
+  - **BA-11 deny-streak** and **BA-12 identical-tool-error** guards, same defaults (3/3) and same narrowest triggers — a byte-identical repeat only, so a model varying args while recovering is never punished. Both end the session with `denied:<tool>` / `stuck:<tool>`. The unknown/hallucinated-tool path feeds the same counter.
+  - **The turn bound** maps to the CLI's `--max-turns`, and its stop is NAMED and error-tagged (`error_max_turns` → `error:'max_turns'`), never a silent clean success.
+  - **The fence is set by the mode, not the caller:** `--tools '' --strict-mcp-config --setting-sources ''` always. The bridge is a **unix socket (0600, in a 0700 dir)** — never a listening TCP port, even on loopback.
+
+  **Genuinely lost, and made loud instead of silent:** `assemble`/`trim` and `cacheMessages` cannot apply (the provider owns the transcript), and a Loop-level `policy` would be **a fence that is silently not there**. All of them now **THROW at construction** rather than sit dead — no silently-dead knobs.
+
+  **Honest accounting.** `GenerateResult.session` carries the real `turns`/`toolCalls` and any internal terminal, and `metrics.sessionTurns` reports them — so a 14-turn session can never read as one cheap round. `onTurn` **streams** each completed turn's usage with all four cache tiers as it arrives (never summed at end, so a session that dies mid-run has already surfaced its spend), then one closing `kind:'session'` event carries the authoritative cost; when it is wired the Loop skips its own forward, so a session is **billed exactly once and never starved**.
+
+  **A pre-build measurement changed the design:** with the bridge dead, every tool call failed and the CLI **still ended `subtype:'success'`** — the model writes a tidy final answer explaining that its tools were broken. Mapping that onto `error:null` would report a run in which nothing worked as converged (the BA-4/5/6/13 optimistic-rounding class). So bridge health is tracked **parent-side** — MCP tool calls the CLI *attempted* vs the bridge actually *served* — and error-tags the run as `bridge-failed` regardless of the CLI's own subtype. **The CLI's subtype is not a sufficient success signal.**
+
+  +47 offline tests, every load-bearing guard mutation-proved in both directions (removing it goes red; making it fire always also goes red, so the negative controls are real). Live verify-shipped through a real `Loop` on a real session: `poc/ba16-native-shipped.mjs` (all green). Suite 963 tests / 961 pass / 0 fail / 2 skipped; typecheck clean.
+
+  *Note: `--max-turns` is **undocumented** in the claude CLI's `--help` (zero hits at 2.1.216, while unknown flags are rejected — so it exists but is version-fragile). The live check is the only tripwire that goes red if it is ever renamed.*
+
 ## [0.32.0] - 2026-07-21
 
 ### Added
