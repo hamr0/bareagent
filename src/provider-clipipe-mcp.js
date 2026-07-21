@@ -296,6 +296,111 @@ function resolveSessionError(facts) {
 }
 
 /**
+ * Line-oriented processor for the CLI's `stream-json` stdout.
+ *
+ * FRAMING IS SYNCHRONOUS. The obvious shape — an `async` stdout handler that `await`s `onTurn`
+ * inside its parse loop — has a data-corruption bug: while the `await` is suspended, the next
+ * `'data'` event re-enters the handler and mutates the SHARED line buffer, so the suspended parse
+ * resumes against a buffer that moved under it (dropped/duplicated/mangled lines). It is invisible
+ * with a synchronous `onTurn` (the await resolves on the microtask queue before the next macrotask
+ * `'data'` event) and REACHABLE the moment `onTurn` does real async work — e.g. a wired gate's
+ * `gate.record`, which is exactly the intended consumer. So framing never awaits: it parses lines
+ * synchronously and pushes per-turn forwards onto a queue that a SERIAL async drainer empties in
+ * arrival order. Extracted from `runSession` so this can be unit-tested without spawning the CLI.
+ *
+ * @param {object} o
+ * @param {Function|null} o.onTurn
+ * @param {any} o.ctx
+ * @param {number} o.startedAt
+ * @param {(err: Error) => void} o.onHalt - called if a forwarded `onTurn` throws a HaltError.
+ */
+function createSessionStream({ onTurn, ctx, startedAt, onHalt }) {
+  let buf = '';
+  let attempted = 0;
+  let final = null;
+  /** @type {import('../types').Usage[]} */ const turns = [];
+  /** @type {any[]} */ const queue = [];
+  /** @type {Promise<void>|null} */ let draining = null;
+
+  async function drain() {
+    if (!onTurn) return;
+    while (queue.length) {
+      const payload = queue.shift();
+      try {
+        await onTurn(payload);
+      } catch (err) {
+        // A governance HaltError from the gate ends the session; anything else is surfaced, not fatal.
+        if (err instanceof HaltError) { queue.length = 0; onHalt(/** @type {Error} */ (err)); return; }
+      }
+    }
+  }
+  function pump() {
+    if (!onTurn || draining) return;
+    draining = drain().finally(() => { draining = null; if (queue.length) pump(); });
+  }
+
+  return {
+    /** Feed a stdout chunk. Pure synchronous framing — never awaits. */
+    feed(/** @type {Buffer|string} */ chunk) {
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch (_) { continue; }
+
+        // Count tool calls the CLI ATTEMPTED against our server. Compared later with what the bridge
+        // actually SERVED, this is the only precise parent-side detector of a broken bridge: if the
+        // stub cannot reach the socket our server never sees the connection, so a server-side flag
+        // stays clean while every tool call fails — and the session still ends `subtype:'success'`
+        // (measured). Attempted > served is the honest signal.
+        if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
+          for (const block of ev.message.content) {
+            if (block && block.type === 'tool_use' && typeof block.name === 'string'
+                && block.name.startsWith(`mcp__${SERVER_NAME}__`)) attempted++;
+          }
+        }
+
+        if (ev.type === 'assistant' && ev.message && ev.message.usage) {
+          const u = ev.message.usage;
+          /** @type {import('../types').Usage} */
+          const usage = {
+            inputTokens: Number(u.input_tokens) || 0,
+            outputTokens: Number(u.output_tokens) || 0,
+          };
+          // Omit an absent tier rather than emit a synthetic 0 (per the Usage contract).
+          if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
+          if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
+          turns.push(usage);
+          // Stream it: a session that dies mid-run must already have surfaced every completed turn's
+          // spend, or the gate loses it. Queued (not awaited here) so framing cannot race the buffer.
+          if (onTurn) queue.push({
+            model: (ev.message && ev.message.model) || null,
+            provider: 'clipipe',
+            usage,
+            costUsd: null, // the CLI prices the SESSION, not the turn — explicitly unpriced, never a synthetic 0.
+            pricing: 'unpriced',
+            durationMs: Date.now() - startedAt,
+            ctx, // what a wired gate records spend against — same as the Loop's onLlmResult.
+            kind: 'turn',
+          });
+        }
+
+        if (ev.type === 'result') final = ev;
+      }
+      pump();
+    },
+    /** Await every queued per-turn forward — call before resolving the session. */
+    async flush() { if (draining) await draining; await drain(); },
+    get turns() { return turns; },
+    get attempted() { return attempted; },
+    get final() { return final; },
+  };
+}
+
+/**
  * Run ONE native CLI session to completion, streaming per-turn usage as it arrives.
  *
  * @param {object} opts
@@ -341,17 +446,22 @@ function runSession(opts) {
 
   return new Promise((resolve) => {
     const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-    /** @type {any[]} */ const turns = [];
-    let final = null, buf = '', stderr = '', settled = false;
-    let attempted = 0; // MCP tool calls the CLI tried to make against our server
+    let stderr = '', settled = false;
     /** @type {Error|null} */ let turnHalt = null;
     const started = Date.now();
 
-    const done = (extra = {}) => {
+    /** Kill the session now — a guard tripped or governance halted mid-flight. */
+    const abort = () => { try { child.kill('SIGTERM'); } catch (_) { /* already gone */ } };
+    const stream = createSessionStream({ onTurn, ctx, startedAt: started, onHalt: (err) => { turnHalt = err; abort(); } });
+
+    const done = async (extra = {}) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ turns, final, stderr, ms: Date.now() - started, turnHalt, attempted, ...extra });
+      // Flush queued per-turn forwards before resolving — a session that ends while a forward is
+      // pending must still surface that turn's spend to the gate (F12/F18).
+      try { await stream.flush(); } catch (_) { /* onTurn failures are surfaced in-drain, never fatal */ }
+      resolve({ turns: stream.turns, final: stream.final, stderr, ms: Date.now() - started, turnHalt, attempted: stream.attempted, ...extra });
     };
 
     const timer = setTimeout(() => {
@@ -359,72 +469,7 @@ function runSession(opts) {
       done({ timedOut: true });
     }, timeoutMs);
 
-    /** Kill the session now — a guard tripped or governance halted mid-flight. */
-    const abort = () => { try { child.kill('SIGTERM'); } catch (_) { /* already gone */ } };
-
-    child.stdout.on('data', async (d) => {
-      buf += d;
-      let nl;
-      while ((nl = buf.indexOf('\n')) !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (!line.trim()) continue;
-        let ev;
-        try { ev = JSON.parse(line); } catch (_) { continue; }
-
-        // Count tool calls the CLI ATTEMPTED against our server. Compared later with what the bridge
-        // actually SERVED, this is the only precise parent-side detector of a broken bridge: if the
-        // stub cannot reach the socket, our server never sees the connection at all, so a
-        // server-side error flag would stay clean while every tool call failed — and the session
-        // would still end `subtype:'success'` (measured). Attempted > served is the honest signal.
-        if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
-          for (const block of ev.message.content) {
-            if (block && block.type === 'tool_use' && typeof block.name === 'string'
-                && block.name.startsWith(`mcp__${SERVER_NAME}__`)) attempted++;
-          }
-        }
-
-        if (ev.type === 'assistant' && ev.message && ev.message.usage) {
-          const u = ev.message.usage;
-          /** @type {import('../types').Usage} */
-          const usage = {
-            inputTokens: Number(u.input_tokens) || 0,
-            outputTokens: Number(u.output_tokens) || 0,
-          };
-          // Omit an absent tier rather than emit a synthetic 0 (per the Usage contract).
-          if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
-          if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
-          turns.push(usage);
-
-          // Stream it NOW, never sum-at-end: a session that dies mid-run must already have
-          // surfaced every completed turn's spend, or the gate loses it entirely.
-          if (onTurn) {
-            try {
-              await onTurn({
-                model: (ev.message && ev.message.model) || null,
-                provider: 'clipipe',
-                usage,
-                // A CLI model has no rate-table entry, and the CLI prices the SESSION, not the turn.
-                // Explicitly unpriced beats a synthetic 0 — that silent zero is what made a budget
-                // cap a no-op once already.
-                costUsd: null,
-                pricing: 'unpriced',
-                durationMs: Date.now() - started,
-                // ctx is what a wired gate records spend against — forward it, same as the Loop's onLlmResult.
-                ctx,
-                kind: 'turn',
-              });
-            } catch (err) {
-              if (err instanceof HaltError) { turnHalt = err; abort(); return; }
-              // A governance callback failure is not a run failure — surfaced, never fatal.
-            }
-          }
-        }
-
-        if (ev.type === 'result') final = ev;
-      }
-    });
-
+    child.stdout.on('data', (d) => stream.feed(d));
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => done({ spawnError: err }));
     child.on('close', () => done());
@@ -442,5 +487,6 @@ module.exports = {
   createBridge,
   classifySubtype,
   resolveSessionError,
+  createSessionStream,
   runSession,
 };

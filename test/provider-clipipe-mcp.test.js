@@ -13,7 +13,7 @@ const net = require('net');
 const { Loop } = require('../src/loop');
 const { HaltError } = require('../src/errors');
 const { CLIPipeProvider } = require('../src/provider-clipipe');
-const { createBridge, classifySubtype, resolveSessionError, toolErrorKey, safeErrorText } = require('../src/provider-clipipe-mcp');
+const { createBridge, classifySubtype, resolveSessionError, createSessionStream, toolErrorKey, safeErrorText } = require('../src/provider-clipipe-mcp');
 
 /** Speak one bridge frame, exactly as the stdio stub does. */
 function bridgeCall(sockPath, payload) {
@@ -172,6 +172,66 @@ describe('BA-16 bridge — BA-12 identical-tool-error guard', () => {
       for (let i = 0; i < 3; i++) await bridgeCall(b.sockPath, { op: 'call', name: 'imaginary', args: {} });
       assert.strictEqual(b.state.terminal, 'stuck:imaginary');
     } finally { b.close(); }
+  });
+});
+
+describe('BA-16 — session stream framing (async onTurn must not corrupt the buffer)', () => {
+  const asstUsage = (n, io) => JSON.stringify({ type: 'assistant', message: { model: 'm', usage: { input_tokens: io, output_tokens: n, cache_read_input_tokens: io, cache_creation_input_tokens: 0 } } });
+  const toolBlock = () => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__bareagent__x' }] } });
+
+  // THE regression: an async onTurn that yields, with chunks arriving DURING the await. The old
+  // `await onTurn` inside the stdout handler let a re-entrant chunk mutate the shared buffer; here
+  // every turn must still arrive, in order, with no lost/duplicated/mangled lines.
+  test('every turn is delivered in order under an async onTurn with interleaved chunks', async () => {
+    const seen = [];
+    const stream = createSessionStream({
+      onTurn: async (e) => { await new Promise((r) => setTimeout(r, 5)); seen.push(e.usage.outputTokens); },
+      ctx: null, startedAt: Date.now(), onHalt: () => {},
+    });
+    // Feed lines split ACROSS chunk boundaries while the drainer is mid-await.
+    stream.feed(asstUsage(1, 10) + '\n' + asstUsage(2, 10).slice(0, 20));
+    stream.feed(asstUsage(2, 10).slice(20) + '\n' + asstUsage(3, 10) + '\n');
+    stream.feed(asstUsage(4, 10) + '\n');
+    await stream.flush();
+    assert.deepStrictEqual(seen, [1, 2, 3, 4], 'all four turns, in order, none dropped or merged');
+    assert.strictEqual(stream.turns.length, 4);
+  });
+
+  test('a line split across two chunks is framed as one turn, never two', async () => {
+    const seen = [];
+    const stream = createSessionStream({ onTurn: async (e) => { seen.push(e.usage.outputTokens); }, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    const line = asstUsage(7, 3);
+    stream.feed(line.slice(0, 15));
+    stream.feed(line.slice(15) + '\n');
+    await stream.flush();
+    assert.deepStrictEqual(seen, [7]);
+  });
+
+  test('attempted counts only bareagent MCP tool_use blocks', async () => {
+    const stream = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    stream.feed(toolBlock() + '\n');
+    stream.feed(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'mcp__other__y' }, { type: 'text', text: 'hi' }] } }) + '\n');
+    await stream.flush();
+    assert.strictEqual(stream.attempted, 1, 'only our server-prefixed tool calls count toward attempted');
+  });
+
+  test('a HaltError from onTurn stops the drain and reports via onHalt', async () => {
+    let halted = null;
+    const stream = createSessionStream({
+      onTurn: async () => { throw new HaltError('budget', /** @type {any} */ ({ rule: 'b' })); },
+      ctx: null, startedAt: Date.now(), onHalt: (err) => { halted = err; },
+    });
+    stream.feed(asstUsage(1, 1) + '\n');
+    await stream.flush();
+    assert.ok(halted instanceof HaltError, 'a gate halt during a per-turn forward must surface');
+  });
+
+  test('malformed JSON lines are skipped, not fatal', async () => {
+    const seen = [];
+    const stream = createSessionStream({ onTurn: async (e) => { seen.push(e.usage.outputTokens); }, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    stream.feed('{ not json\n' + asstUsage(9, 1) + '\n');
+    await stream.flush();
+    assert.deepStrictEqual(seen, [9]);
   });
 });
 
