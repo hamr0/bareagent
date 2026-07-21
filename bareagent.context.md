@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.31.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
+> v0.32.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -60,6 +60,7 @@ Eight entry points:
 | Cache identical planner calls | Planner({ cacheTTL: 60000 }) |
 | Stream CLIPipe output in real-time | CLIPipeProvider({ onChunk: fn }) |
 | Get real usage + cost from a CLI provider | CLIPipeProvider({ parse: 'claude-json' }) |
+| Drive tools over a CLI subscription (no metered API) | CLIPipeProvider({ toolProtocol: 'claude' }) |
 | Browse the web (inline snapshots) | createBrowsingTools + Loop |
 | Browse the web (token-efficient, disk-based) | `barebrowse` CLI session — snapshots to `.barebrowse/*.yml` |
 | Assess website privacy risk | createBrowsingTools + Loop (requires `npm install wearehere`) |
@@ -800,6 +801,12 @@ new CLIPipe({ command: 'claude', args: ['--print'], systemPromptFlag: '--system-
 new CLIPipe({ command: 'ollama', args: ['run', 'llama3.2'] })
 // CLIPipe structured output (v0.26.0+) — map a CLI's JSON envelope to real usage + cost
 new CLIPipe({ command: 'claude', args: ['-p', '--output-format', 'json'], parse: 'claude-json' })
+// CLIPipe TOOL MODE (v0.32.0+) — drive a Loop's tools over a CLI SUBSCRIPTION (no metered API).
+// toolProtocol enables schema-validated tool emulation; the Loop keeps governance/round-accounting.
+// Tools are auto-used when passed; a weak model (e.g. haiku) is rejected UPFRONT by a capability
+// probe (needs sonnet-class+ for tools; haiku is fine for plain text). setting-sources '' is applied
+// internally for an ~18x cost drop. Claude-only for now.
+new CLIPipe({ command: 'claude', args: ['-p', '--model', 'sonnet'], toolProtocol: 'claude' })
 ```
 
 All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model?, costUsd? }`. The optional `model` (v0.16.1+) is the id the response was produced by — Loop prefers it over `provider.model` for cost accounting. By default CLIPipe returns `toolCalls: []` and zero usage (CLI tools don't report tokens) and omits `model`. **Structured output (v0.26.0+):** set `parse: 'claude-json'` (a preset for `claude -p --output-format json`) — or a `(stdout) => Partial<GenerateResult>` function for any other CLI — and CLIPipe maps the CLI's JSON envelope onto real `usage`, `model`, and `costUsd`, throwing `ProviderError` on a malformed/error envelope (never a silent raw-text fall-back). `costUsd` (optional `GenerateResult` field) is an **authoritative** per-call price the provider reports itself; when finite the Loop prefers it over the internal rate-table `estimateCost`, so a CLI-piped run enforces a bareguard USD cap with no local pricing table (a `0` counts as priced, distinct from null/unpriced). `toolCalls` stays `[]` regardless (CLIPipe is tool-free).

@@ -35,6 +35,9 @@ const { Loop } = require('./loop');
 /**
  * @typedef {object} Criteria
  * @property {(result: any) => boolean | Promise<boolean>} [predicate] - Deterministic check, no tokens.
+ *   MUST return a boolean. A non-boolean return THROWS a `ValidationError` (it is not coerced): a truthy
+ *   object/string/number — e.g. a test-runner result returned by mistake — would otherwise launder a
+ *   FAILING check into a PASS. Thrown, it routes to `broken-verifier` at recurse's verify slot.
  * @property {string} [rubric] - Natural-language grading criteria an LLM scores. Exactly one of predicate|rubric|agentic.
  * @property {string} [agentic] - Instructions for a tool-running critic (D9): how to EXERCISE the live artifact
  *   (open it, click, read console/network) and what would make it fail. Runs an ISOLATED Loop with the scoped
@@ -127,7 +130,30 @@ class Evaluator {
     }
 
     if (predicate) {
-      const pass = !!(await predicate(result));
+      // BA-15 family (predicate seam): the contract is `=> boolean`. The OLD `!!(await predicate(...))`
+      // coerced ANY truthy return to a PASS — so a predicate that returned a test-runner RESULT instead
+      // of a boolean (`{exitCode:1,failures:3}`, `'3 failing'`, a count) laundered a FAILING check into
+      // `{status:'satisfied'}` (the optimistic-rounding class of BA-4/5/6/7/13; proven by
+      // `poc/rlmplans-predicate-coercion.mjs`). There is no safe non-boolean subset — an object is always
+      // truthy, a non-empty string is truthy regardless of meaning, a failure-count is truthy — so the
+      // ONLY correct return is a genuine boolean. A non-boolean is a broken arbiter: NAME it loudly rather
+      // than coerce it (BA-15's principle). Thrown here, it routes to `broken-verifier` at recurse's verify
+      // slot (`runArbiter` catches any non-Halt throw) and surfaces as a clean ValidationError standalone.
+      const raw = await predicate(result);
+      if (typeof raw !== 'boolean') {
+        // Name the TYPE only, never the value — an error string can reach a wired gate's audit log (F16/BA-1).
+        const got = raw === null ? 'null'
+          : raw === undefined ? 'undefined'
+          : Array.isArray(raw) ? 'an array'
+          : typeof raw === 'object' ? 'an object'
+          : `a ${typeof raw}`;
+        throw new ValidationError(
+          `[Evaluator] predicate must return a boolean, got ${got}. A truthy non-boolean ` +
+          '(a test-runner result object, a summary string, a failure count) would otherwise coerce to a ' +
+          'PASS — return true/false explicitly.',
+        );
+      }
+      const pass = raw;
       return {
         status: pass ? 'satisfied' : 'needs_revision',
         pass,

@@ -2,6 +2,26 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.32.0] - 2026-07-21
+
+### Added
+
+- **CLIPipe TOOL MODE — a subscription CLI (`claude -p`, …) can now drive an agentic Loop with the caller's tools, not just one-shot text.** The point: run bareagent/bareloop against a Claude (etc.) *subscription* instead of buying metered API credits, without giving up the Loop's governance. Opt in with `new CLIPipeProvider({ command:'claude', args:['-p','--model','sonnet'], toolProtocol:'claude' })`; any `generate(msgs, tools)` with a non-empty `tools` array then auto-uses **schema-validated tool emulation** — Option C (NOT an MCP callback):
+
+  - The caller's tools are described in the system prompt, the CLI is constrained to a JSON envelope (`--json-schema`), and the envelope is parsed back into normalized `toolCalls`. **bareagent's own `Loop` keeps ownership of the agentic cycle** — round accounting, `maxConsecutiveDenials`, `maxIdenticalToolErrors`, stop-reason classification all still apply (an MCP-callback design would hand turns to the CLI and lose them). Proven end-to-end through a real Loop, multi-round, on the SHIPPED code (`poc/clipipe-tools-05-shipped.mjs`).
+  - **The CLI is reduced to a bare turn-provider** — `--tools '' --strict-mcp-config` strip its built-in + MCP tools; `--setting-sources ''` suppresses cwd `CLAUDE.md`/memory/settings auto-discovery, a **MEASURED ~18× cost drop** (37,423 → 2,026 input tokens/turn — the default would re-send this project's context every call). `--system-prompt` replaces the CLI's own prompt.
+  - **Weak models fail LOUDLY and upfront, never silently degrade** (`probeCapability`, default on). On the first tool-mode turn one cheap probe asks the model to obtain unknowable info via a tool; a model that answers in prose instead of emitting a tool_call throws a `ProviderError` naming the model, before any real work. The probe mirrors real-task shape — a trivial "call this tool" instruction is a false positive (haiku passes it 4/4 yet fails real tool tasks 0/5); the question shape sorts cleanly (sonnet 4/4 capable, haiku 0/4). Behaviour-based, never a model name-list (BA-10). Verdict cached per instance. Set `probeCapability:false` to skip. **Documented model floor: tool mode needs sonnet-class or better; haiku stays valid for plain-text one-shot.**
+  - A malformed envelope is a loud `ProviderError`, never returned as prose (the BA-6 failure shape closed at the parse boundary). Passing `tools` with **no** `toolProtocol` keeps the long-standing plain-text behavior (tools ignored — a non-tool-calling CLI legitimately sits in a Loop with mounted tools) with a **one-time `console.warn`** for visibility (the provider-temperature warn-once pattern).
+  - Claude-only for now (`toolProtocol:'claude'`); the CLI-specific flags/schema/parse/probe live in `src/provider-clipipe-tools.js` so a second CLI (codex/gemini) slots in behind the same seam without touching the generic provider. +18 offline deterministic tests (stubbed `_spawn`) + a live shipped smoke.
+
+### Fixed
+
+- **A deterministic `Evaluator` predicate that returns a non-boolean is now a loud `ValidationError`, never a coerced fake PASS (BA-15 family).** Adopter feedback flagged the predicate seam as an open item; a pre-fix POC (`poc/rlmplans-predicate-coercion.mjs`, deterministic/offline) confirmed the bug in shipped code and disproved the note that described it — the note said a garbage return coerced to `pass:false`; in fact it coerced toward `pass:true`, the dangerous direction.
+
+  The old `!!(await predicate(result))` mapped **any truthy return** to `{ status:'satisfied', pass:true }`. So a caller predicate that returned a test-runner **result** rather than a boolean — `{ exitCode:1, failures:3 }`, `{ code:'ENOENT', status:null }`, a summary string `'3 failing, 0 passing'`, or a failure **count** — laundered a FAILING check into a PASS. This is the optimistic-rounding class of BA-4/5/6/7/13: an under-modeled boundary rounding monotonically toward success, where an object/non-empty-string/non-zero-number is truthy regardless of what it means. There is no safe non-boolean subset, so the contract is now strict: the predicate MUST return a boolean.
+
+  A non-boolean return throws a `ValidationError` naming the offending **type only** (never the returned value — an error string can reach a wired gate's audit log, the F16/BA-1 lesson). Thrown, it routes correctly through BA-15's `runArbiter` at recurse's verify slot: a caller wiring `opts.evaluate` around an `Evaluator` predicate now surfaces `{ incomplete, blocker:'broken-verifier' }` instead of a converged-shaped fake green (`recurse()` arm 7 in the POC). Standalone callers get a clean loud error. A genuine `true`/`false` — including from an async predicate — is unchanged. `null`/`undefined` (a non-answer) now throws too rather than silently rounding to `needs_revision`: a broken arbiter is named, not silently failed (BA-15's principle). +6 regression tests; full 0.32.0 suite 916 tests (914 pass / 0 fail / 2 skipped, optional-dep-gated); typecheck clean.
+
 ## [0.31.0] - 2026-07-20
 
 ### Fixed

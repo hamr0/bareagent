@@ -180,6 +180,52 @@ describe('Evaluator — predicate path (no tokens)', () => {
     const v = await new Evaluator().evaluate('g', 5, { predicate: async (r) => r > 3 });
     assert.equal(v.pass, true);
   });
+
+  // Regression — the predicate false-green (poc/rlmplans-predicate-coercion.mjs). The old
+  // `!!(await predicate(...))` coerced ANY truthy return to a PASS, so a predicate that returned a
+  // test-runner RESULT rather than a boolean laundered a FAILING check into {status:'satisfied'}.
+  // A non-boolean is a broken arbiter and MUST throw (routing to broken-verifier at recurse's slot),
+  // never coerce. These are the exact returns the POC arms fed.
+  it('THROWS on a truthy object return (a failing test-runner result) — never a fake PASS', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => ({ exitCode: 1, failures: 3 }) }),
+      (e) => e instanceof ValidationError && /must return a boolean, got an object/.test(e.message),
+    );
+  });
+  it('THROWS on a non-empty string return (a summary that MEANS failure but is truthy)', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => '3 failing, 0 passing' }),
+      (e) => e instanceof ValidationError && /must return a boolean, got a string/.test(e.message),
+    );
+  });
+  it('THROWS on a numeric return (a failure COUNT is truthy → would be a fake PASS)', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => 3 }),
+      (e) => e instanceof ValidationError && /must return a boolean, got a number/.test(e.message),
+    );
+  });
+  it('THROWS on null / undefined — a non-answer is named, not silently rounded to needs_revision', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => null }),
+      (e) => e instanceof ValidationError && /got null/.test(e.message),
+    );
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => undefined }),
+      (e) => e instanceof ValidationError && /got undefined/.test(e.message),
+    );
+  });
+  it('THROWS on an async predicate that RESOLVES to a non-boolean (await-then-check)', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: async () => ({ ok: 1 }) }),
+      (e) => e instanceof ValidationError && /must return a boolean/.test(e.message),
+    );
+  });
+  it('the error names the TYPE only, never the returned VALUE (audit-safe, F16/BA-1)', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'work', { predicate: () => ({ secret: 'DO_NOT_LEAK_7731' }) }),
+      (e) => e instanceof ValidationError && !/DO_NOT_LEAK_7731/.test(e.message),
+    );
+  });
 });
 
 describe('Evaluator — rubric path runs an ISOLATED adversarial grader', () => {
