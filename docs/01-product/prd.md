@@ -809,6 +809,39 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.33.0 / CLIPipe native MCP tool mode (bareloop BA-16) (2026-07-21)
+
+> **Numbering note.** This is **bareloop's** BA-16 (`docs/UPSTREAM-ASKS.md`), an
+> upstream ask consumed by version bump — not a bareagent-internal BA-number.
+
+Decisions locked, not to be re-litigated:
+
+- **Native (`toolProtocol:'claude-mcp'`) is the default for the claude CLI;
+  v0.32.0 envelope emulation is RETAINED, not retired** — it is still the right
+  instrument for a CLI with no MCP channel. The choice between them is **COST,
+  measured** ($0.25–0.55/round emulation vs ~$0.006/turn native), **not
+  capability**. Output-quality parity is deliberately **UNMINTED** (n=2
+  suggestive only) — never sold as a capability win (the BA-7 honesty precedent;
+  the paired behaviour head-to-head is bareloop's consumer-side follow-up, not a
+  release gate).
+- **A cycle-owning provider is a first-class contract, not a special case
+  (`Provider.ownsCycle`).** The CLI owns the inner turn loop, so the Loop's
+  per-round machinery cannot run on it; governance moves to the `tools/call`
+  bridge — the SAME `policy` chokepoint (identical audit-row shape), BA-11/BA-12
+  guards, and the `--max-turns` bound (NAMED stop). Any Loop option the mode
+  cannot honor (`assemble`/`trim`/`cacheMessages`, a Loop-level `policy`)
+  **THROWS at construction** — no silently-dead knobs.
+- **Honest accounting is load-bearing.** `GenerateResult.session` +
+  `metrics.sessionTurns` report the real turn/tool count (a 14-turn session
+  never reads as one round). A dead bridge still ends `subtype:'success'`, so
+  bridge health is tracked **parent-side** (attempted-vs-served tool calls) and
+  error-tags the run `bridge-failed` — the BA-4/5/6/13 optimistic-rounding class,
+  caught pre-build. **The CLI's subtype is not a sufficient success signal.**
+- **Transport is a unix socket (0600 in a 0700 dir), never a listening port;**
+  the fence (`--tools '' --strict-mcp-config --setting-sources ''`) is set by
+  the mode, not the caller. Claude-only for now; both shapes isolated so a
+  second CLI slots in behind the same seams.
+
 ### v0.29.0 / `shell_edit` — anchored edit verb (bareloop BA-13) (2026-07-15)
 
 > **Numbering note.** This is **bareloop's** BA-13 (`docs/UPSTREAM-ASKS.md`),

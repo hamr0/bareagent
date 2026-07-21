@@ -31,7 +31,7 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
  *   Native mode sets {@link CLIPipeProvider#ownsCycle}, which makes the Loop REFUSE options it could
  *   never honor (`assemble`/`trim`/`cacheMessages`, and a Loop-level `policy`) instead of leaving them
  *   silently dead. See the native-only properties below.
- * @property {Function} [policy] - (native mode) The gate, same contract as `Loop({policy})`: only `true`
+ * @property {(tool: string, args: any, ctx?: any) => any} [policy] - (native mode) The gate, same contract as `Loop({policy})`: only `true`
  *   allows, a string is the deny reason fed back verbatim, a thrown `HaltError` is a clean governance
  *   exit. REQUIRED here rather than on the Loop, because in native mode no tool call ever reaches the
  *   Loop — a `Loop({policy})` would be a fence that is silently not there (the Loop throws instead).
