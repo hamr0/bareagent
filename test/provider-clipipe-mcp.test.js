@@ -472,3 +472,345 @@ describe('BA-16 — provider construction', () => {
     assert.throws(() => new CLIPipeProvider({ command: 'claude', toolProtocol: 'codex' }), /unknown toolProtocol/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// BA-17 — one turn is one assistant MESSAGE, not one stream event.
+//
+// Measured on the real wire (poc/ba17-turn-unit.mjs, poc/ba17-unit-parallel.mjs): the CLI emits a
+// SEPARATE `assistant` event per content block of the same message, each repeating that message's
+// `usage`. One 13-block message arrived as 13 events. Counting events as turns inflated the turn
+// axis 7× and the token axis 5.04× against the CLI's own session total — which is what actually
+// guillotined the adopter's 8-turn scout at real turn ~4, not any failure of `--max-turns`.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** One `assistant` stream event, shaped exactly as the CLI emits it. */
+const asstEvent = (id, { usage, text, toolUse, model } = {}) => {
+  /** @type {any} */ const content = [];
+  if (text !== undefined) content.push({ type: 'text', text });
+  if (toolUse) content.push({ type: 'tool_use', name: 'mcp__bareagent__x' });
+  /** @type {any} */ const message = { content };
+  if (id !== null) message.id = id;
+  if (model) message.model = model;
+  if (usage) message.usage = usage;
+  return JSON.stringify({ type: 'assistant', message });
+};
+const u = (out) => ({ input_tokens: 2, output_tokens: out, cache_read_input_tokens: 10, cache_creation_input_tokens: 1 });
+
+describe('BA-17 — a turn is a message, not an event', () => {
+  test('a message emitted as SEVERAL block-events is ONE turn, metered ONCE', async () => {
+    const seen = [];
+    const s = createSessionStream({ onTurn: async (e) => { seen.push(e.usage.outputTokens); }, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    // The measured shape: same id, same usage, one event per block.
+    s.feed(asstEvent('msg_1', { usage: u(60), text: 'thinking out loud' }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(60), toolUse: true }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(60), toolUse: true }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 1, 'three events, one assistant message, ONE turn');
+    assert.strictEqual(s.turns.length, 1, 'and its usage is recorded once, not three times');
+    assert.deepStrictEqual(seen, [60], 'the caller is told about one turn, not three');
+    assert.strictEqual(s.attempted, 2, 'tool_use blocks still count individually — that axis IS per call');
+  });
+
+  test('distinct message ids are distinct turns', async () => {
+    const seen = [];
+    const s = createSessionStream({ onTurn: async (e) => { seen.push(e.usage.outputTokens); }, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    for (const [id, out] of [['a', 1], ['a', 1], ['b', 2], ['c', 3], ['c', 3]]) s.feed(asstEvent(`msg_${id}`, { usage: u(out) }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 3);
+    assert.deepStrictEqual(seen, [1, 2, 3]);
+  });
+
+  test('an id that RECURS after another turn counts again (adjacent-run dedup, not a Set)', async () => {
+    // Dropping a real turn is the failure that matters; a Set would silently swallow this one.
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    for (const id of ['a', 'b', 'a']) s.feed(asstEvent(`msg_${id}`, { usage: u(1) }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 3);
+    assert.strictEqual(s.turns.length, 3);
+  });
+
+  test('events with NO id degrade to one-turn-per-event, never a collapse into one', async () => {
+    // The pre-BA-17 behaviour, kept exactly: an unknown shape must not silently zero the turn axis.
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    for (let i = 0; i < 4; i++) s.feed(asstEvent(null, { usage: u(i) }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 4, 'no id ⇒ each event is its own turn');
+    assert.strictEqual(s.turns.length, 4);
+  });
+
+  test("usage arriving on a LATER block of a turn is still recorded (once)", async () => {
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { text: 'no usage on this block' }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(42) }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(42) }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 1);
+    assert.deepStrictEqual(s.turns.map((t) => t.outputTokens), [42], 'the first block need not be the one carrying usage');
+  });
+
+  test('the four cache tiers survive per-turn dedup', async () => {
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { usage: u(60) }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(60) }) + '\n');
+    await s.flush();
+    assert.deepStrictEqual(s.turns[0], { inputTokens: 2, outputTokens: 60, cacheReadTokens: 10, cacheCreationTokens: 1 });
+  });
+});
+
+describe('BA-17 — the parent-side turn backstop', () => {
+  const cap3 = (onLimit) => createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {}, turnCap: 3, onLimit });
+
+  test('it does NOT fire at the cap — the CLI gets to end cleanly and report its cost', async () => {
+    let fired = 0;
+    const s = cap3(() => { fired++; });
+    for (const id of ['a', 'b', 'c']) s.feed(asstEvent(`msg_${id}`, { usage: u(1) }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 3);
+    assert.strictEqual(fired, 0, 'exactly N turns is the bound being HONOURED, not overrun');
+  });
+
+  test('it fires the moment a turn BEYOND the cap appears', async () => {
+    let fired = 0;
+    const s = cap3(() => { fired++; });
+    for (const id of ['a', 'b', 'c', 'd']) s.feed(asstEvent(`msg_${id}`, { usage: u(1) }) + '\n');
+    await s.flush();
+    assert.strictEqual(fired, 1, 'the flag failed to bound — the backstop is the guarantee');
+  });
+
+  test('it fires ONCE even if the session keeps going', async () => {
+    let fired = 0;
+    const s = cap3(() => { fired++; });
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) s.feed(asstEvent(`msg_${id}`, { usage: u(1) }) + '\n');
+    await s.flush();
+    assert.strictEqual(fired, 1);
+  });
+
+  test('block-events of the SAME turn cannot trip it (the whole point)', async () => {
+    // Pre-BA-17 this is exactly what went wrong: 13 events of one message read as 13 turns.
+    let fired = 0;
+    const s = cap3(() => { fired++; });
+    for (let i = 0; i < 13; i++) s.feed(asstEvent('msg_1', { usage: u(1), toolUse: true }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.turnCount, 1);
+    assert.strictEqual(fired, 0, 'one turn with 13 blocks is one turn, whatever the cap');
+  });
+
+  for (const [label, turnCap] of [['null', null], ['0', 0], ['Infinity', Infinity], ['undefined', undefined]]) {
+    test(`turnCap ${label} disables the backstop`, async () => {
+      let fired = 0;
+      const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {}, turnCap, onLimit: () => { fired++; } });
+      for (const id of ['a', 'b', 'c', 'd', 'e']) s.feed(asstEvent(`msg_${id}`, { usage: u(1) }) + '\n');
+      await s.flush();
+      assert.strictEqual(fired, 0);
+    });
+  }
+});
+
+describe('BA-17 — a bounded session still returns its work (BA-5)', () => {
+  test('lastText is the last turn that produced words', async () => {
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { usage: u(1), text: 'first pass' }) + '\n');
+    s.feed(asstEvent('msg_2', { usage: u(1), text: 'second pass' }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.lastText, 'second pass');
+  });
+
+  test('several text blocks in ONE turn accumulate into that turn', async () => {
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { usage: u(1), text: 'part one. ' }) + '\n');
+    s.feed(asstEvent('msg_1', { usage: u(1), text: 'part two.' }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.lastText, 'part one. part two.');
+  });
+
+  test('a wordless final turn does not erase the last text there WAS', async () => {
+    // The measured bounded shape: the cut-off turn is pure tool_use, and `result.result` is null.
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { usage: u(1), text: 'the answer so far' }) + '\n');
+    s.feed(asstEvent('msg_2', { usage: u(1), toolUse: true }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.lastText, 'the answer so far', 'the work must survive the bound');
+  });
+
+  test('no text at all is an empty string, never undefined', async () => {
+    const s = createSessionStream({ onTurn: null, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(asstEvent('msg_1', { usage: u(1), toolUse: true }) + '\n');
+    await s.flush();
+    assert.strictEqual(s.lastText, '');
+  });
+});
+
+describe('BA-17 — a terminal we impose carries its own stop reason', () => {
+  test('the turn backstop reports stopReason max_turns, not null', () => {
+    // We kill the session, so there is no `result` event and no subtype to read one from.
+    const out = resolveSessionError({ terminal: 'max_turns', bridgeDown: false, attempted: 0, served: 0, timedOut: false, subtype: undefined });
+    assert.deepStrictEqual(out, { stopReason: 'max_turns', error: 'max_turns' });
+  });
+
+  test('a guard terminal is a FAULT, not a stop reason', () => {
+    const out = resolveSessionError({ terminal: 'denied:writer', bridgeDown: false, attempted: 0, served: 0, timedOut: false, subtype: undefined });
+    assert.strictEqual(out.error, 'denied:writer');
+    assert.strictEqual(out.stopReason, null, 'only names in the neutral vocabulary become a stopReason');
+  });
+
+  test('a terminal named like an Object.prototype key resolves to nothing (proto-key guard)', () => {
+    const out = resolveSessionError({ terminal: 'toString', bridgeDown: false, attempted: 0, served: 0, timedOut: false, subtype: 'success' });
+    assert.strictEqual(out.error, 'toString');
+    assert.strictEqual(out.stopReason, 'end_turn', 'inherited props must never be mistaken for a mapping');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// BA-17 — end to end through the provider, against a fake CLI that speaks the REAL stream-json
+// shape captured in poc/ba17-turn-unit.mjs (block-events sharing one message.id and one usage).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+/** A stand-in `claude` that prints the given stream-json lines, then optionally hangs. */
+function fakeCli(lines, { hang = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ba17-cli-'));
+  const p = path.join(dir, 'cli.js');
+  fs.writeFileSync(p, `
+    process.stdin.resume();
+    for (const l of ${JSON.stringify(lines)}) process.stdout.write(l + '\\n');
+    ${hang ? 'setTimeout(() => {}, 60000);' : 'process.exit(0);'}
+  `);
+  return p;
+}
+
+const nativeProvider = (cliPath, opts = {}) => new CLIPipeProvider({
+  command: process.execPath, args: [cliPath], toolProtocol: 'claude-mcp', ...opts,
+});
+
+describe('BA-17 — what the caller actually receives', () => {
+  // The exact shape the CLI produced under `--max-turns`: one multi-block message, a wordless
+  // cut-off turn, and a result event with `result: null`.
+  const boundedSession = [
+    JSON.stringify({ type: 'assistant', message: { id: 'm1', model: 'claude-sonnet-5', usage: { input_tokens: 2, output_tokens: 60, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }, content: [{ type: 'text', text: 'Here is what I found so far.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'm1', model: 'claude-sonnet-5', usage: { input_tokens: 2, output_tokens: 60, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }, content: [{ type: 'thinking', thinking: '...' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'm1', model: 'claude-sonnet-5', usage: { input_tokens: 2, output_tokens: 60, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }, content: [{ type: 'thinking', thinking: '...' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'm2', model: 'claude-sonnet-5', usage: { input_tokens: 3, output_tokens: 40, cache_read_input_tokens: 200, cache_creation_input_tokens: 7 }, content: [{ type: 'thinking', thinking: 'cut off here' }] } }),
+    JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, result: null, num_turns: 5, total_cost_usd: 0.0123, modelUsage: { 'claude-sonnet-5': {} }, usage: { input_tokens: 5, output_tokens: 166, cache_read_input_tokens: 300, cache_creation_input_tokens: 12 } }),
+  ];
+
+  test('the session reports REAL turns, not stream events', async () => {
+    const r = await nativeProvider(fakeCli(boundedSession)).generate(
+      [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
+    );
+    assert.strictEqual(r.session.turns, 2, 'four events, two assistant messages');
+  });
+
+  test('usage is the CLI\'s own session total, not the per-block-event sum', async () => {
+    const r = await nativeProvider(fakeCli(boundedSession)).generate(
+      [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
+    );
+    // Per-EVENT summing (the 0.33.0 bug) would give input 9 / output 220 / read 500 / creation 22.
+    assert.deepStrictEqual(r.usage, { inputTokens: 5, outputTokens: 166, cacheReadTokens: 300, cacheCreationTokens: 12 });
+  });
+
+  test('a bounded stop is named AND keeps the work (BA-5)', async () => {
+    const r = await nativeProvider(fakeCli(boundedSession)).generate(
+      [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
+    );
+    assert.strictEqual(r.session.error, 'max_turns', 'never a silent clean success');
+    assert.strictEqual(r.stopReason, 'max_turns');
+    assert.strictEqual(r.text, 'Here is what I found so far.', 'the CLI reports result:null here — the work must still come back');
+  });
+
+  test('the model id is read from modelUsage, which is where the result event puts it', async () => {
+    const r = await nativeProvider(fakeCli(boundedSession)).generate(
+      [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
+    );
+    assert.strictEqual(r.model, 'claude-sonnet-5');
+    assert.strictEqual(r.costUsd, 0.0123);
+  });
+
+  test('onTurn fires once per TURN and once for the session — not once per block', async () => {
+    const seen = [];
+    const p = nativeProvider(fakeCli(boundedSession), { onTurn: async (e) => { seen.push(e.kind); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.deepStrictEqual(seen, ['turn', 'turn', 'session'], 'a gate must not be billed per content block');
+  });
+
+  test('a CLI that overruns its own bound is killed by the backstop, named and with its work', async () => {
+    // The failure the flag being undocumented would cause: it stops honouring --max-turns. Three
+    // turns arrive against maxTurns:2, then the CLI hangs — nothing here ends the session but us.
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: `work from ${id}` }] } });
+    const p = nativeProvider(fakeCli([turn('m1'), turn('m2'), turn('m3')], { hang: true }), { maxTurns: 2, sessionTimeout: 20000 });
+    const r = await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(r.session.error, 'max_turns', 'the bound is OUR guarantee, not the flag\'s');
+    assert.strictEqual(r.stopReason, 'max_turns');
+    assert.strictEqual(r.text, 'work from m3', 'a killed session still returns the last turn it produced');
+    // No result event to read totals from — the per-turn records are the honest fallback.
+    assert.strictEqual(r.usage.outputTokens, 15);
+    assert.strictEqual(r.costUsd, undefined, 'we killed it before it priced itself — never a synthetic 0');
+  });
+
+  // The turn axis and the usage axis are NOT the same count. If a turn ever arrives without usage
+  // we cannot meter it — but it still happened, and it still spends the caller's bound. Counting it
+  // as "not a turn" would under-report the bound in the optimistic direction, which is the whole
+  // family of bug this module keeps closing.
+  test('a turn that carries no usage is still a turn against the bound', async () => {
+    const withUsage = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: `t ${id}` }] } });
+    const noUsage = (id) => JSON.stringify({ type: 'assistant', message: { id, content: [{ type: 'text', text: `t ${id}` }] } });
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', total_cost_usd: 0.001 });
+    const r = await nativeProvider(fakeCli([withUsage('m1'), noUsage('m2'), withUsage('m3'), done]))
+      .generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(r.session.turns, 3, 'three assistant messages happened');
+
+    // …and the backstop spends the bound on it too.
+    const hung = await nativeProvider(fakeCli([withUsage('m1'), noUsage('m2'), withUsage('m3')], { hang: true }), { maxTurns: 2, sessionTimeout: 20000 })
+      .generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(hung.session.error, 'max_turns', 'an unmeterable turn still breaches the bound');
+  });
+
+  // A turn's `message.usage` is a snapshot taken at its first block and never revised — measured, a
+  // turn that emitted ~816 output tokens reported 2 — so the streamed per-turn sum is SHORT of the
+  // session total. The closing event carries the difference, so a gate's token axis adds up.
+  test('the closing session event carries the token RESIDUAL, not zero and not the total', async () => {
+    const seen = [];
+    const turn = (id, out) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: out, cache_read_input_tokens: 10, cache_creation_input_tokens: 2 }, content: [{ type: 'text', text: 't' }] } });
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', total_cost_usd: 0.01, usage: { input_tokens: 5, output_tokens: 800, cache_read_input_tokens: 20, cache_creation_input_tokens: 4 } });
+    const p = nativeProvider(fakeCli([turn('m1', 2), turn('m2', 3), done]), { onTurn: async (e) => { seen.push(e); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+
+    const closing = seen[seen.length - 1];
+    assert.strictEqual(closing.kind, 'session');
+    // Streamed: input 2, output 5, read 20, creation 4. Session total: 5 / 800 / 20 / 4.
+    assert.deepStrictEqual(closing.usage, { inputTokens: 3, outputTokens: 795, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    const summed = seen.reduce((a, e) => a + e.usage.inputTokens + e.usage.outputTokens, 0);
+    assert.strictEqual(summed, 805, "everything the gate is told must add up to the CLI's own total");
+  });
+
+  test('a residual is never negative — an overshoot reports nothing further, never a credit', async () => {
+    const seen = [];
+    const turn = (id, out) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: out }, content: [{ type: 'text', text: 't' }] } });
+    // Session total BELOW the streamed sum — a gate must not be handed a negative to subtract.
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', usage: { input_tokens: 1, output_tokens: 1 } });
+    const p = nativeProvider(fakeCli([turn('m1', 50), turn('m2', 50), done]), { onTurn: async (e) => { seen.push(e); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0 });
+  });
+
+  test('a session we killed has no authoritative total, so there is no residual to add', async () => {
+    const seen = [];
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: 't' }] } });
+    const p = nativeProvider(fakeCli([turn('m1'), turn('m2'), turn('m3')], { hang: true }), { maxTurns: 2, sessionTimeout: 20000, onTurn: async (e) => { seen.push(e); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    // The fallback total IS the streamed sum, so every tier nets to zero. It carries all four tiers
+    // because the summing fallback does (unchanged from 0.33.0), and the residual mirrors its shape.
+    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
+  test('a session inside its bound is untouched by the backstop (negative control)', async () => {
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: `work from ${id}` }] } });
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'all done', num_turns: 9, total_cost_usd: 0.002 });
+    const p = nativeProvider(fakeCli([turn('m1'), turn('m2'), done]), { maxTurns: 2 });
+    const r = await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(r.session.error, null, 'exactly N turns is the bound honoured, not breached');
+    assert.strictEqual(r.text, 'all done');
+  });
+});

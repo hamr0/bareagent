@@ -43,8 +43,16 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
  *   sum-at-end: a session that dies mid-run must already have surfaced every completed turn's spend or
  *   the gate loses all of it. The event shape mirrors `Loop({onLlmResult})`, so `wireGate(gate).onLlmResult`
  *   drops straight in — and when it is wired the Loop skips its own forward, so nothing is billed twice.
- * @property {number} [maxTurns] - (native mode) Maps to the CLI's `--max-turns`. The bound stop is NAMED
- *   (`error_max_turns` → `session.error:'max_turns'`), never a silent clean success.
+ * @property {number} [maxTurns] - (native mode) Bound on ASSISTANT/LLM TURNS — the same unit as the
+ *   Loop path's turn bound, so a caller's `maxTurns` means one thing on both surfaces (BA-17). NOT a
+ *   tool-call count: a single turn may issue a dozen parallel tool calls and still be one turn
+ *   (measured: 12 calls across 2 turns, well inside `--max-turns 3`). Enforced twice on purpose —
+ *   the CLI's own `--max-turns` stops the session cleanly at N and emits its result event (the only
+ *   report of the session's real cost), and a parent-side counter kills it if a turn beyond N is
+ *   ever observed, since that flag is undocumented in `claude --help` and a rename would otherwise
+ *   silently unbound the session. Either way the stop is NAMED (`session.error:'max_turns'`,
+ *   `stopReason:'max_turns'`) and carries the last turn's text forward, never a silent clean success
+ *   and never an empty result.
  * @property {number} [maxConsecutiveDenials=3] - (native mode) BA-11 at the bridge: a single deny stays
  *   advisory so the model can pivot to an allowed tool; N in a row with no allowed call between ends the
  *   session with `denied:<tool>`. `0`/`Infinity` disables.
@@ -65,6 +73,31 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
  *   `provider-clipipe-tools.js` / `provider-clipipe-mcp.js`, so a second CLI slots in behind the same seams.
  * @property {boolean} [probeCapability=true] - (EMULATION tool mode only) On the first tool-mode `generate`, run ONE cheap upfront probe that asks the model to obtain unknowable info via a tool. If it answers in prose instead of emitting a tool_call, throw a loud `ProviderError` naming the model — FAIL FAST rather than silently degrade mid-run (the weak-model failure mode). Behaviour-based, never a model name-list (a roster goes stale, BA-10). The verdict is cached per instance (one probe per provider, not per turn). Set `false` to skip when the caller already knows the model is capable.
  */
+
+/**
+ * Session total minus what the per-turn events already reported, per tier, floored at 0.
+ *
+ * Floored because a negative would be a CREDIT to a gate's running total — an under-count that
+ * silently widens a budget cap. If the streamed turns ever overshoot the session total, the honest
+ * report is "nothing further", never "give some back".
+ *
+ * @param {import('../types').Usage} total
+ * @param {import('../types').Usage[]} streamed
+ * @returns {import('../types').Usage}
+ */
+function subtractUsage(total, streamed) {
+  const sum = (/** @type {keyof import('../types').Usage} */ k) =>
+    streamed.reduce((a, t) => a + (Number(t[k]) || 0), 0);
+  const at = (/** @type {keyof import('../types').Usage} */ k) =>
+    Math.max(0, (Number(total[k]) || 0) - sum(k));
+  /** @type {import('../types').Usage} */
+  const out = { inputTokens: at('inputTokens'), outputTokens: at('outputTokens') };
+  // Only report a cache tier the session actually had — an absent tier stays absent, never a
+  // synthetic 0 (the Usage contract).
+  if (total.cacheReadTokens !== undefined) out.cacheReadTokens = at('cacheReadTokens');
+  if (total.cacheCreationTokens !== undefined) out.cacheCreationTokens = at('cacheCreationTokens');
+  return out;
+}
 
 class CLIPipeProvider {
   /**
@@ -289,17 +322,25 @@ class CLIPipeProvider {
       throw new ProviderError(`[CLIPipeProvider] failed to spawn "${this.command}": ${r.spawnError.message}`, /** @type {any} */ ({ status: 0 }));
     }
 
-    /** @type {import('../types').Usage} */
-    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
-    for (const t of r.turns) {
-      usage.inputTokens += t.inputTokens || 0;
-      usage.outputTokens += t.outputTokens || 0;
-      usage.cacheReadTokens += t.cacheReadTokens || 0;
-      usage.cacheCreationTokens += t.cacheCreationTokens || 0;
-    }
+    // The result event carries the session's authoritative totals. It has no `model` key — the model
+    // id lives under `modelUsage` — which is exactly what `mapClaudeMeta` already unpacks for the
+    // emulation path, so the native path reuses it rather than re-deriving three fields by hand.
+    const meta = r.final ? mapClaudeMeta(r.final) : null;
+
+    // `result.usage` is the authoritative session total and is preferred when present: it also
+    // captures a turn the CLI billed but never emitted as an event (measured — a bounded session's
+    // cut-off turn). Summing the per-turn records is the fallback for a session we killed before its
+    // result event. Either way the arithmetic is per-TURN, never per block-event (BA-17).
+    const usage = (meta && r.final.usage) ? meta.usage : r.turns.reduce((/** @type {any} */ a, t) => ({
+      inputTokens: a.inputTokens + (t.inputTokens || 0),
+      outputTokens: a.outputTokens + (t.outputTokens || 0),
+      cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
+      cacheCreationTokens: a.cacheCreationTokens + (t.cacheCreationTokens || 0),
+    }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
 
     const { stopReason, error } = resolveSessionError({
-      terminal: st.terminal,
+      // A bridge/guard terminal is more specific than the turn backstop, so it wins the tag.
+      terminal: st.terminal || r.terminal,
       bridgeDown: st.bridgeDown,
       attempted: r.attempted,
       served: st.toolCalls,
@@ -307,17 +348,25 @@ class CLIPipeProvider {
       subtype: r.final && r.final.subtype,
     });
 
-    const costUsd = (r.final && Number.isFinite(r.final.total_cost_usd)) ? r.final.total_cost_usd : null;
+    const costUsd = (meta && Number.isFinite(meta.costUsd)) ? /** @type {number} */ (meta.costUsd) : null;
 
-    // The authoritative price arrives only at session end (the CLI prices the SESSION, not the turn),
-    // so when per-turn streaming is wired it gets one closing event carrying the cost with zero
-    // usage — the tokens were already streamed, and double-counting either axis would be a lie.
+    // The authoritative figures arrive only at session end — the CLI prices the SESSION, not the
+    // turn — so when per-turn streaming is wired, one closing event RECONCILES both axes.
+    //
+    // Money: the whole cost, which no turn reported.
+    // Tokens: the RESIDUAL, not zero and not the total. A turn's `message.usage` is a snapshot taken
+    // when its first block was emitted and never revised (measured: a turn that emitted ~816 output
+    // tokens reported 2, identically on all 13 of its block-events), so the streamed per-turn sum is
+    // real but SHORT of the session total. Sending the difference makes a gate's token axis add up
+    // to exactly what the CLI itself reports — where sending the total would double-count everything
+    // already streamed, and sending zero would leave the axis quietly under-fed.
+    const residual = subtractUsage(usage, r.turns);
     if (this.onTurn) {
       try {
         await this.onTurn({
-          model: (r.final && r.final.model) || null,
+          model: (meta && meta.model) || null,
           provider: 'clipipe',
-          usage: { inputTokens: 0, outputTokens: 0 },
+          usage: residual,
           costUsd,
           pricing: costUsd === null ? 'unpriced' : 'priced',
           durationMs: r.ms,
@@ -329,15 +378,23 @@ class CLIPipeProvider {
       }
     }
 
+    // BA-5 on the native path: a bound or a tripped guard is normal termination for a bounded
+    // attempt, and the text is the ONLY channel from this attempt to the next. The CLI reports
+    // `result: null` when it stops on its own bound (measured), and a session we killed never emits
+    // a result at all — so fall back to the last assistant turn's own words rather than ''.
+    const finalText = (r.final && typeof r.final.result === 'string' && r.final.result)
+      ? r.final.result
+      : (r.lastText || '');
+
     /** @type {GenerateResult} */
     const result = {
-      text: (r.final && typeof r.final.result === 'string') ? r.final.result : '',
+      text: finalText,
       toolCalls: [],
       usage,
-      model: (r.final && r.final.model) || null,
+      model: (meta && meta.model) || null,
       stopReason,
       session: {
-        turns: r.turns.length,
+        turns: r.turnCount,
         toolCalls: st.toolCalls,
         error,
         // Only true when we ACTUALLY streamed — unwired, the Loop must still forward the total or

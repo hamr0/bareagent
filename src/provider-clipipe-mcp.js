@@ -258,6 +258,13 @@ const SUBTYPE_MAP = {
 };
 
 /**
+ * Terminals WE impose that ARE stop reasons in the neutral vocabulary. A guard terminal
+ * (`denied:`/`stuck:`) is deliberately absent — those are faults, not stop reasons.
+ * @type {Record<string, string>}
+ */
+const TERMINAL_STOP = { max_turns: 'max_turns' };
+
+/**
  * @param {string|null|undefined} subtype
  * @returns {{stopReason: string|null, error: string|null}}
  */
@@ -291,7 +298,15 @@ function classifySubtype(subtype) {
  */
 function resolveSessionError(facts) {
   const fromSubtype = classifySubtype(facts.subtype);
-  if (facts.terminal) return { stopReason: fromSubtype.stopReason, error: facts.terminal };
+  if (facts.terminal) {
+    // A terminal WE imposed kills the session before its `result` event, so there is no subtype to
+    // read a stop reason from. Where the terminal IS a stop reason in the neutral vocabulary, say so
+    // — a consumer branching on `stopReason` must not see `null` for a bound it asked for.
+    // Own-property only: same proto-key footgun as SUBTYPE_MAP.
+    const named = Object.prototype.hasOwnProperty.call(TERMINAL_STOP, facts.terminal)
+      ? TERMINAL_STOP[facts.terminal] : null;
+    return { stopReason: named || fromSubtype.stopReason, error: facts.terminal };
+  }
   const bridgeBroken = facts.bridgeDown
     || (Number.isFinite(facts.attempted) && Number.isFinite(facts.served) && facts.attempted > facts.served);
   if (bridgeBroken) return { stopReason: fromSubtype.stopReason, error: 'bridge-failed' };
@@ -301,6 +316,21 @@ function resolveSessionError(facts) {
 
 /**
  * Line-oriented processor for the CLI's `stream-json` stdout.
+ *
+ * ONE TURN IS ONE ASSISTANT MESSAGE, NOT ONE EVENT (BA-17). Measured on the real wire: the CLI
+ * emits a SEPARATE `assistant` event per content BLOCK of the same message, and every one of them
+ * repeats that message's `usage` verbatim — one 13-block message arrived as 13 events carrying the
+ * same numbers. Treating each event as a turn is wrong on both axes a caller meters:
+ *   - the TURN axis  — a caller whose attempt bound is an LLM-turn count sees 14 "turns" for 2 real
+ *                      ones (measured 7×; 4.4× on the adopter's failing run), so its net guillotines
+ *                      the session at a fraction of the allowance it advertised;
+ *   - the TOKEN axis — the same message's usage is added once per block (measured 5.04× inflated
+ *                      against the CLI's own session total), so a budget cap fires early on tokens
+ *                      that were never spent.
+ * So a RUN of consecutive events sharing `message.id` is ONE turn: usage is recorded once and one
+ * `onTurn` fires. Adjacent-run dedup, not a Set — an id that somehow recurred later must still count
+ * as a new turn (dropping a real turn is the failure that matters). An event with NO id degrades to
+ * one-turn-per-event: the pre-BA-17 behaviour, never a collapse of the whole session into one turn.
  *
  * FRAMING IS SYNCHRONOUS. The obvious shape — an `async` stdout handler that `await`s `onTurn`
  * inside its parse loop — has a data-corruption bug: while the `await` is suspended, the next
@@ -317,11 +347,28 @@ function resolveSessionError(facts) {
  * @param {any} o.ctx
  * @param {number} o.startedAt
  * @param {(err: Error) => void} o.onHalt - called if a forwarded `onTurn` throws a HaltError.
+ * @param {number|null} [o.turnCap] - BA-17 backstop: fires `onLimit` the moment a turn BEYOND this
+ *   many is observed. Deliberately not `>=`: `--max-turns` is passed to the CLI too, and when it
+ *   works (measured: it does, and it counts assistant turns) the CLI ends the session ITSELF at the
+ *   cap and emits its `result` event — which is the only place the authoritative session cost
+ *   arrives. Killing the session at exactly N would throw that figure away on every bounded run. So
+ *   this fires ONLY on an overrun, i.e. only if the flag ever stops working — it is undocumented in
+ *   `claude --help`, so the guarantee cannot rest on it alone.
+ * @param {(() => void)} [o.onLimit] - called once when `turnCap` is exceeded.
  */
-function createSessionStream({ onTurn, ctx, startedAt, onHalt }) {
+function createSessionStream({ onTurn, ctx, startedAt, onHalt, turnCap = null, onLimit = () => {} }) {
   let buf = '';
   let attempted = 0;
   let final = null;
+  /** Adjacent-run dedup key: the `message.id` of the turn currently being emitted. */
+  let turnId = /** @type {string|null} */ (null);
+  /** Has the CURRENT turn already contributed its usage? Blocks of one message repeat it. */
+  let turnMetered = false;
+  let turnCount = 0;
+  let limitFired = false;
+  /** Text of the current turn, and the last turn that produced any — BA-5 work preservation. */
+  let curText = '';
+  let lastText = '';
   /** @type {import('../types').Usage[]} */ const turns = [];
   /** @type {any[]} */ const queue = [];
   /** @type {Promise<void>|null} */ let draining = null;
@@ -367,29 +414,59 @@ function createSessionStream({ onTurn, ctx, startedAt, onHalt }) {
           }
         }
 
-        if (ev.type === 'assistant' && ev.message && ev.message.usage) {
-          const u = ev.message.usage;
-          /** @type {import('../types').Usage} */
-          const usage = {
-            inputTokens: Number(u.input_tokens) || 0,
-            outputTokens: Number(u.output_tokens) || 0,
-          };
-          // Omit an absent tier rather than emit a synthetic 0 (per the Usage contract).
-          if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
-          if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
-          turns.push(usage);
-          // Stream it: a session that dies mid-run must already have surfaced every completed turn's
-          // spend, or the gate loses it. Queued (not awaited here) so framing cannot race the buffer.
-          if (onTurn) queue.push({
-            model: (ev.message && ev.message.model) || null,
-            provider: 'clipipe',
-            usage,
-            costUsd: null, // the CLI prices the SESSION, not the turn — explicitly unpriced, never a synthetic 0.
-            pricing: 'unpriced',
-            durationMs: Date.now() - startedAt,
-            ctx, // what a wired gate records spend against — same as the Loop's onLlmResult.
-            kind: 'turn',
-          });
+        if (ev.type === 'assistant' && ev.message) {
+          // Is this event the start of a NEW assistant turn, or another block of the current one?
+          // No id at all ⇒ its own turn (degrade to the pre-BA-17 shape, never collapse into one).
+          const id = (typeof ev.message.id === 'string' && ev.message.id) ? ev.message.id : null;
+          if (id === null || id !== turnId) {
+            turnId = id;
+            turnMetered = false;
+            curText = '';
+            turnCount++;
+            // The overrun backstop. `>` not `>=`, so a CLI that honours --max-turns keeps its clean
+            // exit (and with it the only report of the session's real cost).
+            if (!limitFired && Number.isFinite(turnCap) && Number(turnCap) > 0 && turnCount > Number(turnCap)) {
+              limitFired = true;
+              onLimit();
+            }
+          }
+
+          // BA-5: keep the turn's own words, so a bound/guard stop still returns the work done. The
+          // CLI reports `result: null` on a bounded session — measured — so this is the ONLY source.
+          for (const block of (ev.message.content || [])) {
+            if (block && block.type === 'text' && typeof block.text === 'string' && block.text) {
+              curText += block.text;
+              lastText = curText;
+            }
+          }
+
+          // Usage rides on EVERY block-event of the message; count it once per turn. Read on any
+          // event of the turn (not just the first) — the first block need not be the one carrying it.
+          if (ev.message.usage && !turnMetered) {
+            turnMetered = true;
+            const u = ev.message.usage;
+            /** @type {import('../types').Usage} */
+            const usage = {
+              inputTokens: Number(u.input_tokens) || 0,
+              outputTokens: Number(u.output_tokens) || 0,
+            };
+            // Omit an absent tier rather than emit a synthetic 0 (per the Usage contract).
+            if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
+            if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
+            turns.push(usage);
+            // Stream it: a session that dies mid-run must already have surfaced every completed turn's
+            // spend, or the gate loses it. Queued (not awaited here) so framing cannot race the buffer.
+            if (onTurn) queue.push({
+              model: ev.message.model || null,
+              provider: 'clipipe',
+              usage,
+              costUsd: null, // the CLI prices the SESSION, not the turn — explicitly unpriced, never a synthetic 0.
+              pricing: 'unpriced',
+              durationMs: Date.now() - startedAt,
+              ctx, // what a wired gate records spend against — same as the Loop's onLlmResult.
+              kind: 'turn',
+            });
+          }
         }
 
         if (ev.type === 'result') final = ev;
@@ -399,6 +476,10 @@ function createSessionStream({ onTurn, ctx, startedAt, onHalt }) {
     /** Await every queued per-turn forward — call before resolving the session. */
     async flush() { if (draining) await draining; await drain(); },
     get turns() { return turns; },
+    /** Assistant TURNS observed — including any that carried no usage. */
+    get turnCount() { return turnCount; },
+    /** The last turn's text. The work a bounded/guard-stopped session still did (BA-5). */
+    get lastText() { return lastText; },
     get attempted() { return attempted; },
     get final() { return final; },
   };
@@ -452,11 +533,18 @@ function runSession(opts) {
     const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '', settled = false;
     /** @type {Error|null} */ let turnHalt = null;
+    /** @type {string|null} A terminal WE imposed from the stream (today: the BA-17 turn backstop). */
+    let terminal = null;
     const started = Date.now();
 
     /** Kill the session now — a guard tripped or governance halted mid-flight. */
     const abort = () => { try { child.kill('SIGTERM'); } catch (_) { /* already gone */ } };
-    const stream = createSessionStream({ onTurn, ctx, startedAt: started, onHalt: (err) => { turnHalt = err; abort(); } });
+    const stream = createSessionStream({
+      onTurn, ctx, startedAt: started,
+      onHalt: (err) => { turnHalt = err; abort(); },
+      turnCap: Number.isFinite(maxTurns) ? maxTurns : null,
+      onLimit: () => { terminal = 'max_turns'; abort(); },
+    });
 
     const done = async (extra = {}) => {
       if (settled) return;
@@ -465,7 +553,11 @@ function runSession(opts) {
       // Flush queued per-turn forwards before resolving — a session that ends while a forward is
       // pending must still surface that turn's spend to the gate (F12/F18).
       try { await stream.flush(); } catch (_) { /* onTurn failures are surfaced in-drain, never fatal */ }
-      resolve({ turns: stream.turns, final: stream.final, stderr, ms: Date.now() - started, turnHalt, attempted: stream.attempted, ...extra });
+      resolve({
+        turns: stream.turns, turnCount: stream.turnCount, lastText: stream.lastText,
+        final: stream.final, stderr, ms: Date.now() - started, turnHalt, terminal,
+        attempted: stream.attempted, ...extra,
+      });
     };
 
     const timer = setTimeout(() => {
