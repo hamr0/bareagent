@@ -2,6 +2,68 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.33.1] - 2026-07-22
+
+### Fixed
+
+- **BA-17 — a native (`claude-mcp`) turn is one assistant MESSAGE, not one stream event.** Measured
+  on the real wire: the claude CLI emits a **separate `assistant` event per content block**, and each
+  one repeats that message's `usage` verbatim (one 13-block message arrived as 13 identical-usage
+  events). `createSessionStream` fired one `onTurn` per event, which corrupted both axes a caller
+  meters:
+  - **Turn axis** — a caller whose attempt bound is an LLM-turn count saw **14 "turns" for 2 real
+    ones** (7×; 4.4× on the adopter's failing job: 35 events for 8 turns). Its net then guillotined
+    the session at roughly *half* the allowance it advertised, and on the native path that routed to
+    `humanChannel → terminate`, discarding the worker's output entirely.
+  - **Token axis** — the same message's usage was added once per block: **5.04× inflated** against
+    the CLI's own session total, so a budget cap fired on tokens that were never spent.
+
+  A run of consecutive events sharing `message.id` is now ONE turn: usage recorded once, one `onTurn`.
+  Adjacent-run dedup (not a Set) so a recurring id still counts as a new turn — dropping a real turn
+  is the failure that matters. An event with **no** id degrades to one-turn-per-event, the pre-BA-17
+  behaviour, never a collapse of the session into a single turn.
+
+  **`--max-turns` itself was never the defect.** It was filed as "does not enforce, and counts
+  tool-calling turns"; both were measured false. It enforces (a 12-step task under `--max-turns 4`
+  stopped at 4 with the named `error_max_turns`) and it counts assistant turns (12 tool calls served
+  across 2 turns, inside `--max-turns 3`). The symptom was the mis-count above.
+
+- **BA-17 — the turn bound is now bare-agent's guarantee, not an undocumented flag's.** `maxTurns`
+  still maps to `--max-turns` (which stops the session cleanly and emits the result event carrying
+  its real cost), and a parent-side counter now kills the session if a turn **beyond** N is ever
+  observed. Deliberately `>` and not `>=`: killing at exactly N on every bounded run would throw away
+  the only report of what the session cost. The backstop exists because `--max-turns` is undocumented
+  in `claude --help` — a rename would otherwise silently unbound every session.
+
+- **BA-17 — a bounded native session returns its work (BA-5 on the native path).** The CLI reports
+  `result: null` when it stops on its own bound, so the provider returned `text: ''` — destroying the
+  only channel from one bounded attempt to the next. The last assistant turn's own text is now
+  carried forward, on the bound, on a guard terminal, and on a session we killed. The stop also
+  reports `stopReason: 'max_turns'` rather than `null` (a terminal we impose has no subtype to read
+  one from), via an own-property lookup — same proto-key guard as `SUBTYPE_MAP`.
+
+- **BA-17 — the closing `kind:'session'` event now reconciles the token axis, not just money.** A
+  turn's `message.usage` is a snapshot taken when its first block was emitted and never revised
+  (measured: a turn that emitted ~816 output tokens reported 2, identically on all 13 of its events),
+  so the streamed per-turn sum is real but **short** of the session total. The closing event carries
+  the **residual** per tier (floored at 0 — a negative would be a credit that silently widens a cap),
+  so a wired gate's tokens now add up to exactly what the CLI itself reports. Verified on the live
+  wire: streamed + residual = 821 = the CLI's own output total.
+
+- `GenerateResult.model` on the native path is read from the result event's `modelUsage` key via the
+  existing `mapClaudeMeta` helper. The result event has no `model` key, so this field — and the
+  closing session event's `model` — were always `null`.
+
+### Notes
+
+- No new public surface; `maxTurns`, `onTurn`, `session.turns` and `usage` keep their names and
+  change only to report honestly. Adopters bounding by LLM turns should expect **fewer** `onTurn`
+  events and **smaller, correct** token numbers than 0.33.0 reported.
+- Evidence: `poc/ba17-turn-unit.mjs` (event-vs-turn + flag enforcement), `poc/ba17-unit-parallel.mjs`
+  (the flag's unit), `poc/ba17-verify-shipped.mjs` (the shipped code on a live session, both cases
+  green including the token reconciliation). +34 tests, every new guard mutation-proved in both
+  directions (19 mutations, all red).
+
 ## [0.33.0] - 2026-07-21
 
 ### Added

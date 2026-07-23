@@ -809,6 +809,53 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.33.1 / CLIPipe native turn-unit fix (bareloop BA-17) (2026-07-22)
+
+> **Numbering note.** This is **bareloop's** BA-17 (`docs/UPSTREAM-ASKS.md`),
+> the criterion-4 follow-up to BA-16 below. Not a bareagent-internal BA-number.
+
+Decisions locked, not to be re-litigated:
+
+- **A native turn is one assistant MESSAGE, not one stream event.** Measured on
+  the real wire: the claude CLI emits a separate `assistant` event per content
+  BLOCK, each repeating that message's `usage`. Counting events as turns inflated
+  a caller's LLM-turn net 5–7× (guillotining a bounded worker at ~half its
+  allowance) and the token axis 5.04×. Fix: a run of consecutive events sharing
+  `message.id` is ONE turn (adjacent-run dedup — NOT a Set, so a recurring id
+  still counts; no id ⇒ degrade to per-event, never collapse the session into
+  one turn). This is the same BA-4/5/6/13 optimistic-rounding class the native
+  mode was built to avoid — the boundary "one message ≠ one event" was
+  under-modeled and rounded toward "fewer turns / more tokens."
+- **The filed ask was measured WRONG about the cause, and that correction is the
+  decision.** BA-17 filed `--max-turns` as "does not enforce, and counts
+  tool-calling turns." Both false on the wire: it enforces (12-step task under
+  `--max-turns 4` stopped at 4, named `error_max_turns`) and counts assistant
+  turns (12 tool calls across 2 turns inside `--max-turns 3`). The symptom was
+  the event-vs-message mis-count above. **A cross-repo ask is a symptom report,
+  not a root-cause diagnosis — verify the mechanism on the real wire before
+  building to the ask's stated cause.**
+- **`maxTurns` is an LLM-turn bound, enforced TWICE.** The CLI's own
+  `--max-turns` stops the session cleanly at N (and emits the result event that
+  carries the session's real cost); a parent-side counter kills the session only
+  on an OVERRUN (`>` not `>=`, so the clean-exit cost report is never thrown
+  away). The backstop exists because `--max-turns` is **undocumented in
+  `claude --help`** — a guarantee cannot rest on a flag that could be renamed
+  silently. Same unit as the Loop path, so a caller's `maxTurns` means one thing
+  on both surfaces.
+- **A bounded native session returns its work (BA-5 on native).** The CLI reports
+  `result: null` when it stops on its own bound, so the last assistant turn's own
+  text is carried forward; the imposed terminal reports `stopReason:'max_turns'`
+  (own-property lookup — the proto-key guard) rather than `null`.
+- **The closing session event reconciles the TOKEN axis, not just money.** A
+  turn's `message.usage` is an unrevised first-block snapshot (a turn emitting
+  ~816 output tokens reported 2), so the streamed per-turn sum is short of the
+  session total; the closing `kind:'session'` event carries the per-tier
+  **residual** (floored at 0 — a negative would be a credit that widens a cap),
+  so a wired gate's tokens sum to exactly the CLI's own total. Verified live.
+- **No new public surface — a patch.** `maxTurns`/`onTurn`/`session.turns`/`usage`
+  keep their names; they only report honestly. Adopters bounding by LLM turns get
+  FEWER `onTurn` events and SMALLER, correct token numbers than 0.33.0 reported.
+
 ### v0.33.0 / CLIPipe native MCP tool mode (bareloop BA-16) (2026-07-21)
 
 > **Numbering note.** This is **bareloop's** BA-16 (`docs/UPSTREAM-ASKS.md`), an
