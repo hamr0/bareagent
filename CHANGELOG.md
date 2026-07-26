@@ -2,6 +2,46 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.34.0] - 2026-07-26
+
+### Added
+
+- **BA-18 — a configurable request/idle timeout on the http(s) providers (Anthropic, OpenAI,
+  Gemini, Ollama).** Before this, each provider built its request with only `req.on('error')`
+  wired — no socket timeout, no `AbortSignal` — so a socket the server silently dropped, or a
+  response that never starts, was bounded only by the **OS TCP timeout (~2h on Linux)**. It
+  presented to the caller as a *hang*, not a failure (no event, no error, no progress), which made
+  every retry/casualty policy above it inert by construction. Observed by an adopter 3/3 times a job
+  idled the connection 40–56s between turns: a single `generate()` never returned for **38 min**
+  (twice) and **2h24m** (once).
+  - New `timeoutMs` option on all four providers (constructor default **600000ms / 10 min**;
+    overridable per call via `generate(..., { timeoutMs })`). It bounds on socket **inactivity**
+    (`req.setTimeout`), so a slow-but-streaming response is not killed — only a silent or
+    never-answering socket trips it. The 10-min default sits safely above any single non-streaming
+    completion (TTFB ≈ generation time, since these requests are non-streaming) and well below the
+    OS ceiling. `0` or `Infinity` disables it (byte-identical pre-BA-18 behaviour). Disable-edge
+    semantics are fail-safe: a per-call `null`/`undefined` **inherits** the instance value (so a
+    per-call `null` never re-enables the default over an instance-level disable), and a `NaN` /
+    negative / non-finite value (e.g. `Number(process.env.X)` on an unset var) falls back to the
+    default rather than silently disabling the bound.
+  - On trip, `generate()` rejects with a **retryable `TimeoutError`** (`code: 'ETIMEDOUT'`,
+    `retryable: true`) — the shape `DEFAULT_RETRY_ON` already classifies as transient.
+  - Implemented once in `src/provider-http.js` (`resolveTimeoutMs` / `applyRequestTimeout`) and
+    wired at each provider's `_request`, so the four cannot drift. CLIPipe already bounded its child
+    process and is unchanged.
+
+### Clarified (no code change)
+
+- **The Retry seam already reaches the transient table.** BA-18's second part asked to "wire
+  `withRetry` around `provider.generate`, or document the seam." There is no `withRetry` — the
+  primitive is `Retry.call()`, and it *is* wired around `provider.generate` at `loop.js` (via
+  `Loop({ retry })`) and consumed by `run-plan`'s `stepRetry`. `DEFAULT_RETRY_ON` (`retry.js`)
+  classifies `ETIMEDOUT`/`ECONNRESET`/`ENOTFOUND`/429/5xx as transient, so a wired `Retry` already
+  retries a timed-out request and rethrows under `retryOn: () => false`. Now covered by tests and
+  documented (`docs/02-features/errors.md`, `usage-guide.md`). The intended contract is caller-side
+  wiring; the provider-level `timeoutMs` above is what protects a caller who uses the provider
+  directly, without a Loop.
+
 ## [0.33.1] - 2026-07-22
 
 ### Fixed

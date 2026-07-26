@@ -117,8 +117,11 @@ The circuit breaker tracks failures per key. After `threshold` failures, calls a
 | Error | When | Fix |
 |-------|------|-----|
 | `[Retry] Timeout` (`TimeoutError`) | A single attempt exceeded the configured `timeout` (default 60s) | Increase `timeout` in constructor or per-call options. `instanceof TimeoutError`, `code: 'ETIMEDOUT'`, `retryable: true` |
+| `[<Provider>] request timed out after Nms of socket inactivity` (`TimeoutError`, BA-18) | An http(s) provider's socket went idle past its `timeoutMs` (default 600000; a silently-dropped or never-answering socket). Applies to Anthropic/OpenAI/Gemini/Ollama. | Expected on a dead/hung connection — it's now an error instead of a ~2h hang. `code: 'ETIMEDOUT'`, `retryable: true`. Tune per provider via `timeoutMs` (`0`/`Infinity` disables); wrap the Loop in `Retry` to auto-retry it. |
 
 **Note:** After exhausting `maxAttempts`, Retry rethrows the last error from the wrapped function — it does not add its own prefix. Errors with `err.retryable === true` are automatically retried; `err.retryable === false` bail immediately without consuming remaining attempts.
+
+**Provider request timeout + Retry (BA-18).** The Loop wires `Retry` around `provider.generate` — `new Loop({ provider, retry: new Retry() })` — and the default retry predicate (`DEFAULT_RETRY_ON`) classifies `ETIMEDOUT`/`ECONNRESET`/`ENOTFOUND`/429/5xx as transient. So a provider request that times out (or drops its socket) is retried automatically under a wired `Retry`, and rethrows under `retryOn: () => false`. `run-plan`'s `stepRetry` is the same seam at the step level. Using a provider **without** a Loop? Its own `timeoutMs` still bounds the hang — you just handle the rejection yourself.
 
 ## CLIPipeProvider
 

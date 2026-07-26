@@ -5,6 +5,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
+const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
 
 /** @param {string} hostname @returns {boolean} */
 function isLoopbackHost(hostname) {
@@ -27,6 +28,7 @@ function isLoopbackHost(hostname) {
  *
  *   **MEASURED CAVEAT — this option does not "turn thinking on".** On `claude-sonnet-5` adaptive thinking is ALREADY the default: sending this changed the observed thinking rate not at all (2/10 rounds with it vs 3/10 without — `poc/ba7-adaptive-default.mjs`). Its real use is pinning the mode and reaching `display`/`effort`. The change that mattered is that thinking blocks are now PRESERVED and replayed (see `Message.providerBlocks`), which happens whether or not you ever set this.
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default to avoid leaking unexpected fields through error logs; `err.message` still carries the API error).
+ * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. A silent or never-answering socket (dropped by the server, or a response that never starts) was otherwise bounded only by the OS TCP timeout (~2h) — a hang, not an error, so every retry policy above it was inert. Bounds on socket INACTIVITY (the timer resets on activity, so a slow-but-streaming response is not killed); on trip, `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`) that a wired `Retry` (`Loop({ retry })`) retries. Default 10 min sits above any single non-streaming completion; `0` or `Infinity` disables it (pre-BA-18 behaviour). Overridable per call via `generate(..., { timeoutMs })`.
  */
 
 class AnthropicProvider {
@@ -52,13 +54,15 @@ class AnthropicProvider {
     this.thinking = options.thinking != null ? options.thinking : null;
     // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
     this.exposeErrorBody = options.exposeErrorBody === true;
+    // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
+    this.timeoutMs = options.timeoutMs;
   }
 
   /**
    * Generate a response from the Anthropic API.
    * @param {Message[]} messages - Conversation messages (OpenAI format, auto-converted).
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, system).
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, system, timeoutMs — a per-call override of the constructor's `timeoutMs`; see BA-18).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[AnthropicProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
@@ -142,8 +146,9 @@ class AnthropicProvider {
     // BA-10: some models (e.g. claude-sonnet-5) reject a non-default `temperature` with a 400 — drop it
     // and retry once rather than let the whole call fail. `temperatureDropped` flows back so an upstream
     // receipt (recurse's refineLeaf) can report the effective temperature, not the one the model ignored.
+    const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request(body),
+      request: () => this._request(body, timeoutMs),
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -275,9 +280,10 @@ class AnthropicProvider {
 
   /**
    * @param {Record<string, any>} body
+   * @param {number} [timeoutMs=0] - Idle-socket timeout (ms); 0 disables. See BA-18 / provider-http.
    * @returns {Promise<any>}
    */
-  _request(body) {
+  _request(body, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const payload = JSON.stringify(body);
       const url = new URL(this.baseUrl + '/messages');
@@ -314,6 +320,7 @@ class AnthropicProvider {
           }
         });
       });
+      applyRequestTimeout(req, timeoutMs, 'AnthropicProvider');
       req.on('error', reject);
       req.write(payload);
       req.end();

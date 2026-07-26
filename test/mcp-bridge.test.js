@@ -439,7 +439,12 @@ describe('createMCPBridge', () => {
     });
     const leakBridge = join(TMP, '.leak-bridge.json');
     try {
-      const bridge = await createMCPBridge({ configPaths: [slowConfig], bridgePath: leakBridge, timeout: 300 });
+      // The connect timeout must clear node's cold-start (the child records its pid witness at
+      // module load, and on a slow host that spawn can take ~400-500ms) yet stay far below the
+      // child's 10000ms MOCK_SLOW_INIT, so the server still fails to connect. A tighter bound
+      // (e.g. 300ms) races the child's startup: it gets SIGKILLed before it writes its pid, and
+      // the assertion below reads a file that was never created (ENOENT) rather than testing reaping.
+      const bridge = await createMCPBridge({ configPaths: [slowConfig], bridgePath: leakBridge, timeout: 2000 });
       assert.equal(bridge.servers.length, 0, 'slow server should fail to connect');
       await bridge.close();
 

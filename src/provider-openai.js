@@ -5,6 +5,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
+const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -27,6 +28,10 @@ function isLoopbackHost(hostname) {
  *   field in an error payload can't leak through logs that dump the error
  *   object; `err.message` still carries the API's error message. Turn on for
  *   debugging only.
+ * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or
+ *   never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError`
+ *   (`code: 'ETIMEDOUT'`) instead of hanging until the OS TCP timeout (~2h). `0`/`Infinity`
+ *   disables it (pre-BA-18 behaviour). Overridable per call via `generate(..., { timeoutMs })`.
  */
 
 class OpenAIProvider {
@@ -38,13 +43,15 @@ class OpenAIProvider {
     this.model = options.model || 'gpt-4o-mini';
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
     this.exposeErrorBody = options.exposeErrorBody === true;
+    // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
+    this.timeoutMs = options.timeoutMs;
   }
 
   /**
    * Generate a response from the OpenAI API.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens).
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`; see BA-18).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OpenAIProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
@@ -65,8 +72,9 @@ class OpenAIProvider {
 
     // BA-10: newer models (o1/gpt-5-class) reject a non-default `temperature` with a 400 — drop it and
     // retry once. `temperatureDropped` flows back so an upstream receipt can report the effective value.
+    const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request('/chat/completions', body),
+      request: () => this._request('/chat/completions', body, timeoutMs),
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -124,9 +132,10 @@ class OpenAIProvider {
   /**
    * @param {string} path
    * @param {Record<string, any>} body
+   * @param {number} [timeoutMs=0] - Idle-socket timeout (ms); 0 disables. See BA-18 / provider-http.
    * @returns {Promise<any>}
    */
-  _request(path, body) {
+  _request(path, body, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.baseUrl + path);
       const transport = url.protocol === 'https:' ? https : http;
@@ -168,6 +177,7 @@ class OpenAIProvider {
           }
         });
       });
+      applyRequestTimeout(req, timeoutMs, 'OpenAIProvider');
       req.on('error', reject);
       req.write(payload);
       req.end();
