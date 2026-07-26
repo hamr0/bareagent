@@ -11,9 +11,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   wired — no socket timeout, no `AbortSignal` — so a socket the server silently dropped, or a
   response that never starts, was bounded only by the **OS TCP timeout (~2h on Linux)**. It
   presented to the caller as a *hang*, not a failure (no event, no error, no progress), which made
-  every retry/casualty policy above it inert by construction. Observed by an adopter 3/3 times a job
-  idled the connection 40–56s between turns: a single `generate()` never returned for **38 min**
-  (twice) and **2h24m** (once).
+  every retry/casualty policy above it inert by construction. Observed by an adopter 3/3 times, on a
+  job that idles the connection between turns (measured idle gaps: median ~4s, max ~49s on that job;
+  up to 561s on another): a single `generate()` never returned for **38 min** (twice) and **2h24m**
+  (once).
   - New `timeoutMs` option on all four providers (constructor default **600000ms / 10 min**;
     overridable per call via `generate(..., { timeoutMs })`). It bounds on socket **inactivity**
     (`req.setTimeout`), so a slow-but-streaming response is not killed — only a silent or
