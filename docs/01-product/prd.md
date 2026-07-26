@@ -809,6 +809,40 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.34.0 / provider request-idle timeout (bareloop BA-18) (2026-07-26)
+
+> **Numbering note.** This is **bareloop's** BA-18 (`docs/UPSTREAM-ASKS.md`), not
+> a bareagent-internal BA-number — cross-repo ask numbers can collide.
+
+- **The defect (part 1) was real; the diagnosis (part 2) was a name mismatch.**
+  The ask filed two parts: (1) `AnthropicProvider` sets no request/idle timeout,
+  and (2) "`withRetry` has zero call sites." Grounding both in source before
+  building (the standing BA-2/BA-17 discipline): (1) **confirmed** — `_request`
+  wired only `req.on('error')`, no `timeout`/`setTimeout`/`AbortSignal`, so a
+  hung socket was bounded only by the OS TCP timeout (~2h). (2) **misnamed** —
+  there is no `withRetry`; the primitive is `Retry.call`, and it IS wired around
+  `provider.generate` (`Loop({retry})`, plus `run-plan`'s `stepRetry`), with
+  `DEFAULT_RETRY_ON` already classifying `ETIMEDOUT` transient. So part 2 needs
+  no code — a test + docs prove the seam reaches the table.
+- **Scope: all four http(s) providers, not just Anthropic** (user decision). The
+  same no-timeout `_request` shape existed in OpenAI/Gemini/Ollama; fixing only
+  Anthropic would leave three siblings with the identical hang (the
+  fix-one-sibling footgun). Implemented once in `src/provider-http.js`
+  (`resolveTimeoutMs`/`applyRequestTimeout`), wired at each `_request`. CLIPipe
+  already bounded its child, untouched.
+- **Idle semantics, finite default 600000ms (user decision).** Bounds on socket
+  INACTIVITY (`req.setTimeout`), so a slow-but-streaming response is not killed —
+  only a silent/never-answering socket trips. Because these requests are
+  non-streaming (TTFB ≈ generation time), the default must clear the longest
+  legit completion; 10 min sits above that and well below the OS ceiling. `0`/
+  `Infinity` disable (byte-identical pre-BA-18 behaviour). On trip: a retryable
+  `TimeoutError` (`code:'ETIMEDOUT'`) so a wired `Retry` picks it up.
+- **Same BA-4/5/6/13/17 family** — an under-modeled boundary (a hung socket has
+  no slot in the neutral result shape) rounding optimistically toward
+  "still working." The loopback-server tests reproduce the transport-layer
+  failure faithfully (a socket that accepts but never responds) and were
+  mutation-proven, incl. a guard-OFF negative control that reproduces the hang.
+
 ### v0.33.1 / CLIPipe native turn-unit fix (bareloop BA-17) (2026-07-22)
 
 > **Numbering note.** This is **bareloop's** BA-17 (`docs/UPSTREAM-ASKS.md`),

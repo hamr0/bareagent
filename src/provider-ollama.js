@@ -4,6 +4,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
+const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -14,6 +15,7 @@ const { normalizeStopReason } = require('./provider-stop-reason');
  * @property {string} [model='llama3.2']
  * @property {string} [url='http://localhost:11434']
  * @property {boolean} [exposeErrorBody=false]
+ * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`) instead of hanging until the OS TCP timeout. `0`/`Infinity` disables it. Overridable per call via `generate(..., { timeoutMs })`. (A local Ollama that is loading a large model cold can be slow to first byte — raise this or disable it for very large local models.)
  */
 
 class OllamaProvider {
@@ -25,13 +27,15 @@ class OllamaProvider {
     this.url = options.url || 'http://localhost:11434';
     // See OpenAIProvider: attach full upstream body to err.body only on opt-in.
     this.exposeErrorBody = options.exposeErrorBody === true;
+    // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
+    this.timeoutMs = options.timeoutMs;
   }
 
   /**
    * Generate a response from a local Ollama instance.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`).
+   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`, `timeoutMs` — a per-call override of the constructor's `timeoutMs`; see BA-18).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
    */
@@ -64,8 +68,9 @@ class OllamaProvider {
 
     // BA-10: graceful degrade if a model rejects a non-default `temperature` (Ollama nests it under
     // `options`). Keyed off the API error text, so dormant on models that accept temperature.
+    const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request('/api/chat', body),
+      request: () => this._request('/api/chat', body, timeoutMs),
       hadTemperature: () => body.options?.temperature != null,
       stripTemperature: () => { if (body.options) delete body.options.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -110,9 +115,10 @@ class OllamaProvider {
   /**
    * @param {string} path
    * @param {Record<string, any>} body
+   * @param {number} [timeoutMs=0] - Idle-socket timeout (ms); 0 disables. See BA-18 / provider-http.
    * @returns {Promise<any>}
    */
-  _request(path, body) {
+  _request(path, body, timeoutMs = 0) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.url + path);
       const payload = JSON.stringify(body);
@@ -141,6 +147,7 @@ class OllamaProvider {
           }
         });
       });
+      applyRequestTimeout(req, timeoutMs, 'OllamaProvider');
       req.on('error', reject);
       req.write(payload);
       req.end();
