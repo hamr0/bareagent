@@ -4,7 +4,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
-const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
+const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -15,7 +15,8 @@ const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
  * @property {string} [model='llama3.2']
  * @property {string} [url='http://localhost:11434']
  * @property {boolean} [exposeErrorBody=false]
- * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`) instead of hanging until the OS TCP timeout. `0`/`Infinity` disables it. Overridable per call via `generate(..., { timeoutMs })`. (A local Ollama that is loading a large model cold can be slow to first byte — raise this or disable it for very large local models.)
+ * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`, `context.bound: 'idle'`) instead of hanging until the OS TCP timeout. `0`/`Infinity` disables it. Overridable per call via `generate(..., { timeoutMs })`. (A local Ollama that is loading a large model cold can be slow to first byte — raise this or disable it for very large local models.)
+ * @property {number} [deadlineMs=0] - BA-19: TOTAL call-duration deadline in ms, beside `timeoutMs`. The idle bound resets on any socket activity, so a response that trickles a byte forever never trips it and hangs for hours. This is an absolute, non-resetting ceiling; on trip, `generate()` rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`, `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via `generate(..., { deadlineMs })`. (A cold large-model load is a legitimate long single call — leave this disabled or set it generously for such models.)
  */
 
 class OllamaProvider {
@@ -29,13 +30,15 @@ class OllamaProvider {
     this.exposeErrorBody = options.exposeErrorBody === true;
     // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
     this.timeoutMs = options.timeoutMs;
+    // BA-19: total call-duration deadline (ms). Resolved at call time (default 0 = disabled).
+    this.deadlineMs = options.deadlineMs;
   }
 
   /**
    * Generate a response from a local Ollama instance.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`, `timeoutMs` — a per-call override of the constructor's `timeoutMs`; see BA-18).
+   * @param {Record<string, any>} [options={}] - Options (`temperature`, `maxTokens`, `timeoutMs` — a per-call override of the constructor's `timeoutMs`, see BA-18; `deadlineMs` — a per-call override of the constructor's `deadlineMs`, see BA-19).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OllamaProvider] ...` — on HTTP errors or invalid JSON response.
    */
@@ -69,8 +72,9 @@ class OllamaProvider {
     // BA-10: graceful degrade if a model rejects a non-default `temperature` (Ollama nests it under
     // `options`). Keyed off the API error text, so dormant on models that accept temperature.
     const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
+    const deadlineMs = resolveTimeoutMs(this.deadlineMs, options.deadlineMs, 0, 'deadlineMs');
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request('/api/chat', body, timeoutMs),
+      request: () => this._request('/api/chat', body, timeoutMs, deadlineMs),
       hadTemperature: () => body.options?.temperature != null,
       stripTemperature: () => { if (body.options) delete body.options.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -116,9 +120,10 @@ class OllamaProvider {
    * @param {string} path
    * @param {Record<string, any>} body
    * @param {number} [timeoutMs=0] - Idle-socket timeout (ms); 0 disables. See BA-18 / provider-http.
+   * @param {number} [deadlineMs=0] - Total call-duration deadline (ms); 0 disables. See BA-19 / provider-http.
    * @returns {Promise<any>}
    */
-  _request(path, body, timeoutMs = 0) {
+  _request(path, body, timeoutMs = 0, deadlineMs = 0) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.url + path);
       const payload = JSON.stringify(body);
@@ -147,7 +152,7 @@ class OllamaProvider {
           }
         });
       });
-      applyRequestTimeout(req, timeoutMs, 'OllamaProvider');
+      applyRequestBounds(req, { timeoutMs, deadlineMs }, 'OllamaProvider');
       req.on('error', reject);
       req.write(payload);
       req.end();

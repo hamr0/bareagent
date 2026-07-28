@@ -5,7 +5,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
-const { resolveTimeoutMs, applyRequestTimeout } = require('./provider-http');
+const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -24,7 +24,8 @@ function isLoopbackHost(hostname) {
  * @property {string} [model='gemini-2.5-flash'] - Model ID.
  * @property {string} [baseUrl='https://generativelanguage.googleapis.com/v1beta'] - API base (override for proxies; posts to `${baseUrl}/models/${model}:generateContent`).
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default; `err.message` still carries the API error).
- * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`) instead of hanging until the OS TCP timeout (~2h). `0`/`Infinity` disables it (pre-BA-18 behaviour). Overridable per call via `generate(..., { timeoutMs })`.
+ * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`, `context.bound: 'idle'`) instead of hanging until the OS TCP timeout (~2h). `0`/`Infinity` disables it (pre-BA-18 behaviour). Overridable per call via `generate(..., { timeoutMs })`.
+ * @property {number} [deadlineMs=0] - BA-19: TOTAL call-duration deadline in ms, beside `timeoutMs`. The idle bound resets on any socket activity, so a response that trickles a byte forever never trips it and hangs for hours. This is an absolute, non-resetting ceiling; on trip, `generate()` rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`, `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via `generate(..., { deadlineMs })`.
  */
 
 /**
@@ -43,13 +44,15 @@ class GeminiProvider {
     this.exposeErrorBody = options.exposeErrorBody === true;
     // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
     this.timeoutMs = options.timeoutMs;
+    // BA-19: total call-duration deadline (ms). Resolved at call time (default 0 = disabled).
+    this.deadlineMs = options.deadlineMs;
   }
 
   /**
    * Generate a response from the Gemini API.
    * @param {Message[]} messages - Conversation messages (OpenAI format, auto-converted).
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`; see BA-18).
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[GeminiProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
@@ -112,8 +115,9 @@ class GeminiProvider {
     // BA-10: graceful degrade if a model rejects a non-default `temperature` (Gemini nests it under
     // generationConfig). Keyed off the API error text, so dormant on models that accept temperature.
     const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
+    const deadlineMs = resolveTimeoutMs(this.deadlineMs, options.deadlineMs, 0, 'deadlineMs');
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request(`/models/${this.model}:generateContent`, body, timeoutMs),
+      request: () => this._request(`/models/${this.model}:generateContent`, body, timeoutMs, deadlineMs),
       hadTemperature: () => body.generationConfig?.temperature != null,
       stripTemperature: () => { if (body.generationConfig) delete body.generationConfig.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -180,9 +184,10 @@ class GeminiProvider {
    * @param {string} path
    * @param {Record<string, any>} body
    * @param {number} [timeoutMs=0] - Idle-socket timeout (ms); 0 disables. See BA-18 / provider-http.
+   * @param {number} [deadlineMs=0] - Total call-duration deadline (ms); 0 disables. See BA-19 / provider-http.
    * @returns {Promise<any>}
    */
-  _request(path, body, timeoutMs = 0) {
+  _request(path, body, timeoutMs = 0, deadlineMs = 0) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.baseUrl + path);
       const transport = url.protocol === 'https:' ? https : http;
@@ -219,7 +224,7 @@ class GeminiProvider {
           }
         });
       });
-      applyRequestTimeout(req, timeoutMs, 'GeminiProvider');
+      applyRequestBounds(req, { timeoutMs, deadlineMs }, 'GeminiProvider');
       req.on('error', reject);
       req.write(payload);
       req.end();

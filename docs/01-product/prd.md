@@ -809,6 +809,50 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.35.0 / provider total-duration deadline (bareloop BA-19) (2026-07-28)
+
+> **Numbering note.** This is **bareloop's** BA-19 (`docs/UPSTREAM-ASKS.md`), not
+> a bareagent-internal BA-number — cross-repo ask numbers can collide.
+
+- **The gap was real (unlike BA-18 part 2).** BA-18's `timeoutMs` bounds socket
+  *inactivity* via `req.setTimeout`, which resets on any activity by design — so a
+  "zombie stream" that trickles a byte forever (bytes arriving, response never
+  completing) is invisible to it. An adopter saw one `generate()` run 274 min and
+  end in `ECONNRESET`, not a `TimeoutError`: the reset is the proof of mechanism —
+  bytes *were* flowing, so the idle timer never fired. Nothing bounded *total*
+  call duration. Confirmed in source before building.
+- **Opt-in `deadlineMs`, DISABLED by default (per the ask, and the deliberate
+  contrast with BA-18's finite default).** An absolute, non-resetting wall-clock
+  ceiling (a plain `setTimeout` + `req.destroy`, unref'd + cleared on request
+  close). A deliberately long single call (large `maxTokens`, slow model) is a
+  legitimate multi-minute stream a default deadline would kill — so this is a
+  knob, not a new default. `0`/`Infinity` disable; per-call overridable;
+  `resolveTimeoutMs` gained a `defaultMs` param so the deadline resolves to
+  `0`/disabled by default while the idle bound keeps its 10-min default.
+- **Disable-edge is fail-LOUD for the deadline (review finding 1).** An unset
+  deadline resolves to disabled, but an explicitly-set garbage value
+  (`NaN`/non-numeric) throws a `ValidationError` — the idle bound can fall back to
+  its 10-min default on garbage because that default is a real bound, but the
+  deadline has no safe default, so a silent disable would reintroduce the very hang
+  it prevents. Both bounds now wire through one `applyRequestBounds` seam per
+  `_request` (review finding 2), so a future third bound is added in one place.
+- **Terminal, and distinguishable from the idle trip (user decision:
+  `retryable:false`).** On trip: `code:'EDEADLINE'`, `context.bound:'deadline'`,
+  `retryable:false` — a deadline is a hard ceiling meant to STOP, so it is not
+  auto-retried (retrying would re-spend up to another full `deadlineMs`). The idle
+  trip now also carries `context.bound:'idle'`, so a consumer switches on one
+  uniform field to route which timer fired. A consumer that *wants* retry opts in
+  via `retryOn`. Criterion 3 holds: with `timeoutMs < deadlineMs`, a silent socket
+  trips the idle bound first; only a still-active-but-never-completing stream
+  reaches the deadline.
+- **Same BA-4/5/6/13/17/18 family** — an under-modeled boundary (a zombie stream
+  has no slot in the neutral result shape) rounding optimistically toward
+  "still working." POC + loopback trickling-server tests reproduce it faithfully
+  (a byte every idle/2 ms, never completing) and were mutation-proven, incl. a
+  deadline-OFF negative control that hangs. Filed n=1 (one 274-min hang) — a
+  defense-in-depth knob, not load-bearing for the adopter (their harness-layer
+  watchdog self-heals this class).
+
 ### v0.34.0 / provider request-idle timeout (bareloop BA-18) (2026-07-26)
 
 > **Numbering note.** This is **bareloop's** BA-18 (`docs/UPSTREAM-ASKS.md`), not
