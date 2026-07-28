@@ -2,6 +2,45 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.35.0] - 2026-07-28
+
+### Added
+
+- **BA-19 — a total call-duration deadline (`deadlineMs`) on the http(s) providers, beside the
+  BA-18 idle timeout.** BA-18's `timeoutMs` bounds socket **inactivity** (`req.setTimeout`), and by
+  design it resets on *any* socket activity — so a response that trickles a byte forever (a "zombie
+  stream") never trips it. Bytes keep arriving while the response never completes, and the call
+  hangs until the OS TCP timeout. An adopter observed one `generate()` run **274 minutes** and end
+  in `read ECONNRESET` (not a `TimeoutError`) — the reset is the proof of mechanism: bytes *were*
+  arriving for 4.5h, so the idle timer never fired. `timeoutMs` is the right bound for the quantity
+  it watches; nothing bounded *total* call duration.
+  - New `deadlineMs` option on all four providers — an absolute, **non-resetting** wall-clock
+    ceiling on the whole request. **Disabled by default** (a deliberately long single call — large
+    `maxTokens`, slow model — is legitimate; a default here would kill it). Overridable per call via
+    `generate(..., { deadlineMs })`; same disable idiom as `timeoutMs` (`0`/`Infinity`), and a
+    per-call `null`/`undefined` inherits the instance value. **Disable-edge is fail-loud, not
+    fail-silent:** an *unset* deadline resolves to disabled, but an *explicitly-set* garbage value
+    (`NaN`, a non-numeric string like `'30s'`) throws a `ValidationError` at resolve time rather than
+    silently disabling the deadline and running unbounded for hours — the idle bound can fall back to
+    its 10-min default on garbage because that default *is* a real bound, but the deadline has no safe
+    default to fall back to, so a config mistake must surface (review finding 1).
+  - On trip, `generate()` rejects with a **terminal `TimeoutError`** distinguishable from the idle
+    trip: `code: 'EDEADLINE'`, `context.bound: 'deadline'`, and `retryable: false` — a deadline is a
+    hard ceiling the caller set to **stop**, so it is not auto-retried (retrying would re-spend up to
+    another full `deadlineMs` of tokens/budget). The idle trip now also carries `context.bound:
+    'idle'`, so a consumer can switch on one uniform field to tell which timer fired. A consumer that
+    *wants* to retry a deadline can still opt in via `retryOn`.
+  - When both bounds are armed and `timeoutMs < deadlineMs`, a silent socket trips the idle bound
+    first; only a still-active-but-never-completing stream reaches the deadline.
+  - Implemented once in `src/provider-http.js` (`applyRequestDeadline`; `resolveTimeoutMs` gained a
+    `defaultMs` parameter so the deadline resolves to `0`/disabled by default while the idle bound
+    keeps its 10-min default). Each provider's `_request` wires all bounds through one
+    `applyRequestBounds(req, { timeoutMs, deadlineMs }, name)` seam, so the idle (BA-18) + deadline
+    (BA-19) wiring is not copy-pasted at four call sites and a future third bound is added in one
+    place (review finding 2). CLIPipe already bounds its child process on wall-clock and is unchanged.
+  - **Filed with its own limiting evidence:** n=1 (one 274-minute hang). This is a defense-in-depth
+    knob for consumers who bound total work no other way — not a new default.
+
 ## [0.34.0] - 2026-07-26
 
 ### Added
