@@ -18,7 +18,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   sketch, which never shipped). The judge does not call the sink and does not consume its shape as
   input; its input is the caller's egress **artifact**, and a CONSUMER maps the returned verdict into
   `gate.annotate({ surface: verdict !== 'honored', verdict, where: <rendered string>, meta: { field,
-  stated, returned } })`.
+  stated, returned } })` — for which the pure helper `judgeToAnnotation` is provided (below).
   - **`judge({ request, artifact, provider, maxTokens?, onLlmResult? })
     → { verdict, where, truncated, parseError, costUsd, usage, model, raw }`** (`src/judge.js`,
     exported from `bare-agent`). Composes *around* a provider (like `remember`/`Evaluator`);
@@ -61,6 +61,18 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
     frozen set correctly AND resists every injection style.** The `constantHonored` **negative control**
     MUST fail the set — so the harness can fail. This is bareloop's judged-floor doctrine: a rubric
     close is self-consistency in disguise until it has a judged-floor analog.
+  - **`judgeToAnnotation(verdict, opts?)`** (`src/bareguard-adapter.js`, exported) — a **pure** render
+    of a judge verdict into bareguard's `gate.annotate` shape `{ surface, verdict, where, meta }`. It
+    **never calls the gate** (the caller does) and **imports no bareguard** (structural, like the `Gate`
+    typedef). `surface = verdict !== 'honored'` (the load-bearing fail-open field). `where` is a one-line
+    mechanical address; `meta` is `{field, stated, returned}` only, with `evidence` opt-in via
+    `{ includeEvidence: true }`. It bounds **defensively** against the sink's silent caps (`verdict` 80,
+    `where` 300, `meta` 1000 **bytes**, all-or-nothing) with a **visible `…[clipped]` marker** — evidence
+    especially, so the mechanical facts survive the meta ceiling rather than being wiped with it (loud
+    partial beats silent total loss). It bounds even if the generator bounds at source (a distinct
+    defensive job — it is the last code before a sink that clips silently and never throws). Caps come via
+    `opts.limits`, so bareagent never hardcodes bareguard's PIPE_BUF numbers. Reconciled with the bareguard
+    maintainer (sink shape, field budgets, bound-at-both-points).
   - **The judge is drift-conditional and not a general safety layer** (E6c: a cooperative agent
     drifted 0/3 under a hard cap). It is worth least exactly where a deterministic floor already binds;
     any adopter who *can* express the constraint mechanically should. It annotates — it never merges,

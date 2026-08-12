@@ -12,6 +12,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { judge, parseVerdictJSON, normalizeWhere } = require('../src/judge');
+const { judgeToAnnotation } = require('../src/bareguard-adapter');
 const { scoreCase, gradeRun, calibrate, constantHonored, CALIBRATION_CASES } = require('../src/judge-calibration');
 const { ValidationError, HaltError } = require('../src/errors');
 
@@ -176,6 +177,74 @@ describe('parseVerdictJSON / normalizeWhere', () => {
     assert.equal(normalizeWhere(null), null);
     assert.equal(normalizeWhere(''), null);
     assert.equal(normalizeWhere('   '), null);
+  });
+});
+
+// ── judgeToAnnotation: pure render into bareguard's gate.annotate shape (BA-20) ─
+describe('judgeToAnnotation — pure map to {surface, verdict, where, meta}', () => {
+  const brokeV = { verdict: 'broke', where: { field: 'price', stated: 'under €300', returned: '€400', evidence: 'price is 400 EUR, exceeds the €300 limit' } };
+  const honoredV = { verdict: 'honored', where: { field: 'price', stated: 'under €300', returned: '€280', evidence: '280 < 300' } };
+
+  it('surface = verdict !== honored (the load-bearing fail-open field)', () => {
+    assert.equal(judgeToAnnotation(brokeV).surface, true);
+    assert.equal(judgeToAnnotation(honoredV).surface, false);
+    // A truncated-floored broke, or any non-honored token, surfaces.
+    assert.equal(judgeToAnnotation({ verdict: 'broke' }).surface, true);
+    assert.equal(judgeToAnnotation({ verdict: 'unsure' }).surface, true);
+    assert.equal(judgeToAnnotation({}).surface, true, 'a missing verdict surfaces (never silently honored)');
+  });
+
+  it('renders where as a one-line mechanical address', () => {
+    assert.equal(judgeToAnnotation(brokeV).where, 'price: stated under €300, returned €400');
+  });
+
+  it('meta is {field, stated, returned} ONLY by default — no evidence', () => {
+    assert.deepEqual(judgeToAnnotation(brokeV).meta, { field: 'price', stated: 'under €300', returned: '€400' });
+  });
+
+  it('carries evidence ONLY when opted in', () => {
+    const a = judgeToAnnotation(brokeV, { includeEvidence: true });
+    assert.equal(a.meta.evidence, 'price is 400 EUR, exceeds the €300 limit');
+    assert.equal(a.meta.field, 'price');
+  });
+
+  it('does NOT call a gate (pure — no gate argument, returns a plain object)', () => {
+    const a = judgeToAnnotation(brokeV);
+    assert.equal(typeof a, 'object');
+    assert.deepEqual(Object.keys(a).sort(), ['meta', 'surface', 'verdict', 'where']);
+  });
+
+  it('DEFENSIVELY bounds evidence with a VISIBLE marker so field/stated/returned SURVIVE the meta ceiling', () => {
+    const huge = 'X'.repeat(5000);
+    const a = judgeToAnnotation({ verdict: 'broke', where: { field: 'f', stated: 's', returned: 'r', evidence: huge } }, { includeEvidence: true });
+    // The whole meta object must serialize within the 1000-byte all-or-nothing ceiling...
+    assert.ok(Buffer.byteLength(JSON.stringify(a.meta), 'utf8') <= 1000, 'meta must fit the 1000B ceiling');
+    // ...the mechanical facts must survive (the point: loud partial beats silent total loss)...
+    assert.equal(a.meta.field, 'f');
+    assert.equal(a.meta.stated, 's');
+    assert.equal(a.meta.returned, 'r');
+    // ...and the truncation must be VISIBLE, not silent.
+    assert.ok(a.meta.evidence.endsWith('…[clipped]'), 'truncation carries a visible marker');
+    assert.ok(a.meta.evidence.length < huge.length);
+  });
+
+  it('respects opts.limits (never hardcodes bareguard PIPE_BUF numbers)', () => {
+    const a = judgeToAnnotation({ verdict: 'broke', where: { field: 'x'.repeat(200) } }, { limits: { verdict: 80, where: 20, meta: 1000 } });
+    assert.ok(a.where.length <= 20, 'where clipped to the passed limit');
+    assert.ok(a.where.endsWith('…[clipped]'));
+  });
+
+  it('empty/null where → empty address, empty meta (no crash)', () => {
+    const a = judgeToAnnotation({ verdict: 'honored', where: null });
+    assert.equal(a.where, '');
+    assert.deepEqual(a.meta, {});
+    assert.equal(a.surface, false);
+  });
+
+  it('bare-string where (evidence-only) becomes the address', () => {
+    const a = judgeToAnnotation({ verdict: 'broke', where: { field: null, stated: null, returned: null, evidence: '280 is under 300' } });
+    assert.equal(a.where, '280 is under 300');
+    assert.deepEqual(a.meta, {}, 'no mechanical facts → empty meta by default');
   });
 });
 

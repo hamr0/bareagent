@@ -206,19 +206,19 @@ const v = await judge({
 
 **It is not a general safety layer.** The judge is drift-conditional — worth least exactly where a deterministic floor (a numeric cap, an allowlist) already binds. If you *can* express the constraint mechanically, do that instead. The judge **annotates**; it never merges, publishes, or touches a budget — the caller's close is the only truth.
 
-**Mapping the verdict into bareguard's `gate.annotate` sink (if you use one).** The judge does **not** call `gate.annotate` — you do, in your close stage. bareguard 0.7.0's sink shape is `{ surface, verdict, where, meta }` (the old `{kind, field, stated, returned, text}` sketch never shipped). Map it:
+**Mapping the verdict into bareguard's `gate.annotate` sink (if you use one).** The judge does **not** call `gate.annotate` — you do, in your close stage. Use the shipped pure helper `judgeToAnnotation` to render the verdict into bareguard 0.7.0's `{ surface, verdict, where, meta }` shape (the old `{kind, field, stated, returned, text}` sketch never shipped). It calls no gate and imports no bareguard:
 
 ```javascript
+const { judge, judgeToAnnotation } = require('bare-agent');
+
 const v = await judge({ request, artifact, provider });
-gate.annotate({
-  surface: v.verdict !== 'honored',                 // surface anything not a clean honor
-  verdict: v.verdict,                                // ≤ 80 chars
-  where: renderWhere(v.where),                       // a STRING ≤ 300 chars — our `where` is an OBJECT, render it
-  meta: { field: v.where?.field, stated: v.where?.stated, returned: v.where?.returned }, // ≤ 1000 BYTES
-});
+gate.annotate(judgeToAnnotation(v));               // { surface, verdict, where, meta } — you make the gate call
+// surface = v.verdict !== 'honored' (the load-bearing fail-open field)
+// where   = a one-line mechanical address; meta = { field, stated, returned }
+// carry the free-text evidence only if you want it: judgeToAnnotation(v, { includeEvidence: true })
 ```
 
-Three gate caps are load-bearing and enforced by the sink, **silently**: `verdict` clips at 80, `where` clips at 300 (no marker), and `meta` is **all-or-nothing at 1000 bytes** — one byte over and the *whole* `meta` object is replaced with `{_truncated, bytes}`, losing field/stated/returned entirely. So keep `meta` small and **bound the `evidence` quote** when you fold it into the `where` string (~10 lines of a diff/error is already ~750 bytes). There is no partial credit at the `meta` boundary.
+Three gate caps are load-bearing and enforced by the sink **silently**: `verdict` clips at 80 chars, `where` at 300 chars (no marker), and `meta` is **all-or-nothing at 1000 bytes** — one byte over and the *whole* `meta` object is replaced with `{_truncated, bytes}`, losing field/stated/returned entirely. `judgeToAnnotation` bounds **defensively** against all three with a **visible** `…[clipped]` marker (evidence especially — a loud partial row beats a silently-wiped one), and takes `opts.limits` so you can pass bareguard's real numbers rather than trust the defaults. It bounds even if your generator also bounds at source — a distinct defensive job, because it is the last code before a sink that clips silently and never throws.
 
 **Calibrate before you trust a tier.** A judge is only as good as its floor. The shipped calibration harness grades a frozen labeled set (with a €280-compliant false-positive trap) plus a 5-style injection battery, and **admits a tier only if it clears a pre-registered floor with zero reds AND resists every injection style** — a `constantHonored` negative control proves the harness can fail. The clear-case set is byte-equivalent to bareguard's frozen E6i fixture (`sha256(cases)=a840832…`), so the 7/7 is comparable to E6i's. Injection resistance is established at `claude-haiku-4-5` only; **re-run the harness on any tier you deviate to.**
 
