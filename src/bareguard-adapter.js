@@ -296,4 +296,134 @@ function defaultActionTranslator(toolName, args, ctx) {
   return { type: toolName, args, _ctx: ctx ?? null };
 }
 
-module.exports = { wireGate, defaultActionTranslator };
+// ── judge → gate.annotate mapping (BA-20) ─────────────────────────────────────
+// A PURE render function: it maps a `judge()` verdict into the shape bareguard's
+// `gate.annotate` accepts, and NEVER calls the gate — the caller (e.g. bareloop's
+// close stage) makes the `gate.annotate(...)` call. It imports nothing from
+// bareguard (the annotation shape is accessed STRUCTURALLY, same pattern as the
+// `Gate` typedef above), so wiring it never breaks the peer-dep boundary.
+//
+// bareguard 0.7.0's sink is `{ surface, verdict, where, meta }` (NOT the pre-E6
+// `{kind,...,text}` sketch). Three caps are enforced by the sink SILENTLY and are
+// footguns: `verdict` clips at 80 chars, `where` clips at 300 chars (no marker),
+// and `meta` is ALL-OR-NOTHING at 1000 bytes — one byte over and the whole object
+// is replaced with `{_truncated,bytes}`, taking field/stated/returned down WITH the
+// evidence. So this adapter bounds DEFENSIVELY with a VISIBLE marker: it is the last
+// code before that sink, a bound that never fires costs nothing, and the one time it
+// fires it is the difference between a loud partial fact and one that lost the
+// mechanical facts entirely. It bounds `evidence` here regardless of whether the
+// caller also bounds at source (a distinct defensive job, not a duplicate — the gap
+// this closes is "a stated bound nobody owned"). Caps come via `opts.limits` so
+// bareagent never hardcodes bareguard's PIPE_BUF numbers.
+//
+// SCOPE OF THE GUARANTEE (narrowed with the bareguard maintainer, 2026-08-12): this
+// "facts survive the ceiling" guarantee holds for the DRAINED fact and the humanChannel
+// EVENT — the source bound this adapter can actually reach. It does NOT extend to the
+// PERSISTED AUDIT ROW when the consumer has a redactor configured: redaction runs
+// DOWNSTREAM of this adapter and EXPANDS every match into a longer `[REDACTED:…]` tag,
+// so a `meta` built entirely from in-budget values can still blow the audit line's
+// atomic-append cap and be replaced WHOLESALE — no bound applied here can prevent that.
+// (Unlike the silent source clip, the audit clip does carry a marker — `_truncated` for
+// an over-cap row, `_unserializable` for a circular/BigInt meta — so a loss detector
+// there must check BOTH markers, not just `_truncated`.)
+
+const CLIP_MARKER = '…[clipped]';
+/** @param {string} s */
+const byteLen = (s) => Buffer.byteLength(s, 'utf8');
+
+/** Char-bounded clip with a visible marker (for `verdict`/`where`, which the sink caps by CHARS). */
+function clipChars(str, maxChars) {
+  const s = String(str == null ? '' : str);
+  if (s.length <= maxChars) return s;
+  return s.slice(0, Math.max(0, maxChars - CLIP_MARKER.length)) + CLIP_MARKER;
+}
+
+/** Byte-bounded clip with a visible marker, never splitting a multibyte char (for the byte-capped `meta`). */
+function clipBytes(str, maxBytes) {
+  let s = String(str == null ? '' : str);
+  if (byteLen(s) <= maxBytes) return s;
+  const budget = Math.max(0, maxBytes - byteLen(CLIP_MARKER));
+  if (s.length > budget) s = s.slice(0, budget); // coarse cut first (chars ≥ bytes), then shave to fit
+  while (s.length > 0 && byteLen(s) > budget) s = s.slice(0, -1);
+  return s + CLIP_MARKER;
+}
+
+/** Render a JudgeWhere object to a one-line mechanical address. Empty when there's nothing to say. */
+function renderWhereString(where) {
+  if (!where || typeof where !== 'object') return '';
+  const field = where.field != null ? String(where.field) : '';
+  const parts = [];
+  if (where.stated != null) parts.push(`stated ${where.stated}`);
+  if (where.returned != null) parts.push(`returned ${where.returned}`);
+  const tail = parts.join(', ');
+  if (field && tail) return `${field}: ${tail}`;
+  if (field || tail) return field || tail;
+  return where.evidence != null ? String(where.evidence) : ''; // bare-string where → evidence is the only address
+}
+
+/**
+ * @typedef {object} AnnotationLimits
+ * @property {number} [verdict=80] - Max chars for `verdict` (bareguard clips silently at 80).
+ * @property {number} [where=300] - Max chars for `where` (bareguard clips silently at 300).
+ * @property {number} [meta=1000] - Max BYTES for the serialized `meta` (bareguard is all-or-nothing at 1000).
+ *
+ * @typedef {object} JudgeToAnnotationOptions
+ * @property {boolean} [includeEvidence=false] - Carry the free-text `evidence` into `meta` (bounded here).
+ * @property {AnnotationLimits} [limits] - Override the sink caps (pass bareguard's real numbers; not imported here).
+ *
+ * @typedef {object} Annotation
+ * @property {boolean} surface - `verdict !== 'honored'`. The load-bearing fail-open field — never omitted.
+ * @property {string} verdict - The verdict, char-bounded.
+ * @property {string} where - A one-line mechanical address, char-bounded.
+ * @property {Record<string, string>} meta - `{field, stated, returned}` (+ bounded `evidence` if opted in).
+ */
+
+/**
+ * Map a `judge()` verdict into bareguard's `gate.annotate` shape. PURE — returns a ready-to-pass object and
+ * NEVER calls the gate; the caller makes `gate.annotate(judgeToAnnotation(verdict))`. Imports no bareguard.
+ *
+ * @param {import('./judge').JudgeVerdict | { verdict?: string, where?: any }} verdict - a `judge()` return value.
+ * @param {JudgeToAnnotationOptions} [opts]
+ * @returns {Annotation}
+ */
+function judgeToAnnotation(verdict, opts = {}) {
+  const v = verdict && typeof verdict === 'object' ? verdict : {};
+  const limits = { verdict: 80, where: 300, meta: 1000, ...(opts && opts.limits) };
+  const includeEvidence = !!(opts && opts.includeEvidence);
+  const where = v.where && typeof v.where === 'object' ? v.where : null;
+
+  /** @type {Record<string, string>} */
+  const meta = {};
+  if (where) {
+    if (where.field != null) meta.field = String(where.field);
+    if (where.stated != null) meta.stated = String(where.stated);
+    if (where.returned != null) meta.returned = String(where.returned);
+    if (includeEvidence && where.evidence != null) {
+      // Fit evidence into the byte budget LEFT by the mechanical facts, so field/stated/returned SURVIVE
+      // (loud partial beats the sink's silent total loss). If the base already fills the budget, evidence
+      // drops to just the marker rather than blowing the whole object.
+      const base = byteLen(JSON.stringify({ ...meta, evidence: '' }));
+      meta.evidence = clipBytes(String(where.evidence), Math.max(0, limits.meta - base));
+    }
+  }
+  // Final defensive guard: even the mechanical facts alone must not blow the all-or-nothing ceiling.
+  // Clip the longest string value (visible marker) until the serialized object fits — never let the sink wipe it.
+  let guard = 0;
+  while (byteLen(JSON.stringify(meta)) > limits.meta && guard++ < 100) {
+    let key = null; let max = -1;
+    for (const k of Object.keys(meta)) {
+      if (typeof meta[k] === 'string' && meta[k].length > max) { key = k; max = meta[k].length; }
+    }
+    if (key == null) break;
+    meta[key] = clipBytes(meta[key], Math.max(0, byteLen(meta[key]) - Math.ceil(byteLen(meta[key]) * 0.25) - byteLen(CLIP_MARKER)));
+  }
+
+  return {
+    surface: v.verdict !== 'honored', // fail-open guard: anything not a clean honor surfaces
+    verdict: clipChars(v.verdict, limits.verdict),
+    where: clipChars(renderWhereString(where), limits.where),
+    meta,
+  };
+}
+
+module.exports = { wireGate, defaultActionTranslator, judgeToAnnotation };

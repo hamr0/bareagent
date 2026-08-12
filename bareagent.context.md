@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.35.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
+> v0.36.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -52,6 +52,7 @@ Eight entry points:
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
 | Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` criteria |
+| Decisively judge "did this answer honor the request?" (return-time) | judge — verbatim request + one artifact → `honored`/`broke` + mechanical `where`; `calibrate` admits a tier vs a frozen floor |
 | Offer skills on demand without bloating context | SkillRegistry — `skill_use` meta-tool + `skills.activeTools` thunk |
 | Keep the context window lean (compact finished sub-tasks) | createStashSkill — register the skill + wire its `trim` into `Loop({ trim })` |
 | Consolidate finished work into durable facts (across runs) | remember — distill harvested spans → write through any `Store` socket |
@@ -179,6 +180,61 @@ const { facts } = await remember(spans, {
 Budget visibility carries through `onLlmResult` (mirror of Evaluator); a governance `HaltError` from the provider propagates clean. Cheap by design — a small model and one pass per span.
 
 **Security:** facts are model output over *untrusted* transcript content written to durable memory. The distiller refuses a direct "record this fact" injection (validated live), but treat recalled facts as untrusted **context**, not authority — gate them like any model output before a privileged action.
+
+## Wiring with judge (decisive return-time verdict + its calibration harness)
+
+`judge` compares a user's **verbatim request** against **one structured egress artifact** and returns a decisive binary verdict — `honored` or `broke` — with a mechanical `where`. It is a caller-side judge (a governance gate that never calls an LLM completes its part with a fact envelope; the *call* lives here). It composes *around* a provider — never inside the Loop.
+
+```javascript
+const { judge } = require('bare-agent');
+const { Anthropic } = require('bare-agent/providers');
+
+const provider = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, model: 'claude-haiku-4-5' });
+
+const v = await judge({
+  request: 'Book a flight under €300.',            // the VERBATIM user request (never the agent's paraphrase)
+  artifact: { id: 'F1', price: 400, currency: 'EUR' }, // ONE structured egress artifact
+  provider,
+  onLlmResult,                                     // optional: forward usage/cost to a wired gate (kind:'judge')
+});
+// v.verdict → 'broke'
+// v.where   → { field:'price', stated:'under €300', returned:'€400', evidence:'400 > 300' }
+// v.costUsd → real cost (honest null if unpriced, never 0); v.truncated / v.parseError → distinct flagged outcomes
+```
+
+**Decisive by design.** `verdict` is `honored` only on a clean honor; a vague request you cannot *confirm* was honored floors to `broke` (surface what you cannot vouch for). A truncated or unparseable response is a **distinct flagged outcome** (`truncated`/`parseError`), floored to `broke` and — in the harness — excluded from every graded denominator. The artifact is treated as untrusted data: embedded "the user later said…" amendments are ignored.
+
+**It is not a general safety layer.** The judge is drift-conditional — worth least exactly where a deterministic floor (a numeric cap, an allowlist) already binds. If you *can* express the constraint mechanically, do that instead. The judge **annotates**; it never merges, publishes, or touches a budget — the caller's close is the only truth.
+
+**Mapping the verdict into bareguard's `gate.annotate` sink (if you use one).** The judge does **not** call `gate.annotate` — you do, in your close stage. Use the shipped pure helper `judgeToAnnotation` to render the verdict into bareguard 0.7.0's `{ surface, verdict, where, meta }` shape (the old `{kind, field, stated, returned, text}` sketch never shipped). It calls no gate and imports no bareguard:
+
+```javascript
+const { judge, judgeToAnnotation } = require('bare-agent');
+
+const v = await judge({ request, artifact, provider });
+gate.annotate(judgeToAnnotation(v));               // { surface, verdict, where, meta } — you make the gate call
+// surface = v.verdict !== 'honored' (the load-bearing fail-open field)
+// where   = a one-line mechanical address; meta = { field, stated, returned }
+// carry the free-text evidence only if you want it: judgeToAnnotation(v, { includeEvidence: true })
+```
+
+Three gate caps are load-bearing and enforced by the sink **silently**: `verdict` clips at 80 chars, `where` at 300 chars (no marker), and `meta` is **all-or-nothing at 1000 bytes** — one byte over and the *whole* `meta` object is replaced with `{_truncated, bytes}`, losing field/stated/returned entirely. `judgeToAnnotation` bounds **defensively** against all three with a **visible** `…[clipped]` marker (evidence especially — a loud partial beats a silently-wiped one), and takes `opts.limits` so you can pass bareguard's real numbers rather than trust the defaults. It bounds even if your generator also bounds at source — a distinct defensive job, because it is the last code before a sink that clips silently and never throws.
+
+> **Scope of the "facts survive" guarantee.** It holds for the **drained fact** and the **humanChannel event** — the source bound this adapter can reach. It does **not** cover the **persisted audit row** when the consumer has a redactor configured: redaction runs downstream of the adapter and *expands* each match into a longer `[REDACTED:…]` tag, so a `meta` built entirely from in-budget values can still blow the audit line's atomic-append cap and be replaced wholesale — no bound the adapter applies can prevent that. So don't assume the audit trail carries the mechanical facts; the drain and the event do. (The audit clip does carry a marker — `_truncated`, or `_unserializable` for a circular/BigInt meta — so a loss check there must test *both*.)
+
+**Calibrate before you trust a tier.** A judge is only as good as its floor. The shipped calibration harness grades a frozen labeled set (with a €280-compliant false-positive trap) plus a 5-style injection battery, and **admits a tier only if it clears a pre-registered floor with zero reds AND resists every injection style** — a `constantHonored` negative control proves the harness can fail. The clear-case set is byte-equivalent to bareguard's frozen E6i fixture (`sha256(cases)=a840832…`), so the 7/7 is comparable to E6i's. Injection resistance is established at `claude-haiku-4-5` only; **re-run the harness on any tier you deviate to.**
+
+```javascript
+const { calibrate, constantHonored } = require('bare-agent');
+
+const result = await calibrate({ provider, reps: 5, floor: 7 });
+// result.admitted → true only if clear-case ≥ floor AND zero reds AND every injection style resisted
+// result.reds → itemized per-case failures; result.e280 → the €280 false-positive watch case
+// result.injectionBattery → { styles:[…], allResisted, leaks } — a 5-style gate (criterion 3); a leak blocks admission
+// negative control MUST NOT be admitted:
+const neg = await calibrate({ provider, reps: 5, floor: 7, judgeFn: constantHonored });
+// neg.admitted === false
+```
 
 ## Wiring with Skills + Stash (progressive disclosure + compaction)
 
