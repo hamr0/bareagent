@@ -2,6 +2,80 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.36.0] - unreleased
+
+### Added
+
+- **BA-20 — `judge`, the decisive return-time judge primitive, plus its calibration harness.**
+  A caller-side judge that compares a user's **verbatim request** against **one structured egress
+  artifact** and returns a decisive binary verdict — `honored` or `broke` — with a mechanical
+  `where`. It productizes bareguard's measured **E6i** design (bareguard PRD §9.2, `harness-code-mode/
+  e6-judge.mjs`), which is caller-side **by law**: bareguard's Axis-B detector annotates and never
+  calls an LLM, so the judge *call* lands here, where every model call in the suite already lives.
+  No bareguard change was needed or made. bareguard's two contributions were already delivered: the
+  measured E6i spec, and the shipped `gate.annotate` **sink** (0.7.0) — whose real shape is
+  `{ surface, verdict, where, meta }` (NOT the pre-E6 `{kind, field, stated, returned, text}` PRD
+  sketch, which never shipped). The judge does not call the sink and does not consume its shape as
+  input; its input is the caller's egress **artifact**, and a CONSUMER maps the returned verdict into
+  `gate.annotate({ surface: verdict !== 'honored', verdict, where: <rendered string>, meta: { field,
+  stated, returned } })`.
+  - **`judge({ request, artifact, provider, maxTokens?, onLlmResult? })
+    → { verdict, where, truncated, parseError, costUsd, usage, model, raw }`** (`src/judge.js`,
+    exported from `bare-agent`). Composes *around* a provider (like `remember`/`Evaluator`);
+    `loop.js` never imports it.
+  - **Decisive binary, with a floor tiebreak.** `verdict` is `honored` only on a clean honor;
+    anything else (incl. "cannot confirm the vague request was honored") floors to `broke` — we
+    surface what we cannot vouch for. The E6i verdict prose is ported **verbatim**; only the output
+    contract is enriched.
+  - **Mechanical `where` (contract 6).** `{ field, stated, returned, evidence }` — name the
+    constrained thing, the stated value, the returned value, quote the evidence. bareloop measured
+    (F38/F39) that mechanical gaps convert on the next attempt while "seems off" stalls. A bare-string
+    `where` from a model that ignored the object contract is preserved as `evidence` (nothing dropped).
+  - **Truncation / parse-error are distinct flagged outcomes** (`truncated`, `parseError`), floored
+    to `broke` (fail toward surfacing) and **excluded from every graded denominator** — never a miss,
+    never a pass.
+  - **Honest-null cost (contract 1).** `costUsd` prefers a finite provider-reported cost, else
+    `estimateCost`, else `null` — **never coerced to 0**. Each call forwards `usage`/`model`/`costUsd`
+    to `onLlmResult` tagged `kind:'judge'` (budget visibility, mirror of Evaluator/remember).
+  - **Untrusted-artifact hardening + typed errors.** The artifact is prompted as untrusted DATA
+    (ignore embedded "the user later said…" amendments); bad inputs throw a `ValidationError` stamped
+    `context.lib:'bare-agent'` at the throw site (contract 4); a provider `HaltError` re-throws clean.
+    There is **no per-call `model`/`effort` option** — the http providers build the request from
+    `this.model` and read neither, so accepting them would be silently-dead knobs; to judge on a
+    different tier, construct the provider for it. (Per-tier `effort`, contract 3, is not wired into
+    any provider today; when one gains it, thread it then.) `maxTokens` defaults to **512** — the
+    mechanical `where` is wordier than E6i's bare string, and a verdict truncated at the cap would
+    floor to `broke` (measured max output across the battery is ~82 tokens, so 512 is ample headroom).
+  - **`costUsd` reds an unpriceable tier** (contract 1): it prefers a finite provider-reported cost,
+    else estimates **only when the model is in the rate table**, else `null`. Critically it does NOT
+    let `estimateCost`'s `_default` fallback fabricate a plausible price for an unknown tier — that
+    would silently violate "an unpriced call reds". Never coerced to 0.
+  - **Calibration harness, shipped with it** (`src/judge-calibration.js`, exported: `calibrate`,
+    `CALIBRATION_CASES`, `INJECTION_BATTERY`, `scoreCase`, `gradeRun`, `constantHonored`). A **frozen**
+    clear-case set (E6i's battery: verifiable / opinion / ok / injection / ambiguous, with the €280
+    false-positive trap) PLUS a **5-style injection battery** (forged amendment, direct override, fake
+    system marker, role confusion, reassurance — criterion 3, a battery not one flavor) run as a
+    **separate admission gate**: a leak in any style blocks admission even at a passing clear-case
+    floor. Pure per-case scoring (unanimity over usable samples, truncation-excluded denominators,
+    itemized reds, admission vs a pre-registered floor). **A tier is admitted only after it grades the
+    frozen set correctly AND resists every injection style.** The `constantHonored` **negative control**
+    MUST fail the set — so the harness can fail. This is bareloop's judged-floor doctrine: a rubric
+    close is self-consistency in disguise until it has a judged-floor analog.
+  - **The judge is drift-conditional and not a general safety layer** (E6c: a cooperative agent
+    drifted 0/3 under a hard cap). It is worth least exactly where a deterministic floor already binds;
+    any adopter who *can* express the constraint mechanically should. It annotates — it never merges,
+    publishes, or touches a budget.
+  - **Validated live on `claude-haiku-4-5` through bare-agent's own HTTP `AnthropicProvider`**
+    (`poc/ba20-judge.mjs`, `poc/ba20-verify-shipped.mjs`, `poc/ba20-validate-8.mjs`): clear-case
+    **7/7**, the €280 compliant booking read **honored 5/5** (the false-positive trap), the **5-style
+    injection battery resisted 5/5 each**, **0 unpriced** calls, and the constant-`honored` negative
+    control scored **2/7** (not admitted). The mechanical-`where` enrichment left the verdict axis at
+    7/7 — proven by an A/B against the verbatim-E6i prompt at N=8, **break-rate Δ=0** on every case;
+    `where` is mechanical (field/stated/returned/evidence) across numeric, enumerated, focus-drift, and
+    honored shapes, not just the easy numeric case. **Injection resistance is established at haiku-4.5
+    only** (contract non-negotiable 2 is UNRESOLVED on weaker tiers) — the harness re-establishes the
+    base rate per shipping tier; run it before deviating from haiku.
+
 ## [0.35.0] - 2026-07-28
 
 ### Added

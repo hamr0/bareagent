@@ -809,6 +809,67 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.36.0 / decisive return-time judge + calibration harness (bareloop BA-20) (2026-08-12)
+
+> **Numbering note.** This is **bareloop's** BA-20 (`docs/UPSTREAM-ASKS.md`), not a
+> bareagent-internal number. It was first filed as `BJ-1` proposing a new *barejudge*
+> package and re-aimed at bare-agent the same day on hamr's ruling ("no new lib for one
+> primitive; if the gate rule is not to call an LLM then it completes its part and
+> bare-agent does the call").
+
+- **Where it lands is settled by law, not preference.** The measured judge design (E6i)
+  lives in bareguard's research corpus, but bareguard's locked design forbids it calling an
+  LLM (its Axis-B detector *annotates*, never decides). So the judge **call** is caller-side
+  by law and lands in bare-agent — where every model call in the suite already lives. **No
+  bareguard change was requested or made:** its two contributions (the measured E6i spec +
+  the shipped `gate.annotate` sink, 0.7.0) were already delivered. There is no
+  "bareguard first" sequencing — the dependency is one-way and already satisfied.
+  - **Sink-shape correction (reconciled with the bareguard maintainer session, 2026-08-12):** the
+    shipped `gate.annotate` sink is `{ surface, verdict, where, meta }`, NOT the pre-E6 PRD sketch
+    `{kind, field, stated, returned, text}` (that shape never shipped; `kind` was killed by E6e). The
+    judge does NOT call the sink — a CONSUMER maps the verdict via
+    `gate.annotate({ surface: verdict !== 'honored', verdict, where: <string>, meta:{field,stated,returned} })`.
+    Two load-bearing constraints from the shipped gate: `where` is a **string** (our `JudgeWhere` is an
+    object → the adapter renders it to one line + puts field/stated/returned under `meta`), and the caps
+    are `verdict ≤80` chars, `where ≤300` (silent clip), `meta ≤1000` BYTES (all-or-nothing — over budget
+    replaces the whole object with `{_truncated,bytes}`). The adapter must bound the `evidence` quote.
+- **POC-first proved the riskiest assumption before building.** E6i was measured via
+  `CLIPipe → local claude CLI` (a subscription); bare-agent ships on its own HTTP
+  `AnthropicProvider` (different system-prompt handling, sampling). `poc/ba20-judge.mjs`
+  ported `judgeDecisive` verbatim through the HTTP provider and reproduced the result on
+  `claude-haiku-4-5`: clear-case 7/7, €280 honored 5/5, injection resisted 5/5, negative
+  control 2/7. Pre-registered EFFECT/WRONG-SIGN/NEG-CONTROL readouts before the run.
+- **E6i is the design of record — ported verbatim, not redesigned.** The decisive
+  binary (`honored`/`broke`) with a floor tiebreak (cannot-confirm → `broke`), verbatim-request
+  anchor, and answer-as-data are kept exactly. Rejected alternatives stay rejected (confidence
+  scale E6f/E6g, `kind` classification E6e, deterministic carve-out E6h). The *only* enrichment
+  is the **mechanical `where`** `{field, stated, returned, evidence}` (contract 6) — an additive
+  output-format change, re-validated live (`poc/ba20-verify-shipped.mjs`) to leave the verdict
+  axis at 7/7.
+- **The calibration harness is half the deliverable, not an afterthought.** A tier is admitted
+  only after it grades the frozen E6i battery correctly against a pre-registered floor with zero
+  reds; a `constantHonored` negative control MUST fail the set (judged-floor doctrine). Truncation/
+  parse-error are excluded from graded denominators; cost is an honest null. Shipped as
+  `src/judge-calibration.js`, exported.
+- **Disconfirming evidence carried, per the BA-7 precedent.** Injection resistance is established
+  at `haiku-4.5` ONLY (contract non-negotiable 2 is UNRESOLVED on weaker tiers) — the harness
+  re-establishes the base rate per shipping tier. The judge is DRIFT-CONDITIONAL (E6c: 0/3 drift
+  under a hard cap) — not a general safety layer; where a deterministic floor binds, use it.
+- **A self-audit found and fixed real gaps before release** (`poc/ba20-validate-8.mjs`):
+  (1) per-call `model`/`effort` options were **dead knobs** — the http providers build from `this.model`
+  and read neither — so they were removed (construct a provider for the tier; per-tier `effort`/contract-3
+  is unwired in every provider today, threaded when one gains it); (2) `costUsd` was letting
+  `estimateCost`'s `_default` fallback fabricate a price for an unknown tier, silently violating "unpriced
+  reds" — now it prices only in-table models else `null`; (3) the single forged-preference injection case
+  was expanded to a **5-style injection battery** run as a separate admission gate (criterion 3, "a battery
+  not one flavor"). Items validated as NOT-defects and left alone: token headroom (measured max ~82 vs the
+  512 cap), mechanical-`where` across all case shapes, verdict-axis stability (A/B Δ=0 at N=8), and the E6b
+  sprawl clause (no measured degradation on the tested scenario — kept as a documented usage constraint, not
+  enforced). Contract 5 (scrub) has no persist site in bare-agent, so it lands at the consumer's persist
+  boundary; `raw` is documented as scrub-before-persist.
+- **Consumed by bareloop by version bump** (it becomes N4's `judged` close stage, `offer:false` by
+  law); no bareloop-side shim, no new production dependency.
+
 ### v0.35.0 / provider total-duration deadline (bareloop BA-19) (2026-07-28)
 
 > **Numbering note.** This is **bareloop's** BA-19 (`docs/UPSTREAM-ASKS.md`), not
