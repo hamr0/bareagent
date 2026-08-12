@@ -833,6 +833,20 @@ re-litigated unless the user explicitly asks.
     object → the adapter renders it to one line + puts field/stated/returned under `meta`), and the caps
     are `verdict ≤80` chars, `where ≤300` (silent clip), `meta ≤1000` BYTES (all-or-nothing — over budget
     replaces the whole object with `{_truncated,bytes}`). The adapter must bound the `evidence` quote.
+  - **Guarantee-scope narrowing (same maintainer session, follow-up):** the adapter's "facts survive
+    the ceiling" guarantee holds for the **drained fact** and the **humanChannel event** (the SOURCE
+    bound — verdict 80 / where 300 chars / meta 1000 bytes). It does NOT extend to the **persisted audit
+    row** when a redactor is configured: redaction runs DOWNSTREAM of the adapter and EXPANDS every match
+    into a longer `[REDACTED:…]` tag, so a `meta` built entirely from in-budget values can still blow the
+    audit line's atomic-append cap (~3500 bytes) and be replaced WHOLESALE — measured on the shipped gate,
+    a 355-byte legal meta persisted as `{_truncated:true,bytes:6977}`. No bound the adapter applies can
+    prevent that (the expansion is not reachable from here). Two other audit-side loss modes the maintainer
+    surfaced: an UNSERIALIZABLE meta (circular ref / BigInt) becomes `{_unserializable:true}` (a DIFFERENT
+    marker, same total loss — a loss detector must check both, not just `_truncated`); and the audit `where`
+    clip DOES carry a `[TRUNCATED]` marker + root `_truncated:true`, so "clips silently, no marker" was only
+    ever true of the SOURCE clip, not the persisted row. `judgeToAnnotation` returns a single object (never
+    an array), so bareguard's `typeof [] === 'object'` fail-open — `gate.annotate([fact])` buffers a dead
+    `surface:false` fact routing as `honored` — cannot bite it; do not map over verdicts into the sink.
 - **POC-first proved the riskiest assumption before building.** E6i was measured via
   `CLIPipe → local claude CLI` (a subscription); bare-agent ships on its own HTTP
   `AnthropicProvider` (different system-prompt handling, sampling). `poc/ba20-judge.mjs`

@@ -310,11 +310,22 @@ function defaultActionTranslator(toolName, args, ctx) {
 // is replaced with `{_truncated,bytes}`, taking field/stated/returned down WITH the
 // evidence. So this adapter bounds DEFENSIVELY with a VISIBLE marker: it is the last
 // code before that sink, a bound that never fires costs nothing, and the one time it
-// fires it is the difference between a loud partial row and a row that lost the
+// fires it is the difference between a loud partial fact and one that lost the
 // mechanical facts entirely. It bounds `evidence` here regardless of whether the
 // caller also bounds at source (a distinct defensive job, not a duplicate — the gap
 // this closes is "a stated bound nobody owned"). Caps come via `opts.limits` so
 // bareagent never hardcodes bareguard's PIPE_BUF numbers.
+//
+// SCOPE OF THE GUARANTEE (narrowed with the bareguard maintainer, 2026-08-12): this
+// "facts survive the ceiling" guarantee holds for the DRAINED fact and the humanChannel
+// EVENT — the source bound this adapter can actually reach. It does NOT extend to the
+// PERSISTED AUDIT ROW when the consumer has a redactor configured: redaction runs
+// DOWNSTREAM of this adapter and EXPANDS every match into a longer `[REDACTED:…]` tag,
+// so a `meta` built entirely from in-budget values can still blow the audit line's
+// atomic-append cap and be replaced WHOLESALE — no bound applied here can prevent that.
+// (Unlike the silent source clip, the audit clip does carry a marker — `_truncated` for
+// an over-cap row, `_unserializable` for a circular/BigInt meta — so a loss detector
+// there must check BOTH markers, not just `_truncated`.)
 
 const CLIP_MARKER = '…[clipped]';
 /** @param {string} s */

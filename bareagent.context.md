@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.35.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
+> v0.36.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.13.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
 
@@ -218,7 +218,9 @@ gate.annotate(judgeToAnnotation(v));               // { surface, verdict, where,
 // carry the free-text evidence only if you want it: judgeToAnnotation(v, { includeEvidence: true })
 ```
 
-Three gate caps are load-bearing and enforced by the sink **silently**: `verdict` clips at 80 chars, `where` at 300 chars (no marker), and `meta` is **all-or-nothing at 1000 bytes** — one byte over and the *whole* `meta` object is replaced with `{_truncated, bytes}`, losing field/stated/returned entirely. `judgeToAnnotation` bounds **defensively** against all three with a **visible** `…[clipped]` marker (evidence especially — a loud partial row beats a silently-wiped one), and takes `opts.limits` so you can pass bareguard's real numbers rather than trust the defaults. It bounds even if your generator also bounds at source — a distinct defensive job, because it is the last code before a sink that clips silently and never throws.
+Three gate caps are load-bearing and enforced by the sink **silently**: `verdict` clips at 80 chars, `where` at 300 chars (no marker), and `meta` is **all-or-nothing at 1000 bytes** — one byte over and the *whole* `meta` object is replaced with `{_truncated, bytes}`, losing field/stated/returned entirely. `judgeToAnnotation` bounds **defensively** against all three with a **visible** `…[clipped]` marker (evidence especially — a loud partial beats a silently-wiped one), and takes `opts.limits` so you can pass bareguard's real numbers rather than trust the defaults. It bounds even if your generator also bounds at source — a distinct defensive job, because it is the last code before a sink that clips silently and never throws.
+
+> **Scope of the "facts survive" guarantee.** It holds for the **drained fact** and the **humanChannel event** — the source bound this adapter can reach. It does **not** cover the **persisted audit row** when the consumer has a redactor configured: redaction runs downstream of the adapter and *expands* each match into a longer `[REDACTED:…]` tag, so a `meta` built entirely from in-budget values can still blow the audit line's atomic-append cap and be replaced wholesale — no bound the adapter applies can prevent that. So don't assume the audit trail carries the mechanical facts; the drain and the event do. (The audit clip does carry a marker — `_truncated`, or `_unserializable` for a circular/BigInt meta — so a loss check there must test *both*.)
 
 **Calibrate before you trust a tier.** A judge is only as good as its floor. The shipped calibration harness grades a frozen labeled set (with a €280-compliant false-positive trap) plus a 5-style injection battery, and **admits a tier only if it clears a pre-registered floor with zero reds AND resists every injection style** — a `constantHonored` negative control proves the harness can fail. The clear-case set is byte-equivalent to bareguard's frozen E6i fixture (`sha256(cases)=a840832…`), so the 7/7 is comparable to E6i's. Injection resistance is established at `claude-haiku-4-5` only; **re-run the harness on any tier you deviate to.**
 

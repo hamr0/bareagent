@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [0.36.0] - unreleased
+## [0.36.0] - 2026-08-12
 
 ### Added
 
@@ -72,7 +72,13 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
     partial beats silent total loss). It bounds even if the generator bounds at source (a distinct
     defensive job — it is the last code before a sink that clips silently and never throws). Caps come via
     `opts.limits`, so bareagent never hardcodes bareguard's PIPE_BUF numbers. Reconciled with the bareguard
-    maintainer (sink shape, field budgets, bound-at-both-points).
+    maintainer (sink shape, field budgets, bound-at-both-points). **Scope of that survival guarantee
+    (narrowed with the maintainer):** it holds for the **drained fact** and the **humanChannel event** —
+    the source bound the adapter reaches. It does **not** cover the **persisted audit row** under a
+    configured redactor: redaction runs downstream of the adapter and *expands* each match into a longer
+    `[REDACTED:…]` tag, so an in-budget `meta` can still blow the audit line's atomic-append cap and be
+    replaced wholesale — no adapter-side bound prevents that (the audit clip carries a `_truncated` /
+    `_unserializable` marker; the source clip is the silent one).
   - **The judge is drift-conditional and not a general safety layer** (E6c: a cooperative agent
     drifted 0/3 under a hard cap). It is worth least exactly where a deterministic floor already binds;
     any adopter who *can* express the constraint mechanically should. It annotates — it never merges,
