@@ -2,6 +2,23 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.36.1] - 2026-08-13
+
+### Changed
+- **Widened the optional `bareguard` peer range to admit 0.13.x** (`>=0.9.0 <0.13.0` → `>=0.9.0 <0.14.0`,
+  in both `peerDependencies` and `devDependencies`). bareguard 0.13.0 shipped a behavior change to
+  `gate.annotate()` — a malformed fact (non-object, array, missing `surface`, or one that throws when read)
+  is now REJECTED into a distinct `annotate_malformed` audit row instead of being normalized into a
+  silently-honored one; `surface` must be an explicit boolean. **`judgeToAnnotation` is already compliant by
+  construction** — it returns a single object literal computing `surface: v.verdict !== 'honored'` (always an
+  explicit boolean) and a `meta` of `String()`-coerced scalars (JSON-safe, no `__proto__` key), so it is
+  immune to 0.13.0's malformed-fact rule, its `meta` JSON-round-trip copy, and its `__proto__` stripping.
+  **No bare-agent code change** — a manifest-range bump only. Validated against bareguard 0.13.0: full suite
+  green (the bareguard-touching tests — `shell-tools` + both `integration-bareguard` suites — pass 84/84;
+  the one full-suite miss was a pre-existing load-induced timing flake in `spawn.test.js`, reproduced 0/3 in
+  isolation, and structurally cannot be affected by a devDep bump). Closes the conditional coordination item
+  tracked in #30. `package.json`, `package-lock.json`, `bareagent.context.md`.
+
 ## [0.36.0] - 2026-08-12
 
 ### Added
