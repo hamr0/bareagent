@@ -462,6 +462,7 @@ function createSessionStream({ onTurn, ctx, startedAt, onHalt, turnCap = null, o
               usage,
               costUsd: null, // the CLI prices the SESSION, not the turn — explicitly unpriced, never a synthetic 0.
               pricing: 'unpriced',
+              rateSource: null, // BA-22: no price to vouch for → null, NEVER 'provider' (negative control); rides every payload
               durationMs: Date.now() - startedAt,
               ctx, // what a wired gate records spend against — same as the Loop's onLlmResult.
               kind: 'turn',

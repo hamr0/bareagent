@@ -13,6 +13,16 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `'default'`. Previously both collapsed to `'default'`, so a consumer could not tell a good tier match
   from a blind ceiling in its own ledger (requested by the bareloop adopter). Applies uniformly to the
   Loop's `onLlmResult` payload and to `judge()`'s `rateSource`.
+- **BA-22 — native CLIPipe metering now carries `rateSource`.** In native (`ownsCycle`) mode the provider
+  emits its own `onTurn` payloads without going through the Loop's `resolveRoundCost`, so they had no
+  `rateSource`. The **session-close** event (`kind:'session'`) now stamps `rateSource:'provider'` when its
+  `costUsd` is finite — that cost is the claude CLI's own `total_cost_usd` (no local rate table), the
+  textbook authoritative-provider case — and `rateSource:null` when the cost is unknown (e.g. a killed
+  session), never a spurious `'provider'`. The **per-turn** event (`kind:'turn'`) carries `rateSource:null`
+  (it is deliberately `costUsd:null`/`pricing:'unpriced'` — the CLI prices the session, not the turn),
+  keeping the field on every native payload. A fidelity fix: without it, the one authoritative cost on the
+  native surface read as unknown provenance in an adopter's ledger. The two-value `pricing` contract on
+  this path is unchanged.
 
 ### Changed
 

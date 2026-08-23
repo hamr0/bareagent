@@ -825,6 +825,15 @@ re-litigated unless the user explicitly asks.
 - **The OTHER flag (rateSource dropped at bareloop's own metering callbacks) is bareloop-side** — bareagent
   ships the signal correctly on every payload; carrying it into the adopter's spine/ledger is the adopter's
   follow-up, not a bareagent change.
+- **BA-22 (folded into the same 0.38.0 release).** Native (`ownsCycle`) CLIPipe emits its own `onTurn`
+  payloads outside the Loop's `resolveRoundCost`, so they carried no `rateSource`. The session-close event
+  now stamps `rateSource:'provider'` when its `costUsd` is finite (the claude CLI's own `total_cost_usd`,
+  no rate table — the textbook authoritative case) and `null` when unknown (killed session), never a blanket
+  stamp; the per-turn event carries `rateSource:null` (deliberately unpriced). A FIDELITY gap, not a bug —
+  a true authoritative cost was going unrecorded and read as unknown provenance in the adopter's fail-safe
+  ledger, which correctly refuses to mint the label locally, so it had to be fixed at the emit site. Source-
+  verified before building (the session cost is finite-or-null by the `Number.isFinite` guard at the emit);
+  4 acceptance criteria, both emit sites mutation-proven. `pricing` two-value contract unchanged.
 
 ### v0.37.0 / BA-21 — pricing honesty (guesstimate-and-run + rateSource + loud pass-but-warn) (2026-08-23)
 

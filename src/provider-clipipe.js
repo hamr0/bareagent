@@ -37,9 +37,11 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
  *   Loop — a `Loop({policy})` would be a fence that is silently not there (the Loop throws instead).
  *   Wiring the same `wireGate(gate).policy` keeps audit rows byte-shape-identical, with zero gate changes.
  * @property {Function} [onTurn] - (native mode) Called with `{model, provider, usage, costUsd, pricing,
- *   durationMs, ctx, kind}` for EACH completed CLI turn as it arrives (`kind:'turn'`, four cache tiers,
- *   `costUsd:null` — the CLI prices the session, not the turn), then once at session end
- *   (`kind:'session'`) carrying the authoritative total cost with zero usage. Streaming, never
+ *   rateSource, durationMs, ctx, kind}` for EACH completed CLI turn as it arrives (`kind:'turn'`, four
+ *   cache tiers, `costUsd:null`/`rateSource:null` — the CLI prices the session, not the turn), then once
+ *   at session end (`kind:'session'`) carrying the authoritative total cost with zero usage and
+ *   `rateSource:'provider'` when that cost is finite (BA-22 — the CLI's own `total_cost_usd`, no rate
+ *   table; `null` cost → `rateSource:null`, never a spurious 'provider'). Streaming, never
  *   sum-at-end: a session that dies mid-run must already have surfaced every completed turn's spend or
  *   the gate loses all of it. The event shape mirrors `Loop({onLlmResult})`, so `wireGate(gate).onLlmResult`
  *   drops straight in — and when it is wired the Loop skips its own forward, so nothing is billed twice.
@@ -369,6 +371,11 @@ class CLIPipeProvider {
           usage: residual,
           costUsd,
           pricing: costUsd === null ? 'unpriced' : 'priced',
+          // BA-22: the session cost is the claude CLI's own `total_cost_usd` (no local rate table) — a
+          // provider reporting its authoritative cost, exactly what rateSource:'provider' means. Stamp it
+          // ONLY when finite (costUsd is finite-or-null per the guard above); a null cost never claims
+          // 'provider' provenance. Native mode bypasses the Loop's resolveRoundCost, so it stamps its own.
+          rateSource: costUsd === null ? null : 'provider',
           durationMs: r.ms,
           ctx: options.ctx,
           kind: 'session',
