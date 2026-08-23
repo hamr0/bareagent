@@ -2,6 +2,28 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.38.1] - 2026-08-23
+
+### Fixed
+
+- **BA-23 — price each round on its OWN usage, never the stale `lastUsage` carry-over.** The Loop's
+  round-cost call handed `resolveRoundCost` the outer `lastUsage` variable — a truthy zero-object seed kept
+  across null/absent-usage rounds for the BA-5 returns + `ctx.usage` publish — instead of the round's own
+  `result.usage`. That made `resolveRoundCost`'s `if (!usage) return {cost:null}` branch structurally dead:
+  a genuinely no-usage round (`result.usage:null`) was laundered into `costUsd:0`/`pricing:'priced'`/
+  `rateSource:'default'`, violating the "honest null if unpriced, never 0" contract and making a downstream
+  pricing-red budget halt unreachable. Worse, a **mid-run** no-usage round (after a real-usage round) was
+  priced on the *previous* round's carried-over tokens — a stale repeat charge on usage that never happened.
+  Fixed by passing `result.usage ?? null` to `resolveRoundCost`; `lastUsage` itself is unchanged everywhere
+  else (still the correct value for `Loop.run()`'s returned `usage` and `ctx.usage`). +3 mutation-proven
+  regression tests (first-round no-usage, mid-run no-usage after a priced round, absent-vs-null-usage
+  parity) + 1 non-regression lock (a provider-reported finite `costUsd` still wins over null usage).
+  Cross-repo validated by adopter bareloop (their F6 pricing-red halt is reachable again; full suite
+  2050/2050).
+- **Known limitation (tracked follow-up):** a present-but-empty/malformed usage object (`{}`) still prices
+  as $0 rather than unpriced — this is a separate, pre-existing case from BA-23's null-usage fix and will be
+  addressed separately (it needs distinct logic since a cache-only round legitimately has `inputTokens:0`).
+
 ## [0.38.0] - 2026-08-23
 
 ### Added

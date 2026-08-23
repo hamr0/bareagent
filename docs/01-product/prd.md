@@ -809,6 +809,25 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.38.1 / BA-23 — price each round on its own usage, not stale lastUsage (2026-08-23)
+
+- **The gap.** The Loop's per-round cost call passed `resolveRoundCost` the outer `lastUsage` carry-over
+  variable (a truthy zero-object seed retained across null-usage rounds for the BA-5 return/`ctx.usage`
+  contract) instead of the current round's `result.usage`. `resolveRoundCost`'s `if (!usage) return
+  {cost:null}` guard was consequently unreachable from the Loop path: a genuinely no-usage round laundered
+  into `costUsd:0`/`pricing:'priced'`/`rateSource:'default'` (violating "honest null if unpriced, never 0"
+  and defeating a pricing-red budget halt), and a mid-run no-usage round was billed on the previous round's
+  stale tokens.
+- **Fix.** Pass `result.usage ?? null` to `resolveRoundCost` at the single Loop call site; `lastUsage`
+  itself is untouched (still correct for the returned `usage` field and `ctx.usage` publish).
+- **Semver.** PATCH (0.38.0 → 0.38.1) — bugfix only, no new public surface.
+- **Validation.** +3 mutation-proven regression tests + 1 non-regression lock (provider-cost precedence
+  over null usage unaffected). Cross-repo validated by adopter bareloop (F6 pricing-red halt reachable
+  again; their full suite 2050/2050).
+- **Known follow-up (deliberately NOT fixed here):** a present-but-empty/malformed usage object (`{}`)
+  still prices as $0 — a distinct, pre-existing case (needs separate logic since a cache-only round
+  legitimately has `inputTokens:0`), tracked for a later fix rather than folded into BA-23.
+
 ### v0.38.0 / BA-21 follow-up — rateSource splits tier vs ceiling (2026-08-23)
 
 - **Adopter flag (bareloop peer, post-v0.37.0 confirmation).** The two-value `rateSource:'caller'|'default'`
