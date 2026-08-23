@@ -49,8 +49,9 @@ const { classifyStopReason } = require('./provider-stop-reason');
  * @property {Function} [onLlmResult] - async (event) => void after each LLM call; forwards usage to
  *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
  *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget. Each
- *   event also carries `rateSource` ('provider'|'caller'|'default'|null, BA-21) beside the unchanged
- *   two-value `pricing` — a 'default' cost is a flagged guesstimate, never a silent guess.
+ *   event also carries `rateSource` ('provider'|'caller'|'tier'|'default'|null, BA-21) beside the
+ *   unchanged two-value `pricing` — a 'tier'/'default' cost is a flagged guesstimate, never a silent
+ *   guess ('tier' = recognized Claude tier, 'default' = blind ceiling fallback).
  * @property {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [rates] - BA-21:
  *   per-1K USD rates for THIS run's model (`in`/`out` required, finite, non-negative; cache multipliers
  *   default to Anthropic's 0.1×/1.25×). When set, every token-only round is priced from these
@@ -81,12 +82,18 @@ const { classifyStopReason } = require('./provider-stop-reason');
 // table (a table rots: every new model + every price change is a code edit, and a stale row silently
 // misprices). No vanilla LLM API returns a price — every provider reports tokens only (the sole real $
 // in the codebase comes from the CLIPipe/Claude-CLI harness's own `total_cost_usd`, handled via the
-// provider `costUsd` path). So a token-only round is priced from a RATE, and there are exactly three
-// rate sources, surfaced on every metering payload as `rateSource`:
+// provider `costUsd` path). So a token-only round is priced from a RATE, surfaced on every metering
+// payload as `rateSource` (four non-null values — two authoritative, two built-in guesstimates):
 //   'provider' — the provider reported an authoritative `costUsd` (real; e.g. the CLI harness).
 //   'caller'   — the caller passed `new Loop({ rates })` with its own model's numbers (authoritative to it).
-//   'default'  — nobody supplied a rate, so we GUESSTIMATE and RUN, flagged as a guess (never a silent
-//                refuse — governance's job is to keep the user in the know, not to stop on a missing rate).
+//   'tier'     — a recognized Claude tier (haiku/sonnet) matched by the model id: a confident but
+//                non-caller-vouched GUESSTIMATE (the hardcoded tier rate could drift from Anthropic's).
+//   'default'  — nobody supplied a rate and the model was unrecognized/absent, so we GUESSTIMATE and RUN
+//                off the ceiling, flagged as a blind guess (never a silent refuse — governance's job is
+//                to keep the user in the know, not to stop on a missing rate).
+// 'tier' and 'default' are BOTH guesstimates (`isGuesstimateSource`): they drive the pass-but-warn and
+// the `estimatedRounds` counter identically; the split only lets a consumer tell a recognized-tier price
+// from a blind ceiling in its own ledger (BA-21 follow-up, requested by the bareloop adopter).
 // The guesstimate recognizes the two Claude tiers in common use (haiku/sonnet) and otherwise falls to
 // the Sonnet-tier default — the common workhorse rate, "usually more expensive" than the cheap models
 // so a budget cap over- rather than under-reports on an unrecognized model, without the absurd
@@ -105,20 +112,34 @@ const TIER_RATES = {
 
 /**
  * Resolve the effective per-1K rate for a round, and WHERE it came from. Caller-supplied `rates` win
- * (authoritative to the caller); else a recognized Claude tier from the model id; else the Sonnet-tier
- * ceiling default. A null model still resolves to the default — we guesstimate and run, never refuse.
+ * (authoritative to the caller, `'caller'`); else a recognized Claude tier matched by the model id
+ * (`'tier'` — a confident but non-caller-vouched guess); else the Sonnet-tier ceiling fallback
+ * (`'default'` — a blind guess for an unknown/absent model). A null model still resolves to the
+ * ceiling — we guesstimate and run, never refuse. `'tier'` and `'default'` are BOTH built-in
+ * guesstimates (see `isGuesstimateSource`); the split only lets a consumer tell a recognized-tier
+ * price from a blind ceiling in its own ledger (BA-21 follow-up, requested by the bareloop adopter).
  * @param {string|null|undefined} model
  * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
- * @returns {{rates: {in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}, source: 'caller'|'default'}}
+ * @returns {{rates: {in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}, source: 'caller'|'tier'|'default'}}
  */
 function resolveRates(model, callerRates) {
   if (callerRates) return { rates: callerRates, source: 'caller' };
   if (model) {
     const m = String(model).toLowerCase();
-    if (m.includes('haiku')) return { rates: TIER_RATES.haiku, source: 'default' };
-    if (m.includes('sonnet')) return { rates: TIER_RATES.sonnet, source: 'default' };
+    if (m.includes('haiku')) return { rates: TIER_RATES.haiku, source: 'tier' };
+    if (m.includes('sonnet')) return { rates: TIER_RATES.sonnet, source: 'tier' };
   }
   return { rates: DEFAULT_RATES, source: 'default' };
+}
+
+// BA-21 follow-up: a built-in guesstimate is either a recognized-tier match (`'tier'`) or the blind
+// ceiling fallback (`'default'`) — both are non-authoritative (unlike `'provider'`/`'caller'`), so both
+// drive the pass-but-warn and the `estimatedRounds` counter. One predicate keeps those two call sites
+// from drifting apart if the vocabulary grows again. Typed as a TS predicate so a guarded call narrows
+// `rateSource` to the two guesstimate literals (drops `null`) before it reaches the warn.
+/** @param {string|null} source @returns {source is 'tier'|'default'} */
+function isGuesstimateSource(source) {
+  return source === 'tier' || source === 'default';
 }
 
 // Internal safety net only — real iteration bounds come from a wired bareguard
@@ -195,11 +216,13 @@ function estimateCost(model, usage, callerRates) {
  * including `0`, a valid priced value (a subscription/marginal-$0 run), which stays priced. A non-finite
  * provider cost (±Inf/NaN) is NOT a price → fall through to the rate-based estimate (`caller`/`default`).
  * `source` is null only when the round is genuinely unpriced (no usage, or a non-finite estimate).
+ * A rate-estimated round is `'caller'` (caller rates), `'tier'` (recognized Claude tier), or `'default'`
+ * (blind ceiling fallback) — the last two are both built-in guesstimates (`isGuesstimateSource`).
  * @param {any} result - the GenerateResult from provider.generate()
  * @param {string|null} model
  * @param {Usage|null} usage
  * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
- * @returns {{cost: number|null, source: 'provider'|'caller'|'default'|null}}
+ * @returns {{cost: number|null, source: 'provider'|'caller'|'tier'|'default'|null}}
  */
 function resolveRoundCost(result, model, usage, callerRates) {
   if (result && Number.isFinite(result.costUsd)) return { cost: result.costUsd, source: 'provider' };
@@ -368,13 +391,15 @@ class Loop {
     }
   }
 
-  // BA-21 pass-but-warn: the FIRST round priced off the built-in guesstimate (rateSource:'default' — no
-  // provider cost, no caller `rates`) emits ONE loud warning per Loop instance. Loud because a silent
-  // guess is exactly the honesty gap BA-21 closes; once-per-instance because per-round would be noise.
-  // Silenced entirely by passing `new Loop({ rates })`. `console.warn` mirrors the temperature-degrade
-  // precedent; the structured signal for programmatic consumers is `rateSource` on every payload.
-  /** @param {string|null} model */
-  _warnGuesstimateOnce(model) {
+  // BA-21 pass-but-warn: the FIRST round priced off a built-in guesstimate (rateSource:'tier' or
+  // 'default' — no provider cost, no caller `rates`) emits ONE loud warning per Loop instance. Loud
+  // because a silent guess is exactly the honesty gap BA-21 closes; once-per-instance because per-round
+  // would be noise. Fires for a recognized-tier price too (it is still non-authoritative), and the
+  // message names the ACTUAL source so a 'tier' round isn't mislabelled 'default'. Silenced entirely by
+  // passing `new Loop({ rates })`. `console.warn` mirrors the temperature-degrade precedent; the
+  // structured signal for programmatic consumers is `rateSource` on every payload.
+  /** @param {string|null} model @param {string} rateSource - 'tier' | 'default' */
+  _warnGuesstimateOnce(model, rateSource) {
     if (this._warnedGuesstimate) return;
     this._warnedGuesstimate = true;
     // `model` is provider-reported (`result.model || provider.model`) — strip control chars/ANSI and
@@ -382,7 +407,7 @@ class Loop {
     // giant string into this diagnostic. Log-hygiene only; no secret ever rides in a model id.
     const safeModel = model ? String(model).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) : null;
     console.warn(
-      `[Loop] pricing with a built-in GUESSTIMATE rate (rateSource:'default'${safeModel ? `, model '${safeModel}'` : ''}) — `
+      `[Loop] pricing with a built-in GUESSTIMATE rate (rateSource:'${rateSource}'${safeModel ? `, model '${safeModel}'` : ''}) — `
       + 'cost/budget figures are approximate. Pass new Loop({ rates: { in, out } }) with your model\'s '
       + 'USD-per-1K rates for an authoritative price (and to silence this warning).'
     );
@@ -579,8 +604,8 @@ class Loop {
       byTool: {},
       tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
       unpricedRounds: 0,
-      // BA-21 — priced rounds whose rate was the built-in guesstimate (rateSource:'default'), i.e. no
-      // provider cost and no caller `rates`. Not unpriced (they DID price and count against budget); a
+      // BA-21 — priced rounds whose rate was a built-in guesstimate (rateSource:'tier' or 'default'), i.e.
+      // no provider cost and no caller `rates`. Not unpriced (they DID price and count against budget); a
       // guess flagged so a consumer can see how much of the spend was estimated vs a real/supplied rate.
       estimatedRounds: 0,
       // §3.6 CE-activity rollup — convenience counts derived in-place from the same events already
@@ -666,7 +691,7 @@ class Loop {
         const usage = (result && result.usage) || null;
         const model = (result && result.model) || loop.provider.model || null;
         const { cost, source: rateSource } = resolveRoundCost(result, model, usage, loop.rates);
-        if (rateSource === 'default') loop._warnGuesstimateOnce(model);
+        if (isGuesstimateSource(rateSource)) loop._warnGuesstimateOnce(model, rateSource);
         if (cost !== null) { totalCost += cost; pricedAny = true; }
         addUsage(usage); // summarize tokens are real spend → count them in the cumulative meter
         metrics.context.summaries++; // §3.6 CE-activity rollup
@@ -679,7 +704,7 @@ class Loop {
               usage,
               costUsd: cost,
               pricing: cost === null ? 'unpriced' : 'priced',
-              rateSource, // BA-21: 'provider'|'caller'|'default'|null — a 'default' cost is a flagged guesstimate
+              rateSource, // BA-21: 'provider'|'caller'|'tier'|'default'|null — 'tier'/'default' is a flagged guesstimate
               durationMs: Date.now() - startedAt,
               ctx,
               kind: 'summarize',
@@ -826,18 +851,18 @@ class Loop {
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;
       const { cost: roundCost, source: rateSource } = resolveRoundCost(result, model, lastUsage, this.rates);
-      if (rateSource === 'default') this._warnGuesstimateOnce(model);
+      if (isGuesstimateSource(rateSource)) this._warnGuesstimateOnce(model, rateSource);
       if (roundCost !== null) totalCost += roundCost;
 
       // Meter this round: count the turn, accumulate the four token tiers, and classify pricing —
       // an unpriced round (null cost: no usage, or a runaway non-finite estimate) is tallied so the run
       // is observably unenforceable on budget rather than silently free (the #3 cost contract). A round
-      // priced off the built-in guesstimate (rateSource:'default') is counted as an estimate too, so a
-      // consumer can see how much of the spend was guessed (BA-21 — keep the user in the know).
+      // priced off a built-in guesstimate (rateSource:'tier' or 'default') is counted as an estimate too,
+      // so a consumer can see how much of the spend was guessed (BA-21 — keep the user in the know).
       metrics.turns++;
       addUsage(result.usage);
       if (roundCost === null) metrics.unpricedRounds++; else pricedAny = true;
-      if (rateSource === 'default') metrics.estimatedRounds++;
+      if (isGuesstimateSource(rateSource)) metrics.estimatedRounds++;
       // BA-16: a cycle-owning provider reports what really happened inside its session.
       const session = (result.session && typeof result.session === 'object') ? result.session : null;
       if (session) {
@@ -865,7 +890,7 @@ class Loop {
             // is the honesty axis BESIDE it: 'default' means the number is a flagged guesstimate, never
             // a silent guess stamped as if it were a real rate (BA-21). `pricing` keeps its two values.
             pricing: roundCost === null ? 'unpriced' : 'priced',
-            rateSource, // 'provider'|'caller'|'default'|null
+            rateSource, // 'provider'|'caller'|'tier'|'default'|null
             durationMs: Date.now() - llmStartedAt,
             ctx,
             kind: 'turn',

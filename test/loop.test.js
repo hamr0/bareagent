@@ -574,12 +574,13 @@ describe('Loop', () => {
       const warns = [];
       console.warn = (m) => warns.push(String(m));
       try {
-        // Default guesstimate → exactly one warning, even across two rounds/runs on the same Loop.
+        // Recognized-tier guesstimate (sonnet) → still warns (non-authoritative), exactly once even
+        // across two rounds/runs on the same Loop, and the message names the ACTUAL source ('tier').
         const loop = new Loop({ provider });
         await loop.run([{ role: 'user', content: 'a' }]);
         await loop.run([{ role: 'user', content: 'b' }]);
         assert.equal(warns.filter((w) => /GUESSTIMATE/.test(w)).length, 1, 'warns once per instance, not per round/run');
-        assert.match(warns[0], /rateSource:'default'/);
+        assert.match(warns[0], /rateSource:'tier'/);
 
         // Caller-supplied rates → rateSource:'caller' → no warning.
         warns.length = 0;
@@ -588,6 +589,35 @@ describe('Loop', () => {
       } finally {
         console.warn = origWarn;
       }
+    });
+
+    it('BA-21 follow-up: rateSource distinguishes a recognized tier from a blind ceiling; both warn', async () => {
+      // A recognized Claude tier → rateSource:'tier'; an unknown model → the ceiling fallback:'default'.
+      // Both are non-authoritative guesstimates (so both are counted estimated and both warn once), but a
+      // consumer can now tell them apart in its own ledger — the whole point of the follow-up.
+      const tierEv = [];
+      await new Loop({
+        provider: { model: 'claude-sonnet-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } },
+        onLlmResult: (e) => tierEv.push(e),
+      }).run([{ role: 'user', content: 'a' }]);
+      assert.equal(tierEv[0].rateSource, 'tier', 'recognized tier → tier, not default');
+
+      const ceilEv = [];
+      const origWarn = console.warn;
+      const warns = [];
+      console.warn = (m) => warns.push(String(m));
+      try {
+        await new Loop({
+          provider: { model: 'some-unknown-model-9', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } },
+          onLlmResult: (e) => ceilEv.push(e),
+        }).run([{ role: 'user', content: 'a' }]);
+      } finally {
+        console.warn = origWarn;
+      }
+      assert.equal(ceilEv[0].rateSource, 'default', 'unrecognized model → blind ceiling, default');
+      const w = warns.find((x) => /GUESSTIMATE/.test(x));
+      assert.ok(w, 'the ceiling round warns');
+      assert.match(w, /rateSource:'default'/, "the warn names the actual source, not a hardcoded 'default' for every case");
     });
 
     it('BA-21 warn strips control chars and clamps a hostile provider model id (log hygiene)', async () => {

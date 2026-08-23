@@ -2,6 +2,27 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.38.0] - 2026-08-23
+
+### Added
+
+- **BA-21 follow-up — `rateSource` splits the built-in guesstimate into `'tier'` vs `'default'`.** The
+  metering field is now `'provider' | 'caller' | 'tier' | 'default' | null`. A round priced off a
+  **recognized Claude tier** (haiku/sonnet matched by the model id) reports `'tier'` — a confident but
+  non-caller-vouched guess — while a **blind ceiling fallback** (unrecognized/absent model) reports
+  `'default'`. Previously both collapsed to `'default'`, so a consumer could not tell a good tier match
+  from a blind ceiling in its own ledger (requested by the bareloop adopter). Applies uniformly to the
+  Loop's `onLlmResult` payload and to `judge()`'s `rateSource`.
+
+### Changed
+
+- **The pass-but-warn message names the actual source.** The one-per-Loop-instance `console.warn` now
+  prints `rateSource:'tier'` or `rateSource:'default'` (whichever fired) instead of a hardcoded
+  `'default'`. **Behavior is otherwise unchanged**: both `'tier'` and `'default'` are built-in
+  guesstimates, so both still warn once and both still increment `metrics.estimatedRounds` exactly as in
+  0.37.0 (one `isGuesstimateSource` predicate drives both call sites). `'provider'`/`'caller'` remain
+  authoritative and silent. Passing `new Loop({ rates })` still silences the warning.
+
 ## [0.37.0] - 2026-08-23
 
 ### Changed

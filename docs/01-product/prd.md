@@ -809,6 +809,23 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.38.0 / BA-21 follow-up — rateSource splits tier vs ceiling (2026-08-23)
+
+- **Adopter flag (bareloop peer, post-v0.37.0 confirmation).** The two-value `rateSource:'caller'|'default'`
+  could not separate "matched a recognized Claude tier" from "fell back to the blind ceiling" — both read
+  `'default'`, so the adopter could not tell a good tier price from a blind guess in its own ledger. The
+  peer recorded it as an accepted limit and did NOT ask for a change; hamr chose to fix it anyway.
+- **Decision.** Split the guesstimate: recognized haiku/sonnet → `'tier'` (confident, non-caller-vouched);
+  unrecognized/absent → `'default'` (blind ceiling). Full set `'provider'|'caller'|'tier'|'default'|null`.
+  **Behavior-preserving** beyond the new label: both `'tier'` and `'default'` are guesstimates
+  (`isGuesstimateSource`), so both still warn once-per-instance and both still increment `estimatedRounds`
+  exactly as 0.37.0 did; the warn message now names the actual source instead of a hardcoded `'default'`.
+  Applies to the Loop's `onLlmResult` and to `judge()`.
+- **Semver.** MINOR (0.37.0 → 0.38.0): a new value in the public `rateSource` field.
+- **The OTHER flag (rateSource dropped at bareloop's own metering callbacks) is bareloop-side** — bareagent
+  ships the signal correctly on every payload; carrying it into the adopter's spine/ledger is the adopter's
+  follow-up, not a bareagent change.
+
 ### v0.37.0 / BA-21 — pricing honesty (guesstimate-and-run + rateSource + loud pass-but-warn) (2026-08-23)
 
 - **The gap.** Cost estimation forced `unpriced` on a null/unknown model (a token-bearing round with no

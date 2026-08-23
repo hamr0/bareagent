@@ -14,23 +14,23 @@ describe('resolveRates — caller > recognized tier > ceiling default', () => {
     assert.deepEqual(r, { rates: { in: 0.1, out: 0.2 }, source: 'caller' });
   });
 
-  it('recognizes the haiku tier from the model id (low), source:default', () => {
+  it('recognizes the haiku tier from the model id (low), source:tier', () => {
     const r = resolveRates('claude-haiku-4-5', null);
     assert.deepEqual(r.rates, { in: 0.001, out: 0.005 });
-    assert.equal(r.source, 'default');
+    assert.equal(r.source, 'tier', 'a recognized tier is source:tier, distinct from the blind ceiling');
   });
 
-  it('recognizes the sonnet tier from the model id (middle), source:default', () => {
+  it('recognizes the sonnet tier from the model id (middle), source:tier', () => {
     const r = resolveRates('claude-sonnet-5', null);
     assert.deepEqual(r.rates, { in: 0.003, out: 0.015 });
-    assert.equal(r.source, 'default');
+    assert.equal(r.source, 'tier');
   });
 
-  it('an unrecognized model (opus/gpt/gemini/unknown) falls to the Sonnet-tier default', () => {
+  it('an unrecognized model (opus/gpt/gemini/unknown) falls to the Sonnet-tier ceiling, source:default', () => {
     for (const m of ['claude-opus-5', 'gpt-4o-mini', 'gemini-2.5-flash', 'some-future-model']) {
       const r = resolveRates(m, null);
       assert.deepEqual(r.rates, { in: 0.003, out: 0.015 }, `${m} → sonnet default`);
-      assert.equal(r.source, 'default');
+      assert.equal(r.source, 'default', `${m} is a blind ceiling fallback, NOT a recognized tier`);
     }
   });
 
@@ -101,7 +101,7 @@ describe('resolveRoundCost — provider cost wins, else caller/default, with a r
 
   it('a non-finite provider cost is NOT a price → falls through to the estimate', () => {
     const r = resolveRoundCost({ costUsd: Infinity }, 'claude-haiku-4-5', usage);
-    assert.equal(r.source, 'default');
+    assert.equal(r.source, 'tier'); // haiku is a recognized tier
     assert.equal(r.cost, 0.001 + 0.005);
   });
 
@@ -111,10 +111,16 @@ describe('resolveRoundCost — provider cost wins, else caller/default, with a r
     assert.equal(r.cost, (1000 * 0.001 + 1000 * 0.001) / 1000);
   });
 
-  it('no provider cost, no caller rates → the flagged guesstimate, source:default', () => {
+  it('no provider cost, no caller rates, recognized tier → the flagged guesstimate, source:tier', () => {
     const r = resolveRoundCost({}, 'claude-sonnet-5', usage);
-    assert.equal(r.source, 'default');
+    assert.equal(r.source, 'tier');
     assert.equal(r.cost, (1000 * 0.003 + 1000 * 0.015) / 1000);
+  });
+
+  it('no provider cost, no caller rates, UNRECOGNIZED model → blind ceiling, source:default (distinct from tier)', () => {
+    const r = resolveRoundCost({}, 'some-future-model', usage);
+    assert.equal(r.source, 'default', 'a blind ceiling fallback reads default, never tier');
+    assert.equal(r.cost, (1000 * 0.003 + 1000 * 0.015) / 1000, 'same ceiling rate as sonnet, but flagged differently');
   });
 
   it('no usage → genuinely unpriced: {cost:null, source:null}', () => {
