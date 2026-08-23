@@ -785,6 +785,38 @@ describe('BA-17 — what the caller actually receives', () => {
     assert.strictEqual(summed, 805, "everything the gate is told must add up to the CLI's own total");
   });
 
+  test('BA-22: the session-close event stamps rateSource:provider for a finite CLI cost; per-turn stays null', async () => {
+    const seen = [];
+    const turn = (id, out) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: out }, content: [{ type: 'text', text: 't' }] } });
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', total_cost_usd: 0.01, usage: { input_tokens: 5, output_tokens: 800 } });
+    const p = nativeProvider(fakeCli([turn('m1', 2), turn('m2', 3), done]), { onTurn: async (e) => { seen.push(e); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+
+    const closing = seen[seen.length - 1];
+    // (1) finite session cost is the CLI's own total → rateSource:'provider', pricing unchanged ('priced').
+    assert.strictEqual(closing.kind, 'session');
+    assert.strictEqual(closing.rateSource, 'provider', 'the CLI-reported total is authoritative provider provenance');
+    assert.strictEqual(closing.pricing, 'priced', 'the two-value pricing contract is unchanged (criterion 4)');
+    // (2) negative control: every per-turn event is unpriced and NEVER acquires a spurious 'provider'.
+    const turns = seen.filter((e) => e.kind === 'turn');
+    assert.ok(turns.length >= 2, 'per-turn events were emitted');
+    for (const t of turns) {
+      assert.strictEqual(t.costUsd, null, 'a turn has no price to vouch for');
+      assert.strictEqual(t.rateSource, null, 'a turn is never blanket-stamped provider (criterion 2)');
+    }
+  });
+
+  test('BA-22: a session with no determinable cost (killed) does NOT claim provider provenance (criterion 3)', async () => {
+    const seen = [];
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: 't' }] } });
+    const p = nativeProvider(fakeCli([turn('m1'), turn('m2'), turn('m3')], { hang: true }), { maxTurns: 2, sessionTimeout: 20000, onTurn: async (e) => { seen.push(e); } });
+    await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    const closing = seen[seen.length - 1];
+    assert.strictEqual(closing.kind, 'session');
+    assert.strictEqual(closing.costUsd, null, 'a killed session never priced itself');
+    assert.strictEqual(closing.rateSource, null, 'a null cost is never dressed up as provider provenance');
+  });
+
   test('a residual is never negative — an overshoot reports nothing further, never a credit', async () => {
     const seen = [];
     const turn = (id, out) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: out }, content: [{ type: 'text', text: 't' }] } });

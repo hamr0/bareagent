@@ -114,11 +114,11 @@ describe('judge — cost is an honest null, never coerced to 0 (contract 1 / cri
     assert.equal(r.costUsd, 0.0009);
   });
 
-  it('estimates cost from usage when the provider reports none — a recognized tier, flagged default', async () => {
+  it('estimates cost from usage when the provider reports none — a recognized tier, flagged tier', async () => {
     const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider(honored) }); // haiku is a recognized tier
     assert.equal(typeof r.costUsd, 'number');
     assert.ok(r.costUsd > 0);
-    assert.equal(r.rateSource, 'default', 'a guesstimated judge cost is flagged, never a silent guess');
+    assert.equal(r.rateSource, 'tier', 'a recognized-tier judge cost is flagged tier, never a silent guess');
   });
 
   it('caller rates price the judge call authoritatively (rateSource:caller)', async () => {

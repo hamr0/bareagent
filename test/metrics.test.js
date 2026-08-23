@@ -97,7 +97,7 @@ describe('result.metrics — the meter (Feature 3)', () => {
   });
 
   it('costUsd is the priced cumulative and matches result.cost when everything is priced', async () => {
-    // BA-21: haiku is a recognized tier → priced off the guesstimate (rateSource:'default'). 1000 in + 500 out.
+    // BA-21: haiku is a recognized tier → priced off the guesstimate (rateSource:'tier'). 1000 in + 500 out.
     const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } }; } };
     const result = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }]);
     assert.ok(Math.abs(result.metrics.costUsd - 0.0035) < 1e-9);
@@ -144,11 +144,11 @@ describe('result.metrics — the meter (Feature 3)', () => {
 
   it('onLlmResult carries an explicit pricing flag + rateSource (priced/guesstimate vs unpriced)', async () => {
     const seen = [];
-    // A recognized tier, no provider cost, no caller rates → priced off the guesstimate, rateSource:'default'.
+    // A recognized tier, no provider cost, no caller rates → priced off the guesstimate, rateSource:'tier'.
     const priced = { model: 'claude-sonnet-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
     await new Loop({ provider: priced, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
     assert.equal(seen[0].pricing, 'priced');
-    assert.equal(seen[0].rateSource, 'default', 'a guesstimated price is flagged default, never a silent guess');
+    assert.equal(seen[0].rateSource, 'tier', 'a recognized-tier price is flagged tier, never a silent guess');
 
     // Caller-supplied rates → rateSource:'caller'.
     seen.length = 0;

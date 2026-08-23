@@ -809,6 +809,32 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.38.0 / BA-21 follow-up — rateSource splits tier vs ceiling (2026-08-23)
+
+- **Adopter flag (bareloop peer, post-v0.37.0 confirmation).** The two-value `rateSource:'caller'|'default'`
+  could not separate "matched a recognized Claude tier" from "fell back to the blind ceiling" — both read
+  `'default'`, so the adopter could not tell a good tier price from a blind guess in its own ledger. The
+  peer recorded it as an accepted limit and did NOT ask for a change; hamr chose to fix it anyway.
+- **Decision.** Split the guesstimate: recognized haiku/sonnet → `'tier'` (confident, non-caller-vouched);
+  unrecognized/absent → `'default'` (blind ceiling). Full set `'provider'|'caller'|'tier'|'default'|null`.
+  **Behavior-preserving** beyond the new label: both `'tier'` and `'default'` are guesstimates
+  (`isGuesstimateSource`), so both still warn once-per-instance and both still increment `estimatedRounds`
+  exactly as 0.37.0 did; the warn message now names the actual source instead of a hardcoded `'default'`.
+  Applies to the Loop's `onLlmResult` and to `judge()`.
+- **Semver.** MINOR (0.37.0 → 0.38.0): a new value in the public `rateSource` field.
+- **The OTHER flag (rateSource dropped at bareloop's own metering callbacks) is bareloop-side** — bareagent
+  ships the signal correctly on every payload; carrying it into the adopter's spine/ledger is the adopter's
+  follow-up, not a bareagent change.
+- **BA-22 (folded into the same 0.38.0 release).** Native (`ownsCycle`) CLIPipe emits its own `onTurn`
+  payloads outside the Loop's `resolveRoundCost`, so they carried no `rateSource`. The session-close event
+  now stamps `rateSource:'provider'` when its `costUsd` is finite (the claude CLI's own `total_cost_usd`,
+  no rate table — the textbook authoritative case) and `null` when unknown (killed session), never a blanket
+  stamp; the per-turn event carries `rateSource:null` (deliberately unpriced). A FIDELITY gap, not a bug —
+  a true authoritative cost was going unrecorded and read as unknown provenance in the adopter's fail-safe
+  ledger, which correctly refuses to mint the label locally, so it had to be fixed at the emit site. Source-
+  verified before building (the session cost is finite-or-null by the `Number.isFinite` guard at the emit);
+  4 acceptance criteria, both emit sites mutation-proven. `pricing` two-value contract unchanged.
+
 ### v0.37.0 / BA-21 — pricing honesty (guesstimate-and-run + rateSource + loud pass-but-warn) (2026-08-23)
 
 - **The gap.** Cost estimation forced `unpriced` on a null/unknown model (a token-bearing round with no

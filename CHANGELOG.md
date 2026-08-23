@@ -2,6 +2,37 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.38.0] - 2026-08-23
+
+### Added
+
+- **BA-21 follow-up — `rateSource` splits the built-in guesstimate into `'tier'` vs `'default'`.** The
+  metering field is now `'provider' | 'caller' | 'tier' | 'default' | null`. A round priced off a
+  **recognized Claude tier** (haiku/sonnet matched by the model id) reports `'tier'` — a confident but
+  non-caller-vouched guess — while a **blind ceiling fallback** (unrecognized/absent model) reports
+  `'default'`. Previously both collapsed to `'default'`, so a consumer could not tell a good tier match
+  from a blind ceiling in its own ledger (requested by the bareloop adopter). Applies uniformly to the
+  Loop's `onLlmResult` payload and to `judge()`'s `rateSource`.
+- **BA-22 — native CLIPipe metering now carries `rateSource`.** In native (`ownsCycle`) mode the provider
+  emits its own `onTurn` payloads without going through the Loop's `resolveRoundCost`, so they had no
+  `rateSource`. The **session-close** event (`kind:'session'`) now stamps `rateSource:'provider'` when its
+  `costUsd` is finite — that cost is the claude CLI's own `total_cost_usd` (no local rate table), the
+  textbook authoritative-provider case — and `rateSource:null` when the cost is unknown (e.g. a killed
+  session), never a spurious `'provider'`. The **per-turn** event (`kind:'turn'`) carries `rateSource:null`
+  (it is deliberately `costUsd:null`/`pricing:'unpriced'` — the CLI prices the session, not the turn),
+  keeping the field on every native payload. A fidelity fix: without it, the one authoritative cost on the
+  native surface read as unknown provenance in an adopter's ledger. The two-value `pricing` contract on
+  this path is unchanged.
+
+### Changed
+
+- **The pass-but-warn message names the actual source.** The one-per-Loop-instance `console.warn` now
+  prints `rateSource:'tier'` or `rateSource:'default'` (whichever fired) instead of a hardcoded
+  `'default'`. **Behavior is otherwise unchanged**: both `'tier'` and `'default'` are built-in
+  guesstimates, so both still warn once and both still increment `metrics.estimatedRounds` exactly as in
+  0.37.0 (one `isGuesstimateSource` predicate drives both call sites). `'provider'`/`'caller'` remain
+  authoritative and silent. Passing `new Loop({ rates })` still silences the warning.
+
 ## [0.37.0] - 2026-08-23
 
 ### Changed

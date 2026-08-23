@@ -49,7 +49,7 @@ export interface RunMetrics {
   costUsd: number | null;
   /** Count of rounds genuinely unpriceable (no usage, or a runaway non-finite estimate) — the loud-unpriced signal. */
   unpricedRounds: number;
-  /** BA-21: count of priced rounds whose rate was the built-in guesstimate (rateSource:'default'), not a real/supplied rate. */
+  /** BA-21: count of priced rounds whose rate was a built-in guesstimate (rateSource:'tier' or 'default'), not a real/supplied rate. */
   estimatedRounds: number;
   /** Spawn-tool invocations this run (the `spawn` tool count — counts every call, incl. denied/failed). */
   spawned: number;
