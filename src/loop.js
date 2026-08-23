@@ -850,7 +850,13 @@ class Loop {
       // Prefer the model the response reports (robust when provider.model is absent or varies per
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;
-      const { cost: roundCost, source: rateSource } = resolveRoundCost(result, model, lastUsage, this.rates);
+      // BA-23: price THIS round's usage, never the stale `lastUsage` carry-over. `lastUsage` is a truthy
+      // zero-object seed (line 530) kept across null/absent-usage rounds (line 832) for the BA-5 returns +
+      // ctx.usage publish — but handing it to the resolver made its `if (!usage) return {cost:null}` branch
+      // (resolveRoundCost line ~229) DEAD: a genuinely no-usage round was laundered into costUsd:0/priced
+      // (against the "honest null if unpriced, never 0" contract), and a MID-RUN no-usage round was priced
+      // on the PREVIOUS round's tokens — a stale repeat charge. addUsage below already uses result.usage.
+      const { cost: roundCost, source: rateSource } = resolveRoundCost(result, model, result.usage ?? null, this.rates);
       if (isGuesstimateSource(rateSource)) this._warnGuesstimateOnce(model, rateSource);
       if (roundCost !== null) totalCost += roundCost;
 

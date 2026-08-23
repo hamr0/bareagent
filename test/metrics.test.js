@@ -142,6 +142,69 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(seen[0].costUsd, null, 'the emitted costUsd is null, not a non-finite number');
   });
 
+  it('BA-23: a NO-USAGE round is unpriced (cost null, source null), not laundered into $0 (first round)', async () => {
+    // A provider that reports NO usage for the round (null/absent) is genuinely unpriceable — there is
+    // nothing to estimate from. Pre-fix, loop.js handed the stale truthy `lastUsage` seed
+    // ({inputTokens:0,outputTokens:0}) to the resolver, so the `if (!usage) return {cost:null}` branch was
+    // dead: the round was priced as costUsd:0 / pricing:'priced' / rateSource:'default'. That laundered an
+    // UNKNOWN into a $0 — against the "honest null if unpriced, never 0" contract — and made a downstream
+    // pricing-red budget halt structurally unreachable.
+    const seen = [];
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: null }; } };
+    const result = await new Loop({ provider, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.unpricedRounds, 1, 'a no-usage round is unpriced');
+    assert.equal(result.metrics.costUsd, null, 'costUsd is honest null, never a silent 0');
+    assert.equal(result.metrics.estimatedRounds, 0, 'a no-usage round is not an estimate');
+    assert.equal(seen[0].pricing, 'unpriced');
+    assert.equal(seen[0].rateSource, null, 'source is null, not "default"');
+    assert.equal(seen[0].costUsd, null, 'the emitted round cost is null, not 0');
+  });
+
+  it('BA-23: a MID-RUN no-usage round is priced on ITS OWN usage (null), never the previous round\'s stale tokens', async () => {
+    // The more dangerous consequence of the stale-lastUsage bug: round 1 has real usage, round 2 (after the
+    // tool result) reports NO usage. Pre-fix, round 2 was priced on round 1's carried-over tokens — a stale
+    // REPEAT charge on usage that never happened. Round 2 must read unpriced; only round 1's real price counts.
+    const seen = [];
+    const provider = twoRoundProvider({ inputTokens: 1000, outputTokens: 500 }, null); // haiku tier
+    const result = await new Loop({ provider, onLlmResult: (r) => seen.push(r) })
+      .run([{ role: 'user', content: 'Hi' }], [{ name: 'foo', execute: async () => 'ok' }]);
+    assert.equal(result.metrics.turns, 2);
+    // Round 1: recognized tier, priced off the guesstimate.
+    assert.equal(seen[0].pricing, 'priced');
+    assert.equal(seen[0].rateSource, 'tier');
+    // Round 2: no usage → unpriced, NOT a stale repeat of round 1's 1000/500.
+    assert.equal(seen[1].pricing, 'unpriced', 'a mid-run no-usage round is unpriced');
+    assert.equal(seen[1].rateSource, null);
+    assert.equal(seen[1].costUsd, null, 'no stale repeat charge on the previous round\'s tokens');
+    // The cumulative price is round 1 ALONE (1000 in + 500 out at the haiku tier = 0.0035).
+    assert.ok(Math.abs(result.metrics.costUsd - 0.0035) < 1e-9, 'cost is round 1 only, no double-charge');
+    assert.equal(result.metrics.unpricedRounds, 1, 'exactly the one no-usage round is unpriced');
+    assert.equal(result.metrics.estimatedRounds, 1, 'exactly the one tier-priced round is an estimate');
+  });
+
+  it('BA-23: a no-usage round with a FINITE provider cost stays priced (provider-cost precedence unaffected)', async () => {
+    // The fix hands result.usage ?? null to the resolver, but resolveRoundCost checks a finite
+    // result.costUsd BEFORE it looks at usage — so a provider that reports its own authoritative price
+    // (e.g. CLIPipe surfacing the CLI's total_cost_usd) is still priced even with usage:null. Locks that
+    // the null-usage fix did not regress the provider-cost path.
+    const seen = [];
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: null, costUsd: 0.02 }; } };
+    const result = await new Loop({ provider, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.unpricedRounds, 0, 'a provider-priced round is not unpriced');
+    assert.ok(Math.abs(result.metrics.costUsd - 0.02) < 1e-9, 'provider cost wins over the null usage');
+    assert.equal(seen[0].pricing, 'priced');
+    assert.equal(seen[0].rateSource, 'provider');
+  });
+
+  it('BA-23: an ABSENT usage key (undefined) is unpriced, identical to explicit null', async () => {
+    // `result.usage ?? null` collapses both undefined and null to null, so a provider that omits the
+    // usage key entirely behaves the same as one that sets it null — no divergent laundering path.
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [] }; } };
+    const result = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.unpricedRounds, 1);
+    assert.equal(result.metrics.costUsd, null, 'absent usage is honest null, never a silent 0');
+  });
+
   it('onLlmResult carries an explicit pricing flag + rateSource (priced/guesstimate vs unpriced)', async () => {
     const seen = [];
     // A recognized tier, no provider cost, no caller rates → priced off the guesstimate, rateSource:'tier'.
