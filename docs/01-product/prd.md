@@ -809,6 +809,26 @@ re-litigated unless the user explicitly asks.
 > back into this main PRD; granular evidence tables for each live in the
 > CHANGELOG and git history.
 
+### v0.37.0 / BA-21 — pricing honesty (guesstimate-and-run + rateSource + loud pass-but-warn) (2026-08-23)
+
+- **The gap.** Cost estimation forced `unpriced` on a null/unknown model (a token-bearing round with no
+  price is useless to a `budget.maxCostUsd` gate), and its unknown-model fallback priced against an
+  Opus-tier ceiling — over-reporting cheap models (bareloop, the adopter, runs Sonnet) by up to ~33×.
+- **Decision (hamr sign-off).** Always price a token-bearing round off an honest guesstimate; make the
+  default the **Sonnet tier** ($0.003/$0.015 per 1K — the tier the adopter actually uses), not the Opus
+  ceiling. Rates resolve caller `rates` → recognized Claude tier (`haiku`/`sonnet` substring on the model
+  id) → Sonnet-tier default. The hand-curated `COST_PER_1K` per-model table + `_default` key are removed
+  (also killing the unguarded `COST_PER_1K[model]` dynamic-key lookup — substring tier matching now, no
+  plain-object index by a provider key).
+- **Honesty is signalled two ways.** A structured `rateSource: 'caller' | 'default'` on every metering
+  payload (rides every terminating path), AND a LOUD one-per-Loop-instance `console.warn` on the first
+  default-priced round (silenced by passing `rates`) — mirrors the temperature-degrade warn-once
+  precedent. `rateSource` is for programmatic consumers; the warn is the human nudge. The interpolated
+  provider `model` id is control-char-stripped + length-clamped before stderr (log hygiene, from the
+  `/security` pass).
+- **Semver.** MINOR (0.36.1 → 0.37.0): new public surface — the `Loop({ rates })` constructor option and
+  the `rateSource` metering field, both reflected in the generated `.d.ts`.
+
 ### v0.36.0 / decisive return-time judge + calibration harness (bareloop BA-20) (2026-08-12)
 
 > **Numbering note.** This is **bareloop's** BA-20 (`docs/UPSTREAM-ASKS.md`), not a

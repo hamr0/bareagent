@@ -590,6 +590,26 @@ describe('Loop', () => {
       }
     });
 
+    it('BA-21 warn strips control chars and clamps a hostile provider model id (log hygiene)', async () => {
+      // A loose/hostile provider could echo ANSI escapes or a giant string into `.model`; the warn
+      // must not pass those through to stderr verbatim.
+      const evil = `\x1b[31mred\x07\n${'x'.repeat(200)}`;
+      const provider = { model: evil, async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
+      const origWarn = console.warn;
+      const warns = [];
+      console.warn = (m) => warns.push(String(m));
+      try {
+        await new Loop({ provider }).run([{ role: 'user', content: 'a' }]);
+      } finally {
+        console.warn = origWarn;
+      }
+      const w = warns.find((x) => /GUESSTIMATE/.test(x));
+      assert.ok(w, 'the guesstimate warning fired');
+      assert.doesNotMatch(w, /[\x00-\x1f\x7f]/, 'no control chars reach stderr');
+      // The interpolated model id is clamped to 80 chars — the 200-x run cannot appear in full.
+      assert.doesNotMatch(w, /x{100}/, 'the model id is length-clamped');
+    });
+
     it('falls back to result.model when provider.model is absent', async () => {
       // FallbackProvider has no .model; the model surfaces only in the response. A recognized tier there
       // must set the price — proving the response model (haiku) was used, not the ceiling default.

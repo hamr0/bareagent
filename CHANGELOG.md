@@ -2,6 +2,34 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.37.0] - 2026-08-23
+
+### Changed
+
+- **BA-21 — pricing honesty: a token-bearing round is ALWAYS priced, off an honest two-tier
+  guesstimate.** Cost estimation no longer forces `unpriced` on a null/unknown model, and no longer
+  over-reports cheap models against an Opus ceiling. Rates now resolve in three steps: caller-supplied
+  `new Loop({ rates: { in, out, cacheReadMult?, cacheWriteMult? } })` (authoritative) → a recognized
+  Claude tier matched by substring on the model id (`haiku` $0.001/$0.005, `sonnet` $0.003/$0.015 per
+  1K) → the **Sonnet-tier ceiling default** ($0.003/$0.015). The old hand-curated `COST_PER_1K` per-model
+  table (and its `_default` fallback) is removed. This also drops the previous unguarded
+  `COST_PER_1K[model]` dynamic-key lookup in favor of substring tier matching — no plain-object index by a
+  provider-reported key.
+
+### Added
+
+- **`rateSource` on every metering payload** (`'caller' | 'default'`) — the structured signal that lets a
+  consumer distinguish an authoritative caller-priced round from a built-in guesstimate. Rides every
+  terminating path (halt / deny / stop / hard-limit / truncated / clean-finish), same as the rest of the
+  metrics.
+- **`Loop({ rates })` constructor option** — caller-supplied USD-per-1K rates (validated: `in`/`out` must be
+  finite, non-negative; throws otherwise). New public surface (hence the MINOR bump); reflected in the
+  generated `.d.ts`.
+- **Loud pass-but-warn**: the first round priced off the built-in default emits ONE `console.warn` **per
+  Loop instance** (not per round) naming `rateSource:'default'` and how to fix it (pass `rates`); silenced
+  entirely by passing `rates`. Mirrors the temperature-degrade warn-once precedent. The interpolated
+  provider `model` id is control-char-stripped and length-clamped before it reaches stderr (log hygiene).
+
 ## [0.36.1] - 2026-08-13
 
 ### Changed

@@ -377,8 +377,12 @@ class Loop {
   _warnGuesstimateOnce(model) {
     if (this._warnedGuesstimate) return;
     this._warnedGuesstimate = true;
+    // `model` is provider-reported (`result.model || provider.model`) — strip control chars/ANSI and
+    // clamp before it reaches stderr, so a loose/hostile provider can't inject terminal escapes or a
+    // giant string into this diagnostic. Log-hygiene only; no secret ever rides in a model id.
+    const safeModel = model ? String(model).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) : null;
     console.warn(
-      `[Loop] pricing with a built-in GUESSTIMATE rate (rateSource:'default'${model ? `, model '${model}'` : ''}) — `
+      `[Loop] pricing with a built-in GUESSTIMATE rate (rateSource:'default'${safeModel ? `, model '${safeModel}'` : ''}) — `
       + 'cost/budget figures are approximate. Pass new Loop({ rates: { in, out } }) with your model\'s '
       + 'USD-per-1K rates for an authoritative price (and to silence this warning).'
     );
