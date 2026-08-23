@@ -6,6 +6,10 @@ const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
+const { hasUsageSignal } = require('./provider-usage');
+
+// BA-24: raw Gemini usageMetadata fields. Any present (even 0) ⇒ a usage signal; none ⇒ null.
+const GEMINI_USAGE_KEYS = ['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount', 'cachedContentTokenCount'];
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -168,9 +172,12 @@ class GeminiProvider {
    * (total = prompt + candidates + thoughts — confirmed against live usageMetadata). Implicit caching
    * has no separate write tier → cacheCreationTokens 0.
    * @param {any} u - raw `data.usageMetadata`
-   * @returns {import('../types').Usage}
+   * @returns {import('../types').Usage|null}
    */
   _normalizeUsage(u) {
+    // BA-24: no usageMetadata (or an empty one) ⇒ null, not an all-zeros object (which would launder an
+    // unpriceable round into a $0 PRICED one). A present block with an explicit 0 field stays priced.
+    if (!hasUsageSignal(u, GEMINI_USAGE_KEYS)) return null;
     const cacheRead = u?.cachedContentTokenCount || 0;
     return {
       inputTokens: Math.max(0, (u?.promptTokenCount || 0) - cacheRead),

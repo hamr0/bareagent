@@ -217,13 +217,16 @@ class CLIPipeProvider {
         text: '',
         toolCalls: [],
         ...partial,
-        usage: { inputTokens: 0, outputTokens: 0, ...(partial.usage || {}) },
+        // BA-24: a parse fn that reports usage is trusted (missing tiers fill to 0); one that reports
+        // none surfaces null (unpriceable) rather than a manufactured all-zeros object.
+        usage: partial.usage ? { inputTokens: 0, outputTokens: 0, ...(/** @type {any} */ (partial.usage)) } : null,
       };
     }
+    // BA-24: raw text mode carries NO token data ever — honest null (unpriceable), not a synthetic $0.
     return {
       text: stdout,
       toolCalls: [],
-      usage: { inputTokens: 0, outputTokens: 0 },
+      usage: null,
     };
   }
 
@@ -333,7 +336,9 @@ class CLIPipeProvider {
     // captures a turn the CLI billed but never emitted as an event (measured — a bounded session's
     // cut-off turn). Summing the per-turn records is the fallback for a session we killed before its
     // result event. Either way the arithmetic is per-TURN, never per block-event (BA-17).
-    const usage = (meta && r.final.usage) ? meta.usage : r.turns.reduce((/** @type {any} */ a, t) => ({
+    // BA-24: key on the NORMALIZED meta.usage (a signal-bearing block), not the raw r.final.usage — an
+    // absent/empty raw block now normalizes to null, so fall back to the per-turn sum rather than null.
+    const usage = (meta && meta.usage) ? meta.usage : r.turns.reduce((/** @type {any} */ a, t) => ({
       inputTokens: a.inputTokens + (t.inputTokens || 0),
       outputTokens: a.outputTokens + (t.outputTokens || 0),
       cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
