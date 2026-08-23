@@ -1,7 +1,7 @@
 'use strict';
 
 const { ValidationError, HaltError } = require('./errors');
-const { estimateCost, COST_PER_1K } = require('./loop');
+const { resolveRoundCost } = require('./loop');
 
 /**
  * The decisive return-time judge (BA-20 / bareguard E6i, PRD §9.2). It compares a
@@ -31,7 +31,9 @@ const { estimateCost, COST_PER_1K } = require('./loop');
  *   outcome (criterion 5): the verdict is floored to `broke` (fail toward surfacing) but callers/harnesses must EXCLUDE a
  *   truncated result from any graded denominator — never counted as a miss, never as a pass.
  * @property {boolean} parseError - The model did not return usable JSON. Floored to `broke`, flagged like truncation.
- * @property {number|null} costUsd - Real per-call cost. An HONEST null when the tier is unpriced (never coerced to 0).
+ * @property {number|null} costUsd - Per-call cost. An HONEST null only when genuinely unpriced (never coerced to 0).
+ * @property {'provider'|'caller'|'default'|null} rateSource - WHERE costUsd came from (BA-21): 'provider' (real),
+ *   'caller' (your `rates`), 'default' (a flagged guesstimate — discount or override it), null (unpriced).
  * @property {any} usage - Neutral usage shape from the provider.
  * @property {string} model - The model that produced the verdict.
  * @property {string} raw - The model's raw text (for calibration/audit; scrub before persisting — contract 5).
@@ -124,9 +126,12 @@ function normalizeWhere(where) {
  * @property {import('../types').Provider} provider - LLM provider (bare-agent already owns the transport). To judge
  *   on a different tier, construct the provider FOR that tier — there is deliberately no per-call `model`/`effort`
  *   option, because the http providers build the request from `this.model` and would silently ignore them.
+ * @property {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [rates] - BA-21: per-1K USD
+ *   rates for the judge's own model, to price its call authoritatively (rateSource:'caller'). Omit → a flagged
+ *   guesstimate (rateSource:'default'). Bring your own rate, or take a guesstimate — never a silent guess.
  * @property {number} [maxTokens=512] - Cap on the judge's own output. A verdict truncated at the cap floors to
  *   `broke`; 512 clears the mechanical `where` with headroom (measured), lower it only if you know the artifacts are small.
- * @property {(payload: { usage: any, model: string|null, kind: 'judge', costUsd: number|null }) => any} [onLlmResult]
+ * @property {(payload: { usage: any, model: string|null, kind: 'judge', costUsd: number|null, rateSource: 'provider'|'caller'|'default'|null }) => any} [onLlmResult]
  *   - Budget hook; each judge call forwards its usage/cost (mirror of Evaluator/remember).
  */
 
@@ -184,20 +189,15 @@ async function judge(options = /** @type {JudgeOptions} */ ({})) {
   const model = (out && out.model) || provider.model || null;
   const usage = (out && out.usage) || null;
 
-  // costUsd: prefer a finite provider-reported cost; else estimate ONLY when the tier is in the rate table; else
-  // an HONEST null (contract 1 / criterion 4). NEVER coerce to 0. Crucially, do NOT let `estimateCost` price an
-  // UNKNOWN model off its `_default` fallback — that returns a plausible number for an unpriced tier, silently
-  // violating "an unpriced call reds". A tier we cannot price must surface as null, not a made-up estimate.
-  let costUsd = null;
-  if (typeof out?.costUsd === 'number' && Number.isFinite(out.costUsd)) {
-    costUsd = out.costUsd;
-  } else if (model && usage && Object.prototype.hasOwnProperty.call(COST_PER_1K, model)) {
-    const est = estimateCost(model, usage);
-    if (typeof est === 'number' && Number.isFinite(est)) costUsd = est;
-  }
+  // costUsd (BA-21 uniform rule — "bring your own rate, or take a flagged guesstimate"): prefer a finite
+  // provider-reported cost (rateSource:'provider'); else caller `options.rates` (rateSource:'caller');
+  // else the built-in guesstimate (rateSource:'default') — never a silent guess, always flagged, never a
+  // refuse. NEVER coerce to 0. A consumer that wants the judge to stay austere (no guess) reads
+  // rateSource:'default' and discounts it, or passes its own rates. `null` only when genuinely unpriced.
+  const { cost: costUsd, source: rateSource } = resolveRoundCost(out, model, usage, options.rates || null);
   const onLlmResult = typeof options.onLlmResult === 'function' ? options.onLlmResult : null;
   if (onLlmResult) {
-    await onLlmResult({ usage, model, kind: 'judge', costUsd });
+    await onLlmResult({ usage, model, kind: 'judge', costUsd, rateSource });
   }
 
   // Truncation is a DISTINCT flagged outcome (contract 2 / criterion 5): the API cut the round off, or it came
@@ -217,6 +217,7 @@ async function judge(options = /** @type {JudgeOptions} */ ({})) {
     truncated,
     parseError,
     costUsd,
+    rateSource,
     usage,
     model: model || '',
     raw: text,

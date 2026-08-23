@@ -268,15 +268,17 @@ describe('Real bareguard 0.2 Gate + Loop end-to-end', () => {
 describe('Meter→gate pricing round-trip (eval-assist §3.8, bareguard 0.9.0)', () => {
   const dummyTool = { name: 'dummy', description: 'noop', parameters: { type: 'object', properties: {} }, execute: async () => 'ok' };
 
-  // No model anywhere → estimateCost returns null → the round is genuinely unpriceable.
+  // BA-21: a token-only round is always priced now (guesstimate-and-run), so "no model" no longer yields
+  // an unpriced round — the ONE remaining genuinely-unpriceable case is a non-finite (runaway) estimate,
+  // which is guarded to null. That is the unpriced trigger this fail-closed rule must still catch.
   function unpricedProvider() {
     let round = 0;
     return {
-      name: 'mock', // deliberately NO `model` → costUsd null → pricing 'unpriced'
+      name: 'mock',
       async generate(_messages, tools) {
         round++;
         if (round === 1 && tools?.length) {
-          return { text: '', toolCalls: [{ id: 'c1', name: tools[0].name, arguments: {} }], usage: { inputTokens: 1000, outputTokens: 1000 } };
+          return { text: '', toolCalls: [{ id: 'c1', name: tools[0].name, arguments: {} }], usage: { inputTokens: Infinity, outputTokens: 1000 } };
         }
         return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
       },

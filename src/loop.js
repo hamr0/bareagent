@@ -48,7 +48,14 @@ const { classifyStopReason } = require('./provider-stop-reason');
  *   Fail-open (a trim fault degrades to no eviction that round); a thrown HaltError propagates.
  * @property {Function} [onLlmResult] - async (event) => void after each LLM call; forwards usage to
  *   gate.record (via wireGate). `event.kind` discriminates the source: `'turn'` for a main-loop round,
- *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget.
+ *   `'summarize'` for an out-of-band `ctx.summarize` call (R-C6). Both count against the budget. Each
+ *   event also carries `rateSource` ('provider'|'caller'|'default'|null, BA-21) beside the unchanged
+ *   two-value `pricing` — a 'default' cost is a flagged guesstimate, never a silent guess.
+ * @property {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [rates] - BA-21:
+ *   per-1K USD rates for THIS run's model (`in`/`out` required, finite, non-negative; cache multipliers
+ *   default to Anthropic's 0.1×/1.25×). When set, every token-only round is priced from these
+ *   (rateSource:'caller') instead of the built-in guesstimate. There is NO per-model rate table — bring
+ *   your own rate, or take a flagged guesstimate (haiku/sonnet recognized, else the Sonnet-tier default).
  * @property {Function} [onToolResult]
  * @property {number} [maxIdenticalToolErrors] - BA-12 safety net (default 3). Short-circuit the run when a
  *   tool's `execute` throws this many times IN A ROW for a BYTE-IDENTICAL call (same tool + same args). A
@@ -70,40 +77,49 @@ const { classifyStopReason } = require('./provider-stop-reason');
  * @property {number} [maxRounds] - Removed in v0.8; presence throws a migration error.
  */
 
-// Average pricing per 1K tokens (USD). Adjust these to match your provider's rates.
-// Last updated: 2026-06-22. Source: public provider pricing pages (Anthropic rates + cache multipliers
-// cross-checked against the claude-api reference). Rates are USD per 1K tokens. `cacheReadMult` /
-// `cacheWriteMult` are multipliers ON the input rate for the two cache tiers (see estimateCost); when
-// omitted they default to Anthropic's convention (read 0.1×, write 1.25×). OpenAI/Gemini have no
-// cache-WRITE surcharge (their providers report cacheCreationTokens=0), so only cacheReadMult matters
-// there. NOTE: OpenAI's cached discount is ~0.5× on the 4o family; some newer models (4.1/o-series) are
-// ~0.25× — set to 0.5× here as the documented general value; refine per-model against current pricing.
+// BA-21 — pricing is "bring your own rate, or take a flagged guesstimate", NOT a maintained per-model
+// table (a table rots: every new model + every price change is a code edit, and a stale row silently
+// misprices). No vanilla LLM API returns a price — every provider reports tokens only (the sole real $
+// in the codebase comes from the CLIPipe/Claude-CLI harness's own `total_cost_usd`, handled via the
+// provider `costUsd` path). So a token-only round is priced from a RATE, and there are exactly three
+// rate sources, surfaced on every metering payload as `rateSource`:
+//   'provider' — the provider reported an authoritative `costUsd` (real; e.g. the CLI harness).
+//   'caller'   — the caller passed `new Loop({ rates })` with its own model's numbers (authoritative to it).
+//   'default'  — nobody supplied a rate, so we GUESSTIMATE and RUN, flagged as a guess (never a silent
+//                refuse — governance's job is to keep the user in the know, not to stop on a missing rate).
+// The guesstimate recognizes the two Claude tiers in common use (haiku/sonnet) and otherwise falls to
+// the Sonnet-tier default — the common workhorse rate, "usually more expensive" than the cheap models
+// so a budget cap over- rather than under-reports on an unrecognized model, without the absurd
+// over-report an Opus ceiling would inflict on a cheap one. Any 'default'-priced round ALSO emits a
+// one-time loud warning per Loop instance (pass-but-warn) so the guess is never quietly relied on — a
+// caller pricing a different/cheaper model passes `rates` to correct it (and silence the warning).
+// Rates are USD per 1K tokens; `cacheReadMult`/`cacheWriteMult` are multipliers ON the input rate for
+// the two cache tiers (default to Anthropic's 0.1×/1.25× when omitted).
+/** @type {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} */
+const DEFAULT_RATES = { in: 0.003, out: 0.015 }; // Sonnet-tier: the common workhorse rate, the guesstimate default
 /** @type {Record<string, {in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}>} */
-const COST_PER_1K = {
-  // OpenAI — cached input ~0.5× (no write tier)
-  'gpt-4o': { in: 0.0025, out: 0.01, cacheReadMult: 0.5 },
-  'gpt-4o-mini': { in: 0.00015, out: 0.0006, cacheReadMult: 0.5 },
-  'gpt-4.1': { in: 0.002, out: 0.008, cacheReadMult: 0.5 },
-  'gpt-4.1-mini': { in: 0.0004, out: 0.0016, cacheReadMult: 0.5 },
-  'gpt-4.1-nano': { in: 0.0001, out: 0.0004, cacheReadMult: 0.5 },
-  'o3-mini': { in: 0.0011, out: 0.0044, cacheReadMult: 0.5 },
-  // Anthropic — Claude current generation (2026-06). Cache tiers use the default 0.1×/1.25×.
-  'claude-fable-5': { in: 0.01, out: 0.05 },
-  'claude-opus-4-8': { in: 0.005, out: 0.025 },
-  'claude-opus-4-7': { in: 0.005, out: 0.025 },
-  'claude-opus-4-6': { in: 0.005, out: 0.025 },
-  'claude-sonnet-4-6': { in: 0.003, out: 0.015 },
-  'claude-haiku-4-5-20251001': { in: 0.001, out: 0.005 },
-  'claude-haiku-4-5': { in: 0.001, out: 0.005 },
-  // Anthropic — earlier snapshots (the original Opus 4 / Sonnet 4 generation, genuinely different rates)
-  'claude-sonnet-4-20250514': { in: 0.003, out: 0.015 },
-  'claude-opus-4-20250514': { in: 0.015, out: 0.075 },
-  // Google Gemini — cached content ~0.25× (no write tier). Native provider lands in a following piece.
-  'gemini-2.5-flash': { in: 0.0003, out: 0.0025, cacheReadMult: 0.25 },
-  'gemini-2.5-pro': { in: 0.00125, out: 0.01, cacheReadMult: 0.25 },
-  // Fallback average across popular models (~$0.002 in, ~$0.008 out per 1K)
-  '_default': { in: 0.002, out: 0.008 },
+const TIER_RATES = {
+  haiku: { in: 0.001, out: 0.005 },   // low tier (cheaper than the default — recognized so it isn't over-reported)
+  sonnet: { in: 0.003, out: 0.015 },  // middle tier (== the default; standing rate, over-reports vs the intro rate)
 };
+
+/**
+ * Resolve the effective per-1K rate for a round, and WHERE it came from. Caller-supplied `rates` win
+ * (authoritative to the caller); else a recognized Claude tier from the model id; else the Sonnet-tier
+ * ceiling default. A null model still resolves to the default — we guesstimate and run, never refuse.
+ * @param {string|null|undefined} model
+ * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
+ * @returns {{rates: {in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}, source: 'caller'|'default'}}
+ */
+function resolveRates(model, callerRates) {
+  if (callerRates) return { rates: callerRates, source: 'caller' };
+  if (model) {
+    const m = String(model).toLowerCase();
+    if (m.includes('haiku')) return { rates: TIER_RATES.haiku, source: 'default' };
+    if (m.includes('sonnet')) return { rates: TIER_RATES.sonnet, source: 'default' };
+  }
+  return { rates: DEFAULT_RATES, source: 'default' };
+}
 
 // Internal safety net only — real iteration bounds come from a wired bareguard
 // Gate via `limits.maxTurns`. If you hit this without bareguard wired, you have
@@ -143,15 +159,19 @@ function sealDanglingToolCalls(msgs, marker) {
  * Estimate the USD cost of one round's usage, pricing the FOUR token tiers separately (D9/L7):
  * uncached input, output, cache-read, and cache-creation. Folding cache tokens into the full input
  * rate mis-prices badly — a warm prompt is mostly cache-read (~0.1–0.5× input) and Anthropic's
- * cache-creation is a ~1.25× premium — so each tier gets its own rate. Returns null (not 0) when the
- * model is unknown/absent so the caller can mark the round `unpriced` rather than silently free.
+ * cache-creation is a ~1.25× premium — so each tier gets its own rate. The rate comes from
+ * `resolveRates` (caller `rates` → recognized tier → Sonnet-tier ceiling default), so a token-bearing
+ * round is ALWAYS priced (guesstimate-and-run per BA-21) — a null model no longer forces `unpriced`.
+ * Returns null ONLY when usage is absent, or the arithmetic is non-finite (runaway ±Infinity), the
+ * genuinely-unpriceable cases that must stay `unpriced` / fail-closed.
  * @param {string|null} model
  * @param {Usage|null} usage
+ * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
  * @returns {number|null}
  */
-function estimateCost(model, usage) {
-  if (!usage || !model) return null;
-  const rates = COST_PER_1K[model] || COST_PER_1K['_default'];
+function estimateCost(model, usage, callerRates) {
+  if (!usage) return null;
+  const { rates } = resolveRates(model, callerRates || null);
   const readMult = rates.cacheReadMult ?? 0.1;    // Anthropic convention when unspecified
   const writeMult = rates.cacheWriteMult ?? 1.25;
   const cost = (
@@ -160,29 +180,33 @@ function estimateCost(model, usage) {
     (usage.cacheReadTokens || 0) * rates.in * readMult +
     (usage.cacheCreationTokens || 0) * rates.in * writeMult
   ) / 1000;
-  // A non-finite cost (±Infinity from runaway token counts, NaN from a garbage rate-table entry) is a
+  // A non-finite cost (±Infinity from runaway token counts, NaN from a garbage caller rate) is a
   // COULDN'T-PRICE, not a price. Return null so the round is marked `unpriced` and the value never
   // poisons `totalCost`, `result.metrics.costUsd`, or — via onLlmResult → the gate — `spentUsd`. The
   // last is the dangerous one: `NaN >= cap` is false, which would DISABLE a budget cap, not just
-  // under-count it. Same silent-unenforceable class as a null model (§3.7).
+  // under-count it. This is the ONE fail-closed pricing case (§3.7).
   return Number.isFinite(cost) ? cost : null;
 }
 
 /**
- * Resolve the priced USD for a round. A provider MAY report its own authoritative `costUsd` on the
- * GenerateResult (e.g. CLIPipeProvider `parse:'claude-json'` surfacing the claude CLI's own
- * `total_cost_usd` — a real price with NO local rate table). When present as a FINITE number it wins
- * over the rate-table estimate — including `0`, a valid priced value (a subscription/marginal-$0 run),
- * which stays 'priced', never demoted to the null/unpriced sentinel. A non-finite provider cost
- * (±Inf/NaN) is NOT a price → fall through to estimateCost (same couldn't-price guard as above).
+ * Resolve the priced USD for a round AND its `rateSource`. A provider MAY report its own authoritative
+ * `costUsd` on the GenerateResult (e.g. CLIPipeProvider surfacing the claude CLI's `total_cost_usd` — a
+ * real price, `source:'provider'`). When present as a FINITE number it wins over any estimate —
+ * including `0`, a valid priced value (a subscription/marginal-$0 run), which stays priced. A non-finite
+ * provider cost (±Inf/NaN) is NOT a price → fall through to the rate-based estimate (`caller`/`default`).
+ * `source` is null only when the round is genuinely unpriced (no usage, or a non-finite estimate).
  * @param {any} result - the GenerateResult from provider.generate()
  * @param {string|null} model
  * @param {Usage|null} usage
- * @returns {number|null}
+ * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
+ * @returns {{cost: number|null, source: 'provider'|'caller'|'default'|null}}
  */
-function resolveRoundCost(result, model, usage) {
-  if (result && Number.isFinite(result.costUsd)) return result.costUsd;
-  return estimateCost(model, usage);
+function resolveRoundCost(result, model, usage, callerRates) {
+  if (result && Number.isFinite(result.costUsd)) return { cost: result.costUsd, source: 'provider' };
+  if (!usage) return { cost: null, source: null };
+  const { source } = resolveRates(model, callerRates || null);
+  const cost = estimateCost(model, usage, callerRates || null);
+  return { cost, source: cost === null ? null : source };
 }
 
 // R-C6: default instruction for the provider-bound `ctx.summarize` lent to the assemble seam.
@@ -309,6 +333,16 @@ class Loop {
     }
     this.onLlmResult = options.onLlmResult || null;
     this.onToolResult = options.onToolResult || null;
+    // BA-21: caller-supplied per-1K rates ({in, out, cacheReadMult?, cacheWriteMult?}) for THIS run's
+    // model. When set, they price every token-only round (rateSource:'caller') instead of the built-in
+    // guesstimate. `in`/`out` are required and must be finite non-negative numbers.
+    if (options.rates != null) {
+      const r = options.rates;
+      if (typeof r !== 'object' || !Number.isFinite(r.in) || !Number.isFinite(r.out) || r.in < 0 || r.out < 0) {
+        throw new Error('[Loop] options.rates must be { in, out, cacheReadMult?, cacheWriteMult? } with finite non-negative in/out (USD per 1K tokens)');
+      }
+    }
+    this.rates = options.rates || null;
     this._stopped = false;
     /** @type {Message[]} */
     this._history = []; // for chat() stateful mode
@@ -332,6 +366,26 @@ class Loop {
         console.warn(`[Loop] onError callback threw: ${cbErr.message}`);
       }
     }
+  }
+
+  // BA-21 pass-but-warn: the FIRST round priced off the built-in guesstimate (rateSource:'default' — no
+  // provider cost, no caller `rates`) emits ONE loud warning per Loop instance. Loud because a silent
+  // guess is exactly the honesty gap BA-21 closes; once-per-instance because per-round would be noise.
+  // Silenced entirely by passing `new Loop({ rates })`. `console.warn` mirrors the temperature-degrade
+  // precedent; the structured signal for programmatic consumers is `rateSource` on every payload.
+  /** @param {string|null} model */
+  _warnGuesstimateOnce(model) {
+    if (this._warnedGuesstimate) return;
+    this._warnedGuesstimate = true;
+    // `model` is provider-reported (`result.model || provider.model`) — strip control chars/ANSI and
+    // clamp before it reaches stderr, so a loose/hostile provider can't inject terminal escapes or a
+    // giant string into this diagnostic. Log-hygiene only; no secret ever rides in a model id.
+    const safeModel = model ? String(model).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) : null;
+    console.warn(
+      `[Loop] pricing with a built-in GUESSTIMATE rate (rateSource:'default'${safeModel ? `, model '${safeModel}'` : ''}) — `
+      + 'cost/budget figures are approximate. Pass new Loop({ rates: { in, out } }) with your model\'s '
+      + 'USD-per-1K rates for an authoritative price (and to silence this warning).'
+    );
   }
 
   // Swallow-proof stream emit: a throwing listener must not corrupt Loop state.
@@ -525,6 +579,10 @@ class Loop {
       byTool: {},
       tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
       unpricedRounds: 0,
+      // BA-21 — priced rounds whose rate was the built-in guesstimate (rateSource:'default'), i.e. no
+      // provider cost and no caller `rates`. Not unpriced (they DID price and count against budget); a
+      // guess flagged so a consumer can see how much of the spend was estimated vs a real/supplied rate.
+      estimatedRounds: 0,
       // §3.6 CE-activity rollup — convenience counts derived in-place from the same events already
       // on the Stream (loop:trim, loop:summarize), not a second source. `compactions` counts
       // destructive trim evictions; `summaries` counts ctx.summarize calls; `tokensTrimmed` is an
@@ -561,6 +619,7 @@ class Loop {
       tokens: { ...metrics.tokens },
       costUsd: pricedAny ? totalCost : null,
       unpricedRounds: metrics.unpricedRounds,
+      estimatedRounds: metrics.estimatedRounds, // BA-21 — rounds priced off the built-in guesstimate
       spawned: metrics.byTool.spawn || 0, // §3.6 — spawn-tool invocations (byTool counts every call, incl. denied)
       context: { ...metrics.context }, // §3.6 CE-activity rollup
       memory: { ...metrics.memory }, // §3.6 memory footprint (stashed/episodes/recalls/stored/facts; see init note)
@@ -606,7 +665,8 @@ class Loop {
         const result = await loop.provider.generate(prompt, [], { temperature: 0, ...genOpts });
         const usage = (result && result.usage) || null;
         const model = (result && result.model) || loop.provider.model || null;
-        const cost = resolveRoundCost(result, model, usage);
+        const { cost, source: rateSource } = resolveRoundCost(result, model, usage, loop.rates);
+        if (rateSource === 'default') loop._warnGuesstimateOnce(model);
         if (cost !== null) { totalCost += cost; pricedAny = true; }
         addUsage(usage); // summarize tokens are real spend → count them in the cumulative meter
         metrics.context.summaries++; // §3.6 CE-activity rollup
@@ -619,6 +679,7 @@ class Loop {
               usage,
               costUsd: cost,
               pricing: cost === null ? 'unpriced' : 'priced',
+              rateSource, // BA-21: 'provider'|'caller'|'default'|null — a 'default' cost is a flagged guesstimate
               durationMs: Date.now() - startedAt,
               ctx,
               kind: 'summarize',
@@ -764,15 +825,19 @@ class Loop {
       // Prefer the model the response reports (robust when provider.model is absent or varies per
       // response — e.g. FallbackProvider, or a CircuitBreaker-wrapped provider that drops .model).
       const model = result.model || this.provider.model || null;
-      const roundCost = resolveRoundCost(result, model, lastUsage);
+      const { cost: roundCost, source: rateSource } = resolveRoundCost(result, model, lastUsage, this.rates);
+      if (rateSource === 'default') this._warnGuesstimateOnce(model);
       if (roundCost !== null) totalCost += roundCost;
 
       // Meter this round: count the turn, accumulate the four token tiers, and classify pricing —
-      // an unpriced round (null cost: no model / no rate) is tallied so the run is observably
-      // unenforceable on budget rather than silently free (the #3 cost contract).
+      // an unpriced round (null cost: no usage, or a runaway non-finite estimate) is tallied so the run
+      // is observably unenforceable on budget rather than silently free (the #3 cost contract). A round
+      // priced off the built-in guesstimate (rateSource:'default') is counted as an estimate too, so a
+      // consumer can see how much of the spend was guessed (BA-21 — keep the user in the know).
       metrics.turns++;
       addUsage(result.usage);
       if (roundCost === null) metrics.unpricedRounds++; else pricedAny = true;
+      if (rateSource === 'default') metrics.estimatedRounds++;
       // BA-16: a cycle-owning provider reports what really happened inside its session.
       const session = (result.session && typeof result.session === 'object') ? result.session : null;
       if (session) {
@@ -796,8 +861,11 @@ class Loop {
             usage: result.usage || null,
             costUsd: roundCost,
             // Priced vs unpriced is explicit so the gate never mistakes "couldn't price" (null) for
-            // "free" (0) — the silent-zero that made #3's budget cap a no-op. (D5 / §3.7.)
+            // "free" (0) — the silent-zero that made #3's budget cap a no-op. (D5 / §3.7.) `rateSource`
+            // is the honesty axis BESIDE it: 'default' means the number is a flagged guesstimate, never
+            // a silent guess stamped as if it were a real rate (BA-21). `pricing` keeps its two values.
             pricing: roundCost === null ? 'unpriced' : 'priced',
+            rateSource, // 'provider'|'caller'|'default'|null
             durationMs: Date.now() - llmStartedAt,
             ctx,
             kind: 'turn',
@@ -1213,4 +1281,4 @@ class Loop {
   }
 }
 
-module.exports = { Loop, estimateCost, COST_PER_1K };
+module.exports = { Loop, estimateCost, resolveRates, resolveRoundCost };

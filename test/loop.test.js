@@ -476,9 +476,9 @@ describe('Loop', () => {
   });
 
   describe('cost estimation', () => {
-    it('returns cost estimate for known model', async () => {
+    it('returns cost estimate for a recognized tier (haiku)', async () => {
       const provider = {
-        model: 'gpt-4o-mini',
+        model: 'claude-haiku-4-5',
         async generate() {
           return { text: 'Hello', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } };
         },
@@ -487,11 +487,11 @@ describe('Loop', () => {
       const result = await loop.run([{ role: 'user', content: 'Hi' }]);
 
       assert.equal(typeof result.cost, 'number');
-      // gpt-4o-mini: 1000 * 0.00015/1000 + 500 * 0.0006/1000 = 0.00015 + 0.0003 = 0.00045
-      assert.ok(Math.abs(result.cost - 0.00045) < 0.0001);
+      // haiku (recognized): 1000 * 0.001/1000 + 500 * 0.005/1000 = 0.001 + 0.0025 = 0.0035
+      assert.ok(Math.abs(result.cost - 0.0035) < 0.0001);
     });
 
-    it('uses default pricing for unknown model', async () => {
+    it('uses the sonnet-tier default guesstimate for an unrecognized model (BA-21)', async () => {
       const provider = {
         model: 'some-custom-model',
         async generate() {
@@ -502,13 +502,14 @@ describe('Loop', () => {
       const result = await loop.run([{ role: 'user', content: 'Hi' }]);
 
       assert.equal(typeof result.cost, 'number');
-      // _default: 1000 * 0.002/1000 + 1000 * 0.008/1000 = 0.002 + 0.008 = 0.01
-      assert.ok(Math.abs(result.cost - 0.01) < 0.001);
+      // Sonnet-tier default: 1000 * 0.003/1000 + 1000 * 0.015/1000 = 0.003 + 0.015 = 0.018
+      assert.ok(Math.abs(result.cost - 0.018) < 0.001);
+      assert.equal(result.metrics.estimatedRounds, 1, 'flagged as an estimate');
     });
 
     it('accumulates cost across rounds', async () => {
       const provider = {
-        model: 'gpt-4o-mini',
+        model: 'claude-haiku-4-5',
         async generate(messages) {
           if (messages.some(m => m.role === 'tool')) {
             return { text: 'Done', toolCalls: [], usage: { inputTokens: 500, outputTokens: 200 } };
@@ -526,11 +527,11 @@ describe('Loop', () => {
         [{ name: 'test', execute: async () => 'ok' }]
       );
 
-      // Round 1: 300*0.00015/1000 + 100*0.0006/1000 = 0.000045 + 0.00006 = 0.000105
-      // Round 2: 500*0.00015/1000 + 200*0.0006/1000 = 0.000075 + 0.00012 = 0.000195
-      // Total: 0.0003
+      // haiku. Round 1: 300*0.001/1000 + 100*0.005/1000 = 0.0003 + 0.0005 = 0.0008
+      //        Round 2: 500*0.001/1000 + 200*0.005/1000 = 0.0005 + 0.001  = 0.0015
+      // Total: 0.0023
       assert.ok(result.cost > 0);
-      assert.ok(Math.abs(result.cost - 0.0003) < 0.0001);
+      assert.ok(Math.abs(result.cost - 0.0023) < 0.0001);
     });
 
     it('includes cost in loop:done stream event', async () => {
@@ -551,31 +552,79 @@ describe('Loop', () => {
       assert.ok(doneEvent.data.cost > 0);
     });
 
-    it('returns zero cost when provider has no model', async () => {
+    it('BA-21: no model → priced at the ceiling guesstimate (never refuse), not zero', async () => {
       const provider = {
         async generate() {
           return { text: 'Hello', toolCalls: [], usage: { inputTokens: 100, outputTokens: 50 } };
-        },
-      };
-      const loop = new Loop({ provider });
-      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
-
-      assert.equal(result.cost, 0);
-    });
-
-    it('falls back to result.model when provider.model is absent', async () => {
-      // FallbackProvider has no .model; the model surfaces only in the response.
-      const provider = {
-        async generate() {
-          return { text: 'Hello', toolCalls: [], model: 'gpt-4o-mini', usage: { inputTokens: 1000, outputTokens: 500 } };
         },
       };
       const llm = [];
       const loop = new Loop({ provider, onLlmResult: (r) => llm.push(r) });
       const result = await loop.run([{ role: 'user', content: 'Hi' }]);
 
-      assert.ok(Math.abs(result.cost - 0.00045) < 0.0001);
-      assert.equal(llm[0].model, 'gpt-4o-mini');
+      // Sonnet-tier default: 100*0.003/1000 + 50*0.015/1000 = 0.0003 + 0.00075 = 0.00105
+      assert.ok(Math.abs(result.cost - 0.00105) < 1e-9);
+      assert.equal(llm[0].rateSource, 'default', 'flagged as a guesstimate');
+      assert.equal(result.metrics.estimatedRounds, 1);
+    });
+
+    it('BA-21 pass-but-warn: a guesstimated round warns ONCE per instance; caller rates silence it', async () => {
+      const provider = { model: 'claude-sonnet-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
+      const origWarn = console.warn;
+      const warns = [];
+      console.warn = (m) => warns.push(String(m));
+      try {
+        // Default guesstimate → exactly one warning, even across two rounds/runs on the same Loop.
+        const loop = new Loop({ provider });
+        await loop.run([{ role: 'user', content: 'a' }]);
+        await loop.run([{ role: 'user', content: 'b' }]);
+        assert.equal(warns.filter((w) => /GUESSTIMATE/.test(w)).length, 1, 'warns once per instance, not per round/run');
+        assert.match(warns[0], /rateSource:'default'/);
+
+        // Caller-supplied rates → rateSource:'caller' → no warning.
+        warns.length = 0;
+        await new Loop({ provider, rates: { in: 0.003, out: 0.015 } }).run([{ role: 'user', content: 'c' }]);
+        assert.equal(warns.filter((w) => /GUESSTIMATE/.test(w)).length, 0, 'authoritative rates do not warn');
+      } finally {
+        console.warn = origWarn;
+      }
+    });
+
+    it('BA-21 warn strips control chars and clamps a hostile provider model id (log hygiene)', async () => {
+      // A loose/hostile provider could echo ANSI escapes or a giant string into `.model`; the warn
+      // must not pass those through to stderr verbatim.
+      const evil = `\x1b[31mred\x07\n${'x'.repeat(200)}`;
+      const provider = { model: evil, async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
+      const origWarn = console.warn;
+      const warns = [];
+      console.warn = (m) => warns.push(String(m));
+      try {
+        await new Loop({ provider }).run([{ role: 'user', content: 'a' }]);
+      } finally {
+        console.warn = origWarn;
+      }
+      const w = warns.find((x) => /GUESSTIMATE/.test(x));
+      assert.ok(w, 'the guesstimate warning fired');
+      assert.doesNotMatch(w, /[\x00-\x1f\x7f]/, 'no control chars reach stderr');
+      // The interpolated model id is clamped to 80 chars — the 200-x run cannot appear in full.
+      assert.doesNotMatch(w, /x{100}/, 'the model id is length-clamped');
+    });
+
+    it('falls back to result.model when provider.model is absent', async () => {
+      // FallbackProvider has no .model; the model surfaces only in the response. A recognized tier there
+      // must set the price — proving the response model (haiku) was used, not the ceiling default.
+      const provider = {
+        async generate() {
+          return { text: 'Hello', toolCalls: [], model: 'claude-haiku-4-5', usage: { inputTokens: 1000, outputTokens: 500 } };
+        },
+      };
+      const llm = [];
+      const loop = new Loop({ provider, onLlmResult: (r) => llm.push(r) });
+      const result = await loop.run([{ role: 'user', content: 'Hi' }]);
+
+      // haiku 1000+500 = 0.0035 (proves the response model, not the ceiling 0.0175, priced it)
+      assert.ok(Math.abs(result.cost - 0.0035) < 1e-9);
+      assert.equal(llm[0].model, 'claude-haiku-4-5');
       assert.ok(llm[0].costUsd > 0, 'onLlmResult.costUsd is non-null with model from response');
     });
 
@@ -1129,17 +1178,22 @@ describe('A1 — provider-supplied costUsd (CLI authoritative price)', () => {
     assert.equal(result.metrics.unpricedRounds, 0);
   });
 
-  it('falls back to estimateCost when costUsd is absent or non-finite', async () => {
-    // Non-finite provider cost is NOT a price → estimateCost path → null (no model) → unpriced.
+  it('falls back to the guesstimate when costUsd is absent or non-finite (BA-21)', async () => {
+    // A non-finite provider cost is NOT a price → falls through to the rate-based estimate. With no
+    // model that is now the ceiling guesstimate (rateSource:'default'), priced — never treated as a
+    // provider price, never silently null. (Pre-BA-21 a no-model estimate went unpriced.)
+    const events = [];
     const provider = {
       model: null,
       async generate() {
         return { text: 'ok', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, costUsd: NaN };
       },
     };
-    const result = await new Loop({ provider }).run([{ role: 'user', content: 'hi' }]);
-    assert.equal(result.metrics.costUsd, null, 'NaN cost falls through, not treated as priced');
-    assert.equal(result.metrics.unpricedRounds, 1);
+    const result = await new Loop({ provider, onLlmResult: (e) => events.push(e) }).run([{ role: 'user', content: 'hi' }]);
+    assert.equal(result.metrics.costUsd, (1 * 0.003 + 1 * 0.015) / 1000, 'NaN falls through to the sonnet default guesstimate');
+    assert.equal(result.metrics.unpricedRounds, 0);
+    assert.equal(result.metrics.estimatedRounds, 1);
+    assert.equal(events[0].rateSource, 'default', 'not a provider price — a flagged guesstimate');
   });
 });
 

@@ -114,20 +114,33 @@ describe('judge — cost is an honest null, never coerced to 0 (contract 1 / cri
     assert.equal(r.costUsd, 0.0009);
   });
 
-  it('estimates cost from usage when the provider reports none (priceable tier)', async () => {
-    const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider(honored) }); // haiku is in the rate table
+  it('estimates cost from usage when the provider reports none — a recognized tier, flagged default', async () => {
+    const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider(honored) }); // haiku is a recognized tier
     assert.equal(typeof r.costUsd, 'number');
     assert.ok(r.costUsd > 0);
+    assert.equal(r.rateSource, 'default', 'a guesstimated judge cost is flagged, never a silent guess');
+  });
+
+  it('caller rates price the judge call authoritatively (rateSource:caller)', async () => {
+    const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider(honored), rates: { in: 0.01, out: 0.02 } });
+    assert.equal(typeof r.costUsd, 'number');
+    assert.equal(r.rateSource, 'caller');
   });
 
   it('returns null (not 0) when usage is absent — an honest couldn\'t-price', async () => {
     const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider({ ...honored, usage: null }) });
     assert.equal(r.costUsd, null);
+    assert.equal(r.rateSource, null);
   });
 
-  it('reds (null) an UNKNOWN tier — does NOT price it off estimateCost\'s _default fallback (contract 1)', async () => {
+  it('BA-21: an UNKNOWN tier now GUESSTIMATES (flagged default), not a silent guess or a refuse', async () => {
+    // Uniform rule — "bring your own rate, or take a FLAGGED guesstimate". The unknown tier no longer
+    // reds to null (the pre-BA-21 contract-1 behavior); it prices at the ceiling default with rateSource
+    // 'default' so a consumer can discount it. A silent guess (a number with no flag) is what's forbidden.
     const r = await judge({ request: 'r', artifact: {}, provider: fakeProvider(honored, { model: 'some-unknown-tier-xyz' }) });
-    assert.equal(r.costUsd, null, 'an unpriced tier must red to null, not a made-up default-rate number');
+    assert.equal(typeof r.costUsd, 'number');
+    assert.ok(r.costUsd > 0);
+    assert.equal(r.rateSource, 'default', 'the guess is flagged, not passed off as a real rate');
   });
 
   it('does not coerce a non-finite provider cost to 0 — falls through to estimate', async () => {

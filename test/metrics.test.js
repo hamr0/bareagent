@@ -97,19 +97,34 @@ describe('result.metrics — the meter (Feature 3)', () => {
   });
 
   it('costUsd is the priced cumulative and matches result.cost when everything is priced', async () => {
-    const provider = { model: 'gpt-4o-mini', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } }; } };
+    // BA-21: haiku is a recognized tier → priced off the guesstimate (rateSource:'default'). 1000 in + 500 out.
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 1000, outputTokens: 500 } }; } };
     const result = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }]);
-    assert.ok(Math.abs(result.metrics.costUsd - 0.00045) < 1e-9);
+    assert.ok(Math.abs(result.metrics.costUsd - 0.0035) < 1e-9);
     assert.equal(result.metrics.costUsd, result.cost);
     assert.equal(result.metrics.unpricedRounds, 0);
+    assert.equal(result.metrics.estimatedRounds, 1, 'a guesstimated round is counted as estimated');
   });
 
-  it('unpriceable run: costUsd is NULL (not 0) and unpricedRounds is non-zero — the silent-zero fix', async () => {
-    // No model on the provider AND none in the response → estimateCost returns null.
+  it('BA-21 flip: a NO-MODEL round is now priced at the guesstimate, not unpriced (never refuse)', async () => {
+    // Pre-BA-21 this went unpriced (null). Now: no model → the ceiling default guesstimate → priced,
+    // flagged rateSource:'default'. Governance keeps the user in the know instead of refusing on no rate.
     const provider = { async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 100, outputTokens: 50 } }; } };
     const result = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }]);
-    assert.equal(result.metrics.costUsd, null, 'cost must be null (unknown), not a silent 0');
+    assert.ok(Number.isFinite(result.metrics.costUsd) && result.metrics.costUsd > 0, 'priced at the guesstimate');
+    assert.equal(result.metrics.unpricedRounds, 0);
+    assert.equal(result.metrics.estimatedRounds, 1, 'a no-model round is a flagged guesstimate');
+    assert.equal(result.metrics.costUsd, (100 * 0.003 + 50 * 0.015) / 1000, 'sonnet default rate');
+  });
+
+  it('the ONE genuine unpriced path is a runaway estimate → costUsd NULL, not a silent 0 (cap-poison guard)', async () => {
+    // A non-finite (runaway ±Infinity) estimate is the only remaining unpriceable case — it MUST read
+    // null so a NaN/Infinity never reaches the gate and disables the budget cap (`NaN >= cap` is false).
+    const provider = { model: 'claude-haiku-4-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: Infinity, outputTokens: 50 } }; } };
+    const result = await new Loop({ provider }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(result.metrics.costUsd, null, 'cost must be null (unpriceable), not a silent 0 or a non-finite number');
     assert.equal(result.metrics.unpricedRounds, 1);
+    assert.equal(result.metrics.estimatedRounds, 0, 'an unpriced round is not an estimated round');
     assert.equal(result.cost, 0, 'result.cost stays 0 for back-compat; metrics is the honest signal');
   });
 
@@ -127,16 +142,26 @@ describe('result.metrics — the meter (Feature 3)', () => {
     assert.equal(seen[0].costUsd, null, 'the emitted costUsd is null, not a non-finite number');
   });
 
-  it('onLlmResult carries an explicit pricing flag (priced vs unpriced)', async () => {
+  it('onLlmResult carries an explicit pricing flag + rateSource (priced/guesstimate vs unpriced)', async () => {
     const seen = [];
-    const priced = { model: 'gpt-4o-mini', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
+    // A recognized tier, no provider cost, no caller rates → priced off the guesstimate, rateSource:'default'.
+    const priced = { model: 'claude-sonnet-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
     await new Loop({ provider: priced, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
     assert.equal(seen[0].pricing, 'priced');
+    assert.equal(seen[0].rateSource, 'default', 'a guesstimated price is flagged default, never a silent guess');
 
+    // Caller-supplied rates → rateSource:'caller'.
     seen.length = 0;
-    const unpriced = { async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: 10, outputTokens: 5 } }; } };
+    await new Loop({ provider: priced, rates: { in: 0.002, out: 0.008 }, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
+    assert.equal(seen[0].pricing, 'priced');
+    assert.equal(seen[0].rateSource, 'caller');
+
+    // Genuinely unpriced (runaway estimate → null) → pricing:'unpriced', rateSource:null.
+    seen.length = 0;
+    const unpriced = { model: 'claude-sonnet-5', async generate() { return { text: 'hi', toolCalls: [], usage: { inputTokens: Infinity, outputTokens: 5 } }; } };
     await new Loop({ provider: unpriced, onLlmResult: (r) => seen.push(r) }).run([{ role: 'user', content: 'Hi' }]);
     assert.equal(seen[0].pricing, 'unpriced');
+    assert.equal(seen[0].rateSource, null);
   });
 
   // §3.6 CE-activity rollup — the sourceable subset (compactions, summaries, spawned). Derived in-place
