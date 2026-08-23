@@ -55,7 +55,7 @@ const { classifyStopReason } = require('./provider-stop-reason');
  *   per-1K USD rates for THIS run's model (`in`/`out` required, finite, non-negative; cache multipliers
  *   default to Anthropic's 0.1×/1.25×). When set, every token-only round is priced from these
  *   (rateSource:'caller') instead of the built-in guesstimate. There is NO per-model rate table — bring
- *   your own rate, or take a flagged guesstimate (haiku/sonnet recognized, else an Opus-tier ceiling).
+ *   your own rate, or take a flagged guesstimate (haiku/sonnet recognized, else the Sonnet-tier default).
  * @property {Function} [onToolResult]
  * @property {number} [maxIdenticalToolErrors] - BA-12 safety net (default 3). Short-circuit the run when a
  *   tool's `execute` throws this many times IN A ROW for a BYTE-IDENTICAL call (same tool + same args). A
@@ -105,7 +105,7 @@ const TIER_RATES = {
 
 /**
  * Resolve the effective per-1K rate for a round, and WHERE it came from. Caller-supplied `rates` win
- * (authoritative to the caller); else a recognized Claude tier from the model id; else the Opus-tier
+ * (authoritative to the caller); else a recognized Claude tier from the model id; else the Sonnet-tier
  * ceiling default. A null model still resolves to the default — we guesstimate and run, never refuse.
  * @param {string|null|undefined} model
  * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}|null} [callerRates]
@@ -160,7 +160,7 @@ function sealDanglingToolCalls(msgs, marker) {
  * uncached input, output, cache-read, and cache-creation. Folding cache tokens into the full input
  * rate mis-prices badly — a warm prompt is mostly cache-read (~0.1–0.5× input) and Anthropic's
  * cache-creation is a ~1.25× premium — so each tier gets its own rate. The rate comes from
- * `resolveRates` (caller `rates` → recognized tier → Opus-tier ceiling default), so a token-bearing
+ * `resolveRates` (caller `rates` → recognized tier → Sonnet-tier ceiling default), so a token-bearing
  * round is ALWAYS priced (guesstimate-and-run per BA-21) — a null model no longer forces `unpriced`.
  * Returns null ONLY when usage is absent, or the arithmetic is non-finite (runaway ±Infinity), the
  * genuinely-unpriceable cases that must stay `unpriced` / fail-closed.

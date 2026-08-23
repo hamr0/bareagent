@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const { estimateCost, resolveRates, resolveRoundCost } = require('../src/loop');
 
 // BA-21: pricing is "bring your own rate, or take a flagged guesstimate" — no per-model rate table.
-// Two Claude tiers are recognized (haiku/sonnet); everything else falls to an Opus-tier ceiling default
-// (fail-safe over-report). A null model no longer forces `unpriced` — it guesstimates and runs.
+// Two Claude tiers are recognized (haiku/sonnet); everything else falls to the Sonnet-tier ceiling default
+// (fail-safe over-report vs the cheap tier). A null model no longer forces `unpriced` — it guesstimates and runs.
 
 describe('resolveRates — caller > recognized tier > ceiling default', () => {
   it('caller rates always win, tagged source:caller', () => {
