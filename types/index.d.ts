@@ -47,8 +47,10 @@ export interface RunMetrics {
   tokens: { input: number; output: number; cacheCreation: number; cacheRead: number };
   /** Cumulative USD over priced rounds; null ONLY if nothing could be priced (explicit-unknown, not free). */
   costUsd: number | null;
-  /** Count of rounds whose cost could not be computed (no model / no rate) — the loud-unpriced signal. */
+  /** Count of rounds genuinely unpriceable (no usage, or a runaway non-finite estimate) — the loud-unpriced signal. */
   unpricedRounds: number;
+  /** BA-21: count of priced rounds whose rate was the built-in guesstimate (rateSource:'default'), not a real/supplied rate. */
+  estimatedRounds: number;
   /** Spawn-tool invocations this run (the `spawn` tool count — counts every call, incl. denied/failed). */
   spawned: number;
   /**
