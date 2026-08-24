@@ -217,13 +217,16 @@ class CLIPipeProvider {
         text: '',
         toolCalls: [],
         ...partial,
-        usage: { inputTokens: 0, outputTokens: 0, ...(partial.usage || {}) },
+        // BA-24: a parse fn that reports usage is trusted (missing tiers fill to 0); one that reports
+        // none surfaces null (unpriceable) rather than a manufactured all-zeros object.
+        usage: partial.usage ? { inputTokens: 0, outputTokens: 0, ...(/** @type {any} */ (partial.usage)) } : null,
       };
     }
+    // BA-24: raw text mode carries NO token data ever — honest null (unpriceable), not a synthetic $0.
     return {
       text: stdout,
       toolCalls: [],
-      usage: { inputTokens: 0, outputTokens: 0 },
+      usage: null,
     };
   }
 
@@ -333,12 +336,22 @@ class CLIPipeProvider {
     // captures a turn the CLI billed but never emitted as an event (measured — a bounded session's
     // cut-off turn). Summing the per-turn records is the fallback for a session we killed before its
     // result event. Either way the arithmetic is per-TURN, never per block-event (BA-17).
-    const usage = (meta && r.final.usage) ? meta.usage : r.turns.reduce((/** @type {any} */ a, t) => ({
-      inputTokens: a.inputTokens + (t.inputTokens || 0),
-      outputTokens: a.outputTokens + (t.outputTokens || 0),
-      cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
-      cacheCreationTokens: a.cacheCreationTokens + (t.cacheCreationTokens || 0),
-    }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    // BA-24: key on the NORMALIZED meta.usage (a signal-bearing block), not the raw r.final.usage — an
+    // absent/empty raw block now normalizes to null, so fall back to the per-turn sum rather than null.
+    // The per-turn sum is a real signal ONLY when turns actually streamed; a session that died before
+    // any turn (zero-turn native session, no final usage block) has NOTHING to sum, and reducing over
+    // an empty array would MANUFACTURE a truthy all-zeros object — the exact absence→$0-priced laundering
+    // BA-24 eliminates at every other site. So absence (no meta.usage AND no turns) surfaces null.
+    const usage = (meta && meta.usage)
+      ? meta.usage
+      : (r.turns.length > 0
+        ? r.turns.reduce((/** @type {any} */ a, t) => ({
+          inputTokens: a.inputTokens + (t.inputTokens || 0),
+          outputTokens: a.outputTokens + (t.outputTokens || 0),
+          cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
+          cacheCreationTokens: a.cacheCreationTokens + (t.cacheCreationTokens || 0),
+        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 })
+        : null);
 
     const { stopReason, error } = resolveSessionError({
       // A bridge/guard terminal is more specific than the turn backstop, so it wins the tag.
@@ -362,7 +375,9 @@ class CLIPipeProvider {
     // real but SHORT of the session total. Sending the difference makes a gate's token axis add up
     // to exactly what the CLI itself reports — where sending the total would double-count everything
     // already streamed, and sending zero would leave the axis quietly under-fed.
-    const residual = subtractUsage(usage, r.turns);
+    // BA-24: a null usage (zero-turn session, no reported block) has no residual to reconcile — pass
+    // the honest null through to the meter rather than dereferencing null in subtractUsage.
+    const residual = usage ? subtractUsage(usage, r.turns) : null;
     if (this.onTurn) {
       try {
         await this.onTurn({

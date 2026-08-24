@@ -60,7 +60,7 @@ catalog of MCP-exposed tools for 30 days) and `mcp_invoke` (calls them).
 > `isCritical` (the frozen critical-safety floor). Nothing here runs unless a
 > consumer wires it — same "does not impose patterns" stance as above. Design,
 > decisions, and SDK alignment for the suite live in
-> **[`eval-assist-prd.md`](./eval-assist-prd.md)** (DELIVERED 2026-06-24);
+> **[`eval-assist-prd.md`](eval-assist-prd.md)** (DELIVERED 2026-06-24);
 > this `prd.md` stays the core one-shot-runner spec.
 
 > **`recurse()` — the RLM primitive (companion spec).** A second opt-in component,
@@ -68,7 +68,7 @@ catalog of MCP-exposed tools for 30 days) and `mcp_invoke` (calls them).
 > fan-out → verify → synthesize in one call, with code-side aggregation and honest
 > `{incomplete}` on guard exhaustion. Design, build sequence, the litectx-retrieval
 > task-shape model, and the deferred-item validation POCs live in
-> **[`RLM_PRD.md`](./RLM_PRD.md)** (DELIVERED 2026-06-28). Kept separate from this
+> **[`RLM_PRD.md`](RLM_PRD.md)** (DELIVERED 2026-06-28). Kept separate from this
 > core spec, mirroring `eval-assist-prd.md`.
 
 ## 4. What bareagent is NOT
@@ -157,7 +157,7 @@ bareagent.
 │      decision        = await gate.check(cleanAction)             │
 │                                                                  │
 │      if decision.outcome == "allow":                             │
-│        result = await tools[cleanAction.name](cleanAction.args)  │
+│        result = await tools[cleanAction.name](../01-product/cleanAction.args)  │
 │      else if decision.outcome == "askHuman":                     │
 │        result = await approval(cleanAction, decision.prompt)     │
 │      else:  // deny                                              │

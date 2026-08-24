@@ -86,7 +86,9 @@ export interface ToolCall {
 export interface GenerateResult {
   text: string;
   toolCalls: ToolCall[];
-  usage: Usage;
+  /** Normalized token usage, or `null` when the provider reported NO usage block (BA-24) — an
+   *  unpriceable round, distinct from a present block whose fields are legitimately 0. */
+  usage: Usage | null;
   /** Model id the response was produced by; preferred over Provider.model for cost accounting. */
   model?: string | null;
   /**

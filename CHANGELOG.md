@@ -2,6 +2,46 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.39.0] - 2026-08-24
+
+### Changed
+
+- **BA-24 — every provider surfaces `usage: null` on an absent usage block, instead of manufacturing an
+  all-zeros object.** BA-23 fixed `loop.js`'s stale-`lastUsage` symptom, but the laundering had simply
+  relocated one layer up: every http(s) provider built its neutral `Usage` object *unconditionally*
+  (`data.usage?.field || 0`), so a 200 response with no `usage` block (or an empty one) still produced a
+  truthy all-zeros object. That sailed straight past `resolveRoundCost`'s `if (!usage) return
+  {cost:null}` honest-null guard and priced the round a confident $0 at the `'tier'`/`'default'`
+  `rateSource` label — worse than an obviously-unpriced round, since a consumer filtering for
+  `'default'` guesses never sees it. Fixed at all **7 sites**: Anthropic, OpenAI, Gemini, Ollama, and
+  CLIPipe (both the tool-emulation `mapClaudeMeta` mapper and the native session-close per-turn-sum
+  fallback, the 7th site added same-release). New shared discriminator `hasUsageSignal(block, keys)`
+  (`src/provider-usage.js`, zero deps) decides ABSENCE vs a PRESENT block with legitimately-zero fields —
+  per-field `|| 0` stays correct once a block is confirmed present (a cache-only round: `input_tokens:0`
+  + `cache_read_input_tokens>0` still carries a signal and stays priced).
+- **`GenerateResult.usage` widens from `Usage` to `Usage | null` — public-surface contract change
+  (MINOR).** Every downstream consumer already null-guards (a leftover from BA-23's `result.usage ??
+  null` pattern) — `loop.js`, `judge.js`, `remember.js`, `planner.js`, `evaluator.js`,
+  `tools/spawn.js` — so this is additive-safe for in-tree callers, but any external code reading
+  `result.usage.inputTokens` directly must now guard for `null`.
+- **Validated against real provider shapes, not a synthetic stub.** `test/provider-usage-null.test.js`
+  drives each real provider class against a local HTTP server (`127.0.0.1`, no external calls),
+  varying only the usage block — the exact shape a hand-written `usage:null` stub can't exercise, since
+  no real provider can emit that shape without this fix. Includes real negative-producing controls (a
+  present real-usage block stays priced; a cache-only block with an explicit `0` field stays priced) so
+  the discriminator can't rig its own result.
+- Cross-repo origin: adopter bareloop's F6 pricing-red-halt validation against the real
+  `AnthropicProvider` confirmed BA-23 alone wasn't sufficient — the whole usage-null bug *class* is now
+  closed in one release rather than one provider site per release.
+
+### Docs
+
+- Reorganized the docs corpus into `docs/product/` (living reference), `docs/logs/` (session logs), and
+  `docs/archive/` (superseded/oversized originals kept for citation), and split three oversized docs
+  (`prd.md`, `RLM_PRD.md`, the eval-assist doc) into per-topic pages under `docs/wiki/`, incl. a new
+  `docs/wiki/decisions-log.md` as the canonical PRD §22 decisions log going forward. `docs/index.md` is
+  the new corpus entry point. Ships in this release; not itself a code change.
+
 ## [0.38.1] - 2026-08-23
 
 ### Fixed

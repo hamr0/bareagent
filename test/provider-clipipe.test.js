@@ -17,8 +17,9 @@ describe('CLIPipeProvider', () => {
 
     assert.equal(result.text, 'hello world');
     assert.deepEqual(result.toolCalls, []);
-    assert.equal(result.usage.inputTokens, 0);
-    assert.equal(result.usage.outputTokens, 0);
+    // BA-24: raw text mode carries NO token data — usage is honest null (unpriceable), not a synthetic
+    // {0,0} that would launder the round into a priced $0.
+    assert.equal(result.usage, null);
   });
 
   it('pipes messages to stdin', async () => {
@@ -342,7 +343,7 @@ describe("CLIPipeProvider parse:'claude-json' (A1 — structured CLI output)", (
     assert.equal(r.usage.outputTokens, 0);             // required field defaulted
   });
 
-  it('default (no parse) is byte-identical to today — raw JSON stays text, usage 0', async () => {
+  it('default (no parse) leaves raw JSON as text; usage is honest null (BA-24, no synthetic $0)', async () => {
     const provider = new CLIPipeProvider({
       command: 'node',
       args: ['-e', 'process.stdout.write(process.env.ENVELOPE)'],
@@ -350,8 +351,8 @@ describe("CLIPipeProvider parse:'claude-json' (A1 — structured CLI output)", (
     });
     const r = await provider.generate([{ role: 'user', content: 'hi' }]);
     assert.equal(r.text, SUCCESS);                     // raw envelope returned verbatim, NOT parsed
-    assert.equal(r.usage.inputTokens, 0);
-    assert.equal(r.usage.outputTokens, 0);
+    // BA-24: no structured parse ⇒ no token data ⇒ usage null (unpriceable), not a manufactured {0,0}.
+    assert.equal(r.usage, null);
     assert.ok(!('costUsd' in r));
   });
 });

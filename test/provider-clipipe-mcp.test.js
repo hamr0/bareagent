@@ -837,6 +837,30 @@ describe('BA-17 — what the caller actually receives', () => {
     assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
   });
 
+  // BA-24 site #7: the native session-close path. A session that ends before any assistant turn
+  // streams — and whose result event carries no usage block — has NOTHING to sum. Reducing over the
+  // empty turn array would MANUFACTURE a truthy all-zeros Usage object, which resolveRoundCost then
+  // PRICES at a guesstimated $0 (at the confident 'tier'/'default' label) — the exact absence→$0
+  // laundering BA-24 eliminates at the other six sites. Absence must surface null.
+  test('BA-24: a zero-turn native session with no reported usage surfaces usage:null, not manufactured zeros', async () => {
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' });
+    const r = await nativeProvider(fakeCli([done]))
+      .generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(r.session.turns, 0, 'no assistant message ever streamed');
+    assert.strictEqual(r.usage, null, 'an unmeterable session is unpriceable, never a $0-priced zero object');
+  });
+
+  // Negative control: turns DID stream, so the per-turn sum is a real signal and stays a Usage object,
+  // never coerced to null. The zero-turn null above must not over-fire onto a session that has data.
+  test('BA-24: a session WITH streamed turns but no result-usage keeps its summed Usage (never nulled)', async () => {
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: 't' }] } });
+    const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok' });
+    const r = await nativeProvider(fakeCli([turn('m1'), turn('m2'), done]))
+      .generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
+    assert.strictEqual(r.session.turns, 2);
+    assert.deepStrictEqual(r.usage, { inputTokens: 2, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
   test('a session inside its bound is untouched by the backstop (negative control)', async () => {
     const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 1, output_tokens: 5 }, content: [{ type: 'text', text: `work from ${id}` }] } });
     const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'all done', num_turns: 9, total_cost_usd: 0.002 });

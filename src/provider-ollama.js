@@ -5,6 +5,10 @@ const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
+const { hasUsageSignal } = require('./provider-usage');
+
+// BA-24: raw Ollama usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
+const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -101,10 +105,11 @@ class OllamaProvider {
       // Like Gemini, Ollama has NO tool_use done_reason — a complete tool call returns `stop` (measured).
       // `hasToolCalls` lets the normalizer say so, instead of reporting a tool round as a clean finish.
       stopReason: normalizeStopReason(data.done_reason, 'ollama', { hasToolCalls: toolCalls.length > 0 }),
-      usage: {
-        inputTokens: data.prompt_eval_count || 0,
-        outputTokens: data.eval_count || 0,
-      },
+      // BA-24: honest null when the response carried no token counts — do NOT manufacture an all-zeros
+      // object (which launders an unpriceable round into a $0 PRICED one).
+      usage: hasUsageSignal(data, OLLAMA_USAGE_KEYS)
+        ? { inputTokens: data.prompt_eval_count || 0, outputTokens: data.eval_count || 0 }
+        : null,
       ...(temperatureDropped && { temperatureDropped: true }),
     };
   }

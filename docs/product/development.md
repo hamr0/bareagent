@@ -119,7 +119,7 @@ bare-agent/
 
 ## Status
 
-All 8 components + 3 providers + 2 stores + CLI implemented and validated through POCs 1-6 + E2E tests. Early development. See docs/01-product/prd.md for full roadmap.
+All 8 components + 3 providers + 2 stores + CLI implemented and validated through POCs 1-6 + E2E tests. Early development. See docs/archive/prd.md for full roadmap.
 
 ## Bugs Caught by Integration Tests
 

@@ -1,9 +1,9 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.38.1 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.14.0` optional peer for governance) | Apache 2.0
+> v0.39.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.14.0` optional peer for governance) | Apache 2.0
 >
-> Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
+> Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/archive/usage-guide.md)
 
 ## What this is
 
@@ -891,7 +891,7 @@ All return `{ text, toolCalls, usage: { inputTokens, outputTokens }, model?, cos
 
 **Plaintext-key warning (Unreleased):** the OpenAI provider's `baseUrl` accepts `http://` (for local/OpenAI-compatible endpoints), but a `Bearer` key sent over plaintext http to a **non-loopback** host is exposed on the wire. The provider now warns once when that happens. Loopback hosts (`localhost`/`127.0.0.0/8`/`::1` — local proxies, Ollama-style endpoints) stay silent, since that's the legitimate keyless-local case. The header is **not** stripped (some local proxies want a key), so use `https` for any remote endpoint, or drop `apiKey` when the local endpoint needs none.
 
-**Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. **Pricing honesty (BA-21, v0.37.0):** a token-bearing round is ALWAYS priced (guesstimate-and-run — a null/unknown model no longer forces `unpriced`); rates resolve as caller-supplied `new Loop({ rates: { in, out } })` (authoritative) → a recognized Claude tier from the model id (`haiku`/`sonnet`) → the **Sonnet-tier** ceiling default ($0.003/$0.015 per 1K, no per-model table). Every metering payload carries a `rateSource: 'provider' | 'caller' | 'tier' | 'default' | null` field so a consumer can tell an authoritative price from a guess — and (BA-21 follow-up, v0.38.0) a recognized-tier guess (`'tier'`) from a blind ceiling fallback (`'default'`); a round priced off either guesstimate emits ONE loud `console.warn` per Loop instance naming the actual source (silenced by passing `rates`). To set your own rates, construct `new Loop({ rates })` — there is no longer a `COST_PER_1K` table to edit. The model is resolved as `result.model || provider.model` (v0.16.1+) — providers now echo the model in their `generate()` result, so cost accounting holds even when `provider.model` is absent or varies per response, e.g. behind `FallbackProvider` or `CircuitBreaker.wrapProvider` (the wrapper also preserves `model`/`name` passthrough props). Wire `onLlmResult` (via `wireGate`) and a `budget.maxCostUsd` cap then halts on token-heavy workloads too.
+**Cost estimation:** Loop automatically estimates USD cost per run based on model and token usage. The `cost` field appears in every `loop.run()` result and in `loop:done` stream events. **Pricing honesty (BA-21, v0.37.0):** a token-bearing round is ALWAYS priced (guesstimate-and-run — a null/unknown model no longer forces `unpriced`); rates resolve as caller-supplied `new Loop({ rates: { in, out } })` (authoritative) → a recognized Claude tier from the model id (`haiku`/`sonnet`) → the **Sonnet-tier** ceiling default ($0.003/$0.015 per 1K, no per-model table). Every metering payload carries a `rateSource: 'provider' | 'caller' | 'tier' | 'default' | null` field so a consumer can tell an authoritative price from a guess — and (BA-21 follow-up, v0.38.0) a recognized-tier guess (`'tier'`) from a blind ceiling fallback (`'default'`); a round priced off either guesstimate emits ONE loud `console.warn` per Loop instance naming the actual source (silenced by passing `rates`). To set your own rates, construct `new Loop({ rates })` — there is no longer a `COST_PER_1K` table to edit. The model is resolved as `result.model || provider.model` (v0.16.1+) — providers now echo the model in their `generate()` result, so cost accounting holds even when `provider.model` is absent or varies per response, e.g. behind `FallbackProvider` or `CircuitBreaker.wrapProvider` (the wrapper also preserves `model`/`name` passthrough props). Wire `onLlmResult` (via `wireGate`) and a `budget.maxCostUsd` cap then halts on token-heavy workloads too. **Usage-null boundary (BA-24, v0.39.0):** `GenerateResult.usage` is `Usage | null` — every provider (incl. native CLIPipe session-close) now surfaces `usage: null` when the raw API response carried NO usage block, instead of manufacturing an all-zeros object. A manufactured zero object used to sail past `resolveRoundCost`'s honest-null guard and get priced as a confident $0 (`rateSource:'tier'`/`'default'`) — an unpriceable round now stays unpriced. A *present* block with an explicit `0` field (e.g. a cache-only round) is unaffected and still prices normally.
 
 ## Store options
 
@@ -991,7 +991,7 @@ These are deliberately NOT in bare-agent. Don't look for them — build them fro
 | **Heartbeat (ambient awareness)** | "Check if anything needs attention" scope is your domain | Scheduler recurring job where the LLM triages: `scheduler.add({ type: 'recurring', schedule: '30m', action: 'Check if anything needs attention' })`. |
 | **Cron** | **This IS built in** | Scheduler supports cron expressions (requires `cron-parser` peer dep) and relative schedules (`5s`, `30m`, `2h`, `1d`) natively. |
 
-For full recipes with code examples, see `docs/02-features/usage-guide.md` § "Patterns, Not Features".
+For full recipes with code examples, see `docs/archive/usage-guide.md` § "Patterns, Not Features".
 
 ## Production usage
 
@@ -1010,7 +1010,7 @@ For full recipes with code examples, see `docs/02-features/usage-guide.md` § "P
 | Stream | — | — (deferred) |
 | CLIPipe | ✓ | — |
 
-Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/03-logs/bareagent-eval-multis.md`.
+Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/logs/bareagent-eval-multis.md`.
 
 ## Examples
 
@@ -1048,6 +1048,7 @@ Stale example removed in 0.10.4: `examples/mcp-bridge-gov.js` (used a hard-coded
 17. **Halt-path `msgs` is sealed (v0.10.3+)** — when Loop catches `HaltError` mid-round, every dangling assistant `tool_calls.id` from the halted round gets a synthetic `{ role:'tool', tool_call_id, content: '[halted:<rule>]' }` appended so the returned `result.msgs` is valid OpenAI shape. Safe to feed back into another provider call without protocol errors. The `[halted:<rule>]` tag is lowercase — distinct from the legacy `[HALT:]` deny strings (removed in 0.10.0, do not match on the old form).
 18. **`HaltError` with no `rule` resolves to `halt:unknown` (v0.10.3+)** — `new HaltError('msg')` without a `{ rule }` option still produces a stable `result.error = 'halt:unknown'` and `loop:done{halted:true, rule:'unknown'}`. Pre-0.10.3 produced the literal `'halt:null'` which broke string-matching consumers. The `_reportError('halt', ...)` extra carries the same `rule:'unknown'` token.
 19. **Pricing is a two-tier guesstimate, not a per-model table (BA-21, v0.37.0)** — a recognized Claude tier in the model id prices at `haiku` ($0.001/$0.005) or `sonnet` ($0.003/$0.015) per 1K; anything else (incl. a null/unknown model) falls through to the **Sonnet-tier ceiling default** ($0.003/$0.015) and still gets priced (`rateSource: 'default'`), never silently `unpriced`. Both guesstimate cases emit one `console.warn` per Loop instance. The `rateSource` on every metering payload distinguishes them: `'tier'` (a recognized haiku/sonnet match — a confident guess) vs `'default'` (the blind ceiling for an unrecognized/absent model), alongside `'provider'`/`'caller'` (authoritative) and `null` (unpriced). If you use a model whose real rates differ and care about `result.cost` accuracy or `budget.maxCostUsd` enforcement via `onLlmResult`, pass `new Loop({ rates: { in, out, cacheReadMult?, cacheWriteMult? } })` — that's authoritative (`rateSource: 'caller'`) and silences the warning. There is no `COST_PER_1K` table to edit.
+20. **A `GenerateResult` with `usage: null` means the provider reported no usage block at all — not a round that used zero tokens (BA-24, v0.39.0)** — every http/CLI provider used to coalesce an absent usage block into a truthy all-zeros `Usage` object (`field || 0` applied unconditionally), which `resolveRoundCost` then priced as a confident $0 instead of treating it as unpriceable. `GenerateResult.usage` is now typed `Usage | null`; `null` fires only when the raw API response carried no usage signal at all (checked field-by-field via `hasUsageSignal`, `src/provider-usage.js`), never on a present block whose fields are legitimately `0` (a cache-only round still prices normally). If your own code reads `result.usage.inputTokens` directly, guard for `null` first.
 
 ## Cross-language SDKs
 

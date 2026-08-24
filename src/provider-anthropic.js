@@ -6,6 +6,11 @@ const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
+const { hasUsageSignal } = require('./provider-usage');
+
+// BA-24: the raw Anthropic usage field names. Presence of any (even value 0) means the API reported a
+// usage signal → build the object; absence of all means no signal → surface null (unpriceable).
+const ANTHROPIC_USAGE_KEYS = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
 
 /** @param {string} hostname @returns {boolean} */
 function isLoopbackHost(hostname) {
@@ -191,12 +196,16 @@ class AnthropicProvider {
       }),
       // Anthropic's `input_tokens` is ALREADY the uncached remainder (cached tokens are reported
       // separately, not folded in — verified live), so no subtraction here, unlike OpenAI/Gemini.
-      usage: {
-        inputTokens: data.usage?.input_tokens || 0,
-        outputTokens: data.usage?.output_tokens || 0,
-        cacheReadTokens: data.usage?.cache_read_input_tokens || 0,
-        cacheCreationTokens: data.usage?.cache_creation_input_tokens || 0,
-      },
+      // BA-24: honest null when the API returned no usage block (or an empty one) — do NOT manufacture
+      // an all-zeros object, which launders an unpriceable round into a $0 PRICED one.
+      usage: hasUsageSignal(data.usage, ANTHROPIC_USAGE_KEYS)
+        ? {
+            inputTokens: data.usage.input_tokens || 0,
+            outputTokens: data.usage.output_tokens || 0,
+            cacheReadTokens: data.usage.cache_read_input_tokens || 0,
+            cacheCreationTokens: data.usage.cache_creation_input_tokens || 0,
+          }
+        : null,
       ...(temperatureDropped && { temperatureDropped: true }),
     };
   }

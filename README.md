@@ -135,7 +135,7 @@ console.log(result.count, result.matchedIds);   // a code-derived count + the id
 
 **Deps:** none required — the core imports nothing. Optional peers: `bareguard ^0.9.0` (governance), `better-sqlite3` (SQLite store); optional: `cron-parser`, `barebrowse`, `baremobile`, `wearehere`.
 
-This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/02-features/usage-guide.md).
+This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/archive/usage-guide.md).
 
 ---
 
@@ -281,7 +281,7 @@ All wrappers support optional event streaming for intermediate results. See [`co
 
 Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
 
-For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/02-features/usage-guide.md)**. For error reference, see **[Error Guide](docs/02-features/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
+For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/archive/usage-guide.md)**. For error reference, see **[Error Guide](docs/product/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
 
 ## The bare ecosystem
 

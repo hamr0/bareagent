@@ -1,9 +1,13 @@
 'use strict';
 
 const { ProviderError } = require('./errors');
+const { hasUsageSignal } = require('./provider-usage');
 
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
+
+// BA-24: raw claude-CLI envelope usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null.
+const CLAUDE_USAGE_KEYS = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
 
 // CLIPipe tool-mode support (v0.32.0). A subscription CLI (`claude -p`, …) is a plain
 // TURN-provider: it takes text and returns text, with no native channel for a caller's tools. This
@@ -124,23 +128,27 @@ function renderTranscript(messages) {
  * preset so the claude usage contract (token tiers, `modelUsage` first-key, `total_cost_usd`) lives
  * in exactly ONE place — a future CLI format change touches this function, not two copies.
  * @param {any} outer - the parsed outer CLI envelope (already validated non-null by the caller).
- * @returns {{usage: import('../types').Usage, model: string|null, costUsd?: number}}
+ * @returns {{usage: import('../types').Usage|null, model: string|null, costUsd?: number}}
  */
 function mapClaudeMeta(outer) {
-  const u = (outer.usage && typeof outer.usage === 'object') ? outer.usage : {};
-  /** @type {import('../types').Usage} */
-  const usage = {
-    inputTokens: Number(u.input_tokens) || 0,
-    outputTokens: Number(u.output_tokens) || 0,
-  };
+  // BA-24: an ABSENT/empty usage block ⇒ usage null (unpriceable), not a manufactured all-zeros object.
+  // The absent-block case is usually rescued by an authoritative `total_cost_usd` (a subscription run
+  // reports one even at $0 marginal → priced at source 'provider'); when the CLI omits BOTH, the round
+  // is honestly unpriced instead of a silent $0. Same principle line 136 already applies to the cache
+  // tiers, lifted one level up to the whole block. A present block with an explicit 0 field stays priced.
+  const raw = hasUsageSignal(outer.usage, CLAUDE_USAGE_KEYS) ? outer.usage : null;
+  /** @type {import('../types').Usage|null} */
+  const usage = raw
+    ? { inputTokens: Number(raw.input_tokens) || 0, outputTokens: Number(raw.output_tokens) || 0 }
+    : null;
   // Absent cache tiers mean the model didn't cache — omit rather than emit a synthetic 0 (per Usage docs).
-  if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;
-  if (Number.isFinite(u.cache_creation_input_tokens)) usage.cacheCreationTokens = u.cache_creation_input_tokens;
+  if (usage && Number.isFinite(raw.cache_read_input_tokens)) usage.cacheReadTokens = raw.cache_read_input_tokens;
+  if (usage && Number.isFinite(raw.cache_creation_input_tokens)) usage.cacheCreationTokens = raw.cache_creation_input_tokens;
   // `modelUsage` is an object keyed by model id (e.g. {"claude-opus-4-8[1m]": {...}}) — take the first key.
   const model = (outer.modelUsage && typeof outer.modelUsage === 'object')
     ? (Object.keys(outer.modelUsage)[0] ?? null)
     : null;
-  /** @type {{usage: import('../types').Usage, model: string|null, costUsd?: number}} */
+  /** @type {{usage: import('../types').Usage|null, model: string|null, costUsd?: number}} */
   const meta = { usage, model };
   // The CLI's own price is authoritative (a subscription run reports an equivalent cost even at $0
   // marginal) — feeds bareguard's USD axis with no local rate table. Only a finite number counts.
@@ -154,7 +162,7 @@ function mapClaudeMeta(outer) {
  * @property {string} [toolName]
  * @property {Record<string, any>} [toolArguments]
  * @property {string} [answer]
- * @property {import('../types').Usage} usage
+ * @property {import('../types').Usage|null} usage
  * @property {string|null} [model]
  * @property {number} [costUsd]
  */
