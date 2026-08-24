@@ -11,6 +11,28 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 
 > Coverage note: v0.16.2→v0.27.0 (eval-assist suite 0.17–0.19, RLM/`recurse` 0.20–0.24, BA-8/9/10/11/14 seams 0.22–0.30) were decided in their own PRDs (`eval-assist-prd.md`, `RLM_PRD.md`), which remain canonical for those. Entries below fold former standalone side-docs (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`) back into the main PRD; granular evidence lives in CHANGELOG/git history. (prd.md:798-810)
 
+## v0.39.0 / BA-24 — provider usage-null boundary, whole bug class closed (2026-08-24)
+- **Gap:** BA-23 fixed `loop.js`'s stale-`lastUsage` symptom, but every http(s) provider still built its
+  neutral `Usage` object *unconditionally* (`data.usage?.field || 0`), so an absent/empty raw usage block
+  still produced a truthy all-zeros object — the exact laundering BA-23 closed, relocated one layer up to
+  the provider boundary, unreachable by `resolveRoundCost`'s honest-null guard on the paid path.
+- **Fix:** a shared discriminator `hasUsageSignal(block, keys)` (`src/provider-usage.js`) decides absence
+  vs a present-but-legitimately-zero block; applied at all 7 sites — Anthropic, OpenAI, Gemini, Ollama,
+  CLIPipe tool-emulation (`mapClaudeMeta`), and CLIPipe native session-close (both the direct usage block
+  and its per-turn-sum fallback for a zero-turn session). Per-field `|| 0` stays correct once a block is
+  confirmed present (a cache-only round still prices).
+- **Public-surface change (MINOR):** `GenerateResult.usage` widens `Usage` → `Usage | null`. Every
+  in-tree consumer already null-guards (a leftover from BA-23's `result.usage ?? null` pattern).
+- **Scoped as a whole bug class, not one site per release** — hamr's explicit push after BA-23 shipped
+  narrow: reconciled with adopter bareloop (their F6 pricing-red-halt validation against the real
+  `AnthropicProvider` surfaced that BA-23 alone wasn't sufficient) before building BA-24, rather than
+  waiting for a site-by-site drip of follow-up reports.
+- **Validated against real provider shapes:** `test/provider-usage-null.test.js` drives each real
+  provider class against a local HTTP server, varying only the usage block — a shape a hand-authored
+  `usage:null` stub can't exercise, since no real provider could previously emit it.
+- Shipped alongside a docs corpus reorg (`product`/`logs`/`archive` split + `docs/wiki/` topic pages,
+  this file included) — docs-only, no code coupling.
+
 ## v0.38.1 / BA-23 — price each round on its own usage (2026-08-23)
 - **Gap:** Loop's per-round cost call fed `resolveRoundCost` the stale `lastUsage` carry-over instead of `result.usage`, so a genuinely no-usage round laundered into `costUsd:0`/`'priced'` instead of honest null, and mid-run no-usage rounds billed on the previous round's stale tokens. (prd.md:814-820)
 - **Fix:** pass `result.usage ?? null` at the single Loop call site; `lastUsage` itself untouched. PATCH, bugfix only. Cross-repo validated by adopter bareloop (F6 pricing-red halt reachable again). (prd.md:821-826)
