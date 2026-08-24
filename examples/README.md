@@ -12,4 +12,4 @@ Runnable reference scripts for bare-agent. Each is self-contained — the top-of
 | [`replay-job.js`](replay-job.js) | Supervised replay POC: record a browser task once with the LLM driving, then replay against fresh snapshots with the LLM as locator-only. Falls back to full reasoning when the locator misses, and patches the trace. |
 | [`litectx-as-store.mjs`](litectx-as-store.mjs) | RT-3 Store mount: swap the zero-dep `JsonFileStore` for litectx's ranked, graph-aware recall in one line — the host code never changes. Runs the JsonFileStore half always; runs the litectx half if `litectx` is installed, else prints the one-line swap. |
 
-For wiring recipes and API details see the [Integration Guide](../bareagent.context.md); for usage patterns and design philosophy see the [Usage Guide](../docs/02-features/usage-guide.md).
+For wiring recipes and API details see the [Integration Guide](../bareagent.context.md); for usage patterns and design philosophy see the [Usage Guide](../docs/archive/usage-guide.md).

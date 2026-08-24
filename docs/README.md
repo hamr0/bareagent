@@ -28,9 +28,9 @@ docs/
 
 | I want to... | Read |
 |---|---|
-| Understand why bare-agent exists | [vision.md](00-context/vision.md) |
-| See what's built / the spec | [prd.md](01-product/prd.md) |
-| Read the PRD (spec, API reference §24, litectx seams §23) | [prd.md](01-product/prd.md) |
-| Use bare-agent in my project | [usage-guide.md](02-features/usage-guide.md) |
-| Run the tests | [testing.md](04-process/testing.md) |
-| Understand a design decision | [prd.md §22 — decisions log](01-product/prd.md) |
+| Understand why bare-agent exists | [vision.md](product/vision.md) |
+| See what's built / the spec | [prd.md](archive/prd.md) |
+| Read the PRD (spec, API reference §24, litectx seams §23) | [prd.md](archive/prd.md) |
+| Use bare-agent in my project | [usage-guide.md](archive/usage-guide.md) |
+| Run the tests | [testing.md](product/testing.md) |
+| Understand a design decision | [prd.md §22 — decisions log](archive/prd.md) |

@@ -784,7 +784,7 @@ completeness-contract guard.
    mutation-proved (single pass 15 vs 2-pass 20) and the RC-2 hallucination-drop. **Backend split (grounded):**
    `scan` reads the generic array slice-source (`opts.corpus`), NOT litectx — the litectx-resident scan + the
    data-driven *width* count wait on the litectx `enumerate` verb (spec handed off:
-   `docs/01-product/prd.md`), which drops in behind the same socket with zero recurse
+   `docs/archive/prd.md`), which drops in behind the same socket with zero recurse
    changes. **Update (litectx 0.26):** the litectx-`enumerate` adapter is now BUILT — `litectxCorpus` (resident
    scan slice-source) + `mode:'partition'` (data-driven width); `enumerate` was verified against the spec DoD
    first (`poc/litectx-enumerate-verify.mjs`). **Update (per-query face — DONE):** the last step-7 follow-on,
@@ -822,7 +822,7 @@ completeness-contract guard.
        (ranked needle retrieval), not asked to do exhaustion it cannot.
      - **The "scan a corpus that ALREADY LIVES in litectx" case** (facts/episodes the agent accrued; an
        `index()`-ed codebase) needs a NEW litectx verb — `enumerate` (exhaustive, scope-aware, paged, rank-free)
-       — which **does not exist today**. Spec written + handed off: `docs/01-product/prd.md`.
+       — which **does not exist today**. Spec written + handed off: `docs/archive/prd.md`.
        It is the **un-defer seam**: when `enumerate` lands, a litectx adapter slots behind the same slice-source
        socket with **zero recurse changes**. You would never ingest a fresh corpus just to enumerate it back
        (strictly worse than scanning the array) — `enumerate` is only for already-resident memory.
@@ -892,7 +892,7 @@ deferred — only the calibration details below are.
   (grounded 2026-06-28): the partition path needs `count(kind)` → `⌈size/budget⌉` →
   `enumerate(offset, limit)` over **resident** litectx memory — and litectx has **no
   enumerate today** (every read is FTS-gated). Spec handed off:
-  `docs/01-product/prd.md` (§6 names this the *strong* reuse). The
+  `docs/archive/prd.md` (§6 names this the *strong* reuse). The
   array slice-source path (in-hand data) does NOT need it and can land first; the
   litectx-resident partition lands when `enumerate` ships. **Distinct** from the
   depth-overflow trigger below: this is *width* (more slices at one level); overflow is

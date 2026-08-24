@@ -3,7 +3,7 @@
 > For AI assistants and developers wiring bareagent into a project.
 > v0.38.1 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.14.0` optional peer for governance) | Apache 2.0
 >
-> Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/02-features/usage-guide.md)
+> Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/archive/usage-guide.md)
 
 ## What this is
 
@@ -991,7 +991,7 @@ These are deliberately NOT in bare-agent. Don't look for them — build them fro
 | **Heartbeat (ambient awareness)** | "Check if anything needs attention" scope is your domain | Scheduler recurring job where the LLM triages: `scheduler.add({ type: 'recurring', schedule: '30m', action: 'Check if anything needs attention' })`. |
 | **Cron** | **This IS built in** | Scheduler supports cron expressions (requires `cron-parser` peer dep) and relative schedules (`5s`, `30m`, `2h`, `1d`) natively. |
 
-For full recipes with code examples, see `docs/02-features/usage-guide.md` § "Patterns, Not Features".
+For full recipes with code examples, see `docs/archive/usage-guide.md` § "Patterns, Not Features".
 
 ## Production usage
 
@@ -1010,7 +1010,7 @@ For full recipes with code examples, see `docs/02-features/usage-guide.md` § "P
 | Stream | — | — (deferred) |
 | CLIPipe | ✓ | — |
 
-Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/03-logs/bareagent-eval-multis.md`.
+Both projects kept their own memory/store implementations. Neither needed multi-agent routing. Full multis eval: `docs/logs/bareagent-eval-multis.md`.
 
 ## Examples
 

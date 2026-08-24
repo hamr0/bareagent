@@ -1,4 +1,4 @@
-// Verify-shipped-vs-spec — litectx 0.26 `enumerate` against the DoD in docs/01-product/prd.md
+// Verify-shipped-vs-spec — litectx 0.26 `enumerate` against the DoD in docs/archive/prd.md
 // §5. Pure SQL, no model, no API key. Seeds KNOWN fact rows, code-computes ground truth, exits 1 on any miss.
 // The same discipline that caught the step-8 scan regression: don't trust that litectx built what was asked —
 // prove it. Run: node poc/litectx-enumerate-verify.mjs
