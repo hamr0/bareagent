@@ -1,5 +1,20 @@
 'use strict';
 
+/**
+ * Re-export the shared cross-cutting type shapes so adopters can name them when
+ * annotating their own wiring (tools arrays, providers, ctx, metrics). Declared
+ * in `types/index.d.ts`; surfaced here on the root entry so `types` resolves them.
+ * @typedef {import('./types').ToolDef} ToolDef
+ * @typedef {import('./types').ToolCall} ToolCall
+ * @typedef {import('./types').Message} Message
+ * @typedef {import('./types').Provider} Provider
+ * @typedef {import('./types').GenerateResult} GenerateResult
+ * @typedef {import('./types').Usage} Usage
+ * @typedef {import('./types').RunMetrics} RunMetrics
+ * @typedef {import('./types').Store} Store
+ * @typedef {import('./types').Ctx} Ctx
+ */
+
 const { Loop } = require('./src/loop');
 const { Planner } = require('./src/planner');
 const { Evaluator } = require('./src/evaluator');
