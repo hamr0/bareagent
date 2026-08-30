@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Added
+
+- **Publish workflow gates on the types being usable BY AN ADOPTER, not just internally.** `npm run typecheck` (`tsc --noEmit`) checks the *source*; it cannot see the generated `.d.ts` as an adopter resolves it from inside `node_modules`, which is the one thing consumers actually get. The publish workflow now packs the tarball, installs it into a clean consumer project, and compiles a quickstart against it, so a release whose published types are broken cannot reach the registry.  The consumer pins `@types/node` to the major this package builds against instead of floating to the newest, so a stricter DefinitelyTyped release cannot turn the publish gate red for reasons unrelated to the commit being published. Verified locally: the quickstart compiles green against a packed tarball, and a deliberately broken dereference fails it. CI only — no runtime or published-artifact change.
+
 ### Fixed
 
 - **Shipped `.d.ts` referenced an unresolvable `ParsedEnvelope` (`TS2304`) for adopters who import `bare-agent/providers` without `skipLibCheck`.** `toolProtocol`'s inferred type in `src/provider-clipipe.d.ts` named `ParsedEnvelope` (declared over in `provider-clipipe-tools.js`) without the name being in scope when tsc emitted that declaration file, so the published types carried a bare, undeclared identifier.
