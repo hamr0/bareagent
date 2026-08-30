@@ -8,6 +8,12 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
 /** @typedef {import('../types').Message} Message */
 /** @typedef {import('../types').ToolDef} ToolDef */
 /** @typedef {import('../types').GenerateResult} GenerateResult */
+// `toolProtocol`'s inferred type references ParsedEnvelope, which is declared in
+// provider-clipipe-tools.js. Without this alias the name is not in scope when tsc
+// emits this file's .d.ts, so the declaration shipped a bare `ParsedEnvelope` that
+// adopters could not resolve (TS2304) — invisible here because our own tsconfig
+// sets skipLibCheck.
+/** @typedef {import('./provider-clipipe-tools.js').ParsedEnvelope} ParsedEnvelope */
 
 /**
  * @typedef {object} CLIPipeOptions

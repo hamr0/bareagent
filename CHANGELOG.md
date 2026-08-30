@@ -2,6 +2,19 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Shipped `.d.ts` referenced an unresolvable `ParsedEnvelope`, breaking every TypeScript adopter with `TS2304`.** `toolProtocol`'s inferred type in `src/provider-clipipe.d.ts` named `ParsedEnvelope` (declared over in `provider-clipipe-tools.js`) without the name being in scope when tsc emitted that declaration file, so the published types carried a bare, undeclared identifier. Any adopter compiling against the package — unless they set `skipLibCheck: true` — got `Cannot find name 'ParsedEnvelope'` twice. Invisible in this repo because our own `tsconfig.json` sets `skipLibCheck: true`, so `npm run typecheck` stayed green throughout. Fixed with a JSDoc `@typedef` alias importing the type, after which tsc emits the fully-qualified `import("./provider-clipipe-tools").ParsedEnvelope`. **Comment-only change — no runtime behaviour, no API change**; only the generated declarations differ.
+
+  Found by compiling a quickstart against a packed tarball from a clean consumer project, which is the one thing `tsc --noEmit` on the source cannot see. Note the `skipLibCheck` asymmetry is the whole mechanism: with it on in the consumer, this bug compiles clean and publishes.
+
+### Notes — observed, not changed
+
+- `prepublishOnly` does not run on `npm pack`, so a packed tarball contains no freshly-built `.d.ts`; `prepack` fires for both `pack` and `publish`. Relevant if the adopter type-check gate is adopted here.
+- `ToolDef` is declared in `types/index.d.ts` but is not re-exported from the root entry (`./index.d.ts`), so adopters cannot name the type when annotating a tools array.
+
 ## [0.39.0] - 2026-08-24
 
 ### Changed
