@@ -4,6 +4,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs: `/docs-builder reorg`.** Archived the obsolete `docs/wiki-index.md` (a superseded themed per-split index, replaced by the single whole-corpus `docs/index.md`) to `docs/archive/`, rebuilt `docs/index.md` (31 rows), and added the `DOCS_INDEX` pointer block to `CLAUDE.md`. Docs-only; no package or runtime change.
+
 ## [0.40.0] - 2026-08-30
 
 ### Added
