@@ -4,7 +4,11 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-08-30
+
 ### Added
+
+- **The shared cross-cutting type shapes are now re-exported from the root entry, so adopters can name them.** `ToolDef`, `ToolCall`, `Message`, `Provider`, `GenerateResult`, `Usage`, `RunMetrics`, `Store`, and `Ctx` were declared in `types/index.d.ts` but never surfaced on `./index.d.ts` (the package `types` target), and no `exports` subpath reached `types/index.d.ts` — so a TypeScript adopter following the documented wiring could not `import type { ToolDef } from 'bare-agent'` to annotate their tools array, provider, or ctx, and fell back to untyped literals. Fixed by adding exported `@typedef` re-exports on the root JSDoc, after which `build:types` emits `export type ToolDef = import("./types").ToolDef;` (and the other eight) into `index.d.ts`. **JSDoc-only — no runtime behaviour, no API change**; only the generated declarations differ. Verified by compiling an adopter quickstart that imports all nine names against a packed tarball from a clean consumer project with `skipLibCheck: false` (green with the fix; every name `TS2305` "no exported member" without it).
 
 - **Publish workflow gates on the types being usable BY AN ADOPTER, not just internally.** `npm run typecheck` (`tsc --noEmit`) checks the *source*; it cannot see the generated `.d.ts` as an adopter resolves it from inside `node_modules`, which is the one thing consumers actually get. The publish workflow now packs the tarball, installs it into a clean consumer project, and compiles a quickstart against it, so a release whose published types are broken cannot reach the registry.  The consumer pins `@types/node` to the major this package builds against instead of floating to the newest, so a stricter DefinitelyTyped release cannot turn the publish gate red for reasons unrelated to the commit being published. Verified locally: the quickstart compiles green against a packed tarball, and a deliberately broken dereference fails it. CI only — no runtime or published-artifact change.
 
@@ -21,7 +25,6 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 ### Notes — observed, not changed
 
 - `prepublishOnly` does not run on `npm pack`, so a packed tarball contains no freshly-built `.d.ts`; `prepack` fires for both `pack` and `publish`. Relevant if the adopter type-check gate is adopted here.
-- `ToolDef` is declared in `types/index.d.ts` but is not re-exported from the root entry (`./index.d.ts`), so adopters cannot name the type when annotating a tools array.
 
 ## [0.39.0] - 2026-08-24
 
