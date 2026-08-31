@@ -20,6 +20,10 @@ const { Loop } = require('./loop');
  * @property {number|null} score - 0–10 for the rubric path; null for predicate (pass/fail only).
  * @property {string} critique - Why it failed / what to improve. '' when satisfied with no notes.
  * @property {string[]} suggestions - Concrete fixes (rubric may populate; [] otherwise).
+ * @property {boolean} [temperatureDropped] - Rubric path only: `true` when the grader requested a pinned
+ *   `temperature: 0` (its determinism knob) but the model rejected it and the provider silently retried at
+ *   the model's DEFAULT (BA-10). Carries the fact the way `recurse` does — the grader ran non-deterministic;
+ *   the caller decides what to do. Absent/`false` for predicate (no LLM) and agentic (no pinned temperature).
  */
 
 /**
@@ -199,7 +203,12 @@ class Evaluator {
       await opts.onLlmResult({ usage: out?.usage || null, model: (out && out.model) || this.provider.model || null, kind: 'evaluate' });
     }
 
-    return this._parse(out.text);
+    const verdict = this._parse(out.text);
+    // BA-10 honest receipt (mirrors recurse.js:900): the grader pinned `temperature: 0` for determinism. If
+    // the model rejected it, the provider ran at its DEFAULT and set `temperatureDropped`. Surface it so the
+    // caller is not silently handed a verdict from a non-deterministic grade — carry the fact, do not decide.
+    if (out.temperatureDropped === true) verdict.temperatureDropped = true;
+    return verdict;
   }
 
   /**

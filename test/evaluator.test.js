@@ -255,6 +255,25 @@ describe('Evaluator — rubric path runs an ISOLATED adversarial grader', () => 
     assert.deepEqual(v.suggestions, ['add X']);
     assert.match(calls[0].messages[1].content, /MUST include section X and Y/);
   });
+
+  it('surfaces temperatureDropped on the Verdict when the model rejected the pinned temperature (BA-10)', async () => {
+    // The grader pins temperature:0 for determinism; a temperature-fixed model rejects it and the provider
+    // silently retries at its DEFAULT, setting `temperatureDropped`. The Verdict must carry the fact
+    // (recurse.js already does) so a caller is not handed a non-deterministic grade claimed as pinned.
+    const droppedProvider = {
+      model: 'claude-sonnet-5',
+      async generate() {
+        return { text: '{"status":"satisfied","score":9,"critique":"","suggestions":[]}', usage: { inputTokens: 10, outputTokens: 5 }, temperatureDropped: true };
+      },
+    };
+    const v = await new Evaluator({ provider: droppedProvider }).evaluate('g', 'r', { rubric: 'is it good?' });
+    assert.equal(v.temperatureDropped, true, 'a dropped temperature must be surfaced on the Verdict');
+
+    // Control: when the model honors the pinned temperature, the field is NOT falsely set.
+    const { provider } = graderStub('{"status":"satisfied","score":9,"critique":"","suggestions":[]}');
+    const v2 = await new Evaluator({ provider }).evaluate('g', 'r', { rubric: 'is it good?' });
+    assert.notEqual(v2.temperatureDropped, true, 'an honored temperature must not be flagged as dropped');
+  });
 });
 
 describe('Evaluator — defensive verdict parsing', () => {
