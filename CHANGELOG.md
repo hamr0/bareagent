@@ -2,7 +2,11 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.41.0] - 2026-08-31
+
+### Added
+
+- **`Evaluator`'s rubric-path `Verdict` now surfaces `temperatureDropped` (BA-10).** The isolated grader pins `temperature: 0` for a deterministic verdict; if the model rejects a pinned temperature, the provider silently retries at the model's default, and the caller was handed a non-deterministic grade with no indication it wasn't pinned. `Verdict.temperatureDropped` carries that fact the same way `recurse.js` already does — set to `true` only when the provider reports it, absent/`false` otherwise (including for `predicate`, which has no LLM, and `agentic`, which has no pinned temperature). Additive optional field — backward-compatible.
 
 ### Changed
 
