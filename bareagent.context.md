@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.41.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.14.0` optional peer for governance) | Apache 2.0
+> v0.41.1 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.16.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/archive/usage-guide.md)
 

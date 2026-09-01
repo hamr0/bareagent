@@ -2,6 +2,21 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.41.1] - 2026-09-01
+
+### Changed
+
+- **Widened the optional `bareguard` peer range to admit 0.15.x** (`>=0.9.0 <0.14.0` → `>=0.9.0 <0.16.0`,
+  in both `peerDependencies` and `devDependencies`). bareguard 0.14.0 was cut but never published, so 0.15.0
+  is the first release carrying both threads: a 17-site config-shape sweep where a malformed array- or
+  map-shaped config key now fails CLOSED (`<key>.invalid` deny) instead of silently no-opping a configured
+  deny, plus construction-time rejection of a config section that is not a plain object. **bare-agent is
+  unaffected by construction:** the adapter never constructs a `Gate` and never imports `bareguard` at
+  runtime — it receives a caller-built gate and duck-types it (`typeof gate.check !== 'function'`), so the
+  new construction-time throws belong to the embedder, not to bare-agent. Nothing in bare-agent reads
+  bareguard's version. Re-verified rather than auto-admitted, per the deliberate one-minor ceiling:
+  bare-agent's suite is 1127 pass / 0 fail against bareguard 0.15.0, identical to its result on 0.13.0.
+
 ## [0.41.0] - 2026-08-31
 
 ### Added
