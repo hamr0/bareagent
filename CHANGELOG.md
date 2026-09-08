@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.42.0] - 2026-09-08
 
 Four upstream asks from the fwdloop and bareloop adopters (consolidated filing, 2026-09-08).
 
@@ -36,8 +36,10 @@ Four upstream asks from the fwdloop and bareloop adopters (consolidated filing, 
   `onLlmResult` metering payload (so an audit row records the terminal without awaiting the result). The
   run result also carries the resolved `model` id (F3).
 - **`options.toolChoice` on the OpenAI provider (`'auto' | 'required' | { name }`).** Forwarded as
-  `tool_choice`, scoped to the tools-present branch (OpenAI 400s on a `tool_choice` with no tools); an
-  invalid value throws rather than silently dropping a force.
+  `tool_choice`, attached only when tools are present (OpenAI 400s on a `tool_choice` with no tools). The
+  shape is validated **unconditionally** — an invalid value throws a `ProviderError` even when tools are
+  empty, rather than silently dropping a force (a branch-review catch: validation had been gated behind
+  the tools-present branch).
 
 ## [0.41.1] - 2026-09-01
 
