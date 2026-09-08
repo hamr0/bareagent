@@ -5,7 +5,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
-const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
+const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
 
 // BA-24: raw OpenAI usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
@@ -15,6 +15,23 @@ const OPENAI_USAGE_KEYS = ['prompt_tokens', 'completion_tokens', 'prompt_tokens_
 /** @typedef {import('../types').ToolDef} ToolDef */
 /** @typedef {import('../types').ToolCall} ToolCall */
 /** @typedef {import('../types').GenerateResult} GenerateResult */
+
+/**
+ * Map a neutral `toolChoice` option to OpenAI's `tool_choice` wire shape (Ask 4, fwdloop).
+ * `'auto'`/`'required'` pass through; `{ name }` becomes `{ type:'function', function:{ name } }`.
+ * `null`/`undefined` ⇒ omit the field (the API default `auto`). An unrecognized shape throws — a
+ * silently-dropped force would read as "the model chose not to call", the exact confusion Ask 3 fixes.
+ * @param {undefined|null|'auto'|'required'|{name: string}} choice
+ * @returns {undefined|'auto'|'required'|{type:'function', function:{name:string}}}
+ */
+function toOpenAIToolChoice(choice) {
+  if (choice == null) return undefined;
+  if (choice === 'auto' || choice === 'required') return choice;
+  if (typeof choice === 'object' && typeof choice.name === 'string' && choice.name) {
+    return { type: 'function', function: { name: choice.name } };
+  }
+  throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${JSON.stringify(choice)}`);
+}
 
 /** @param {string} hostname @returns {boolean} */
 function isLoopbackHost(hostname) {
@@ -42,6 +59,11 @@ function isLoopbackHost(hostname) {
  *   rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`,
  *   `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via
  *   `generate(..., { deadlineMs })`.
+ * @property {boolean} [legacyMaxTokens=false] - BA-24 (fwdloop): send the legacy `max_tokens` request
+ *   key instead of `max_completion_tokens`. The default is `max_completion_tokens` because current
+ *   OpenAI GPT-5 models 400 on `max_tokens` ("Unsupported parameter … Use 'max_completion_tokens'").
+ *   Set `true` for an OpenAI-compatible server that only understands the legacy key (e.g. some
+ *   self-hosted / proxy endpoints). No model-name sniffing — the caller declares the dialect.
  */
 
 class OpenAIProvider {
@@ -57,29 +79,40 @@ class OpenAIProvider {
     this.timeoutMs = options.timeoutMs;
     // BA-19: total call-duration deadline (ms). Resolved at call time (default 0 = disabled).
     this.deadlineMs = options.deadlineMs;
+    // BA-24 (fwdloop): use the legacy `max_tokens` key. Default false ⇒ `max_completion_tokens` (GPT-5-safe).
+    this.legacyMaxTokens = options.legacyMaxTokens === true;
   }
 
   /**
    * Generate a response from the OpenAI API.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19).
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19; toolChoice — `'auto'` | `'required'` | `{ name }`, forwarded as OpenAI `tool_choice`, applied only when `tools` are present).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OpenAIProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
   async generate(messages, tools = [], options = {}) {
+    // BA-24 (fwdloop): GPT-5 models 400 on `max_tokens` and want `max_completion_tokens`; the legacy
+    // key stays reachable via the constructor's `legacyMaxTokens` for compat servers. No model sniffing.
+    const maxTokensKey = this.legacyMaxTokens ? 'max_tokens' : 'max_completion_tokens';
     /** @type {Record<string, any>} */
     const body = {
       model: this.model,
       messages,
       ...(options.temperature != null && { temperature: options.temperature }),
-      ...(options.maxTokens && { max_tokens: options.maxTokens }),
+      ...(options.maxTokens && { [maxTokensKey]: options.maxTokens }),
     };
+    // Ask 4 (fwdloop): validate the toolChoice SHAPE unconditionally so an invalid value ALWAYS throws
+    // (a silently-dropped force is the exact confusion this surfaces) — even when tools happen to be
+    // empty. Attach it only when tools are present: OpenAI 400s on a tool_choice with no tools, so a
+    // valid choice with nothing to force is dropped (documented), while absent ⇒ the API default 'auto'.
+    const toolChoice = toOpenAIToolChoice(options.toolChoice);
     if (tools.length > 0) {
       body.tools = tools.map(t => ({
         type: 'function',
         function: { name: t.name, description: t.description, parameters: t.parameters },
       }));
+      if (toolChoice != null) body.tool_choice = toolChoice;
     }
 
     // BA-10: newer models (o1/gpt-5-class) reject a non-default `temperature` with a 400 — drop it and
@@ -178,8 +211,11 @@ class OpenAIProvider {
         },
       }, (res) => {
         let chunks = '';
+        // BA-25: reject (retryable) if the body is cut after headers, so generate() always settles.
+        const { markEnded } = guardResponseSettles(res, reject, 'OpenAIProvider');
         res.on('data', d => chunks += d);
         res.on('end', () => {
+          markEnded();
           try {
             const parsed = JSON.parse(chunks);
             if ((res.statusCode ?? 0) >= 400) {

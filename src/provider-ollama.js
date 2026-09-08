@@ -4,7 +4,7 @@ const http = require('http');
 const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
-const { resolveTimeoutMs, applyRequestBounds } = require('./provider-http');
+const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
 
 // BA-24: raw Ollama usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
@@ -141,8 +141,11 @@ class OllamaProvider {
         },
       }, (res) => {
         let chunks = '';
+        // BA-25: reject (retryable) if the body is cut after headers, so generate() always settles.
+        const { markEnded } = guardResponseSettles(res, reject, 'OllamaProvider');
         res.on('data', d => chunks += d);
         res.on('end', () => {
+          markEnded();
           try {
             const parsed = JSON.parse(chunks);
             if ((res.statusCode ?? 0) >= 400) {

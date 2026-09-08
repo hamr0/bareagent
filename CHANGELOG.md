@@ -2,6 +2,45 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.42.0] - 2026-09-08
+
+Four upstream asks from the fwdloop and bareloop adopters (consolidated filing, 2026-09-08).
+
+### Fixed
+
+- **BA-25 — `generate()` never settled when the response body was cut after headers.** The http(s)
+  provider `_request` handlers wired only `res 'data'` + `res 'end'` (+ `req 'error'`), so a socket the
+  server aborted or closed *after* headers but *before* `'end'` neither resolved nor rejected — `'end'`
+  never fired, and the BA-18 idle timer can't rescue it (the socket is already dead, no activity to time
+  out against). A run ended with no outcome and no error, uncatchable by any retry rule. A shared
+  `guardResponseSettles` helper now rejects on `res 'aborted'`, `res 'error'`, and `res 'close'`-without-
+  prior-`'end'` with a **retryable** transport-class `ProviderError` (`context.bound:'transport'`) so a
+  wired `Retry`/one-retry ladder sees it. Applied to **all four** HTTP providers (OpenAI, Anthropic,
+  Gemini, Ollama), not just the two reported, to close the class in one pass. `ProviderError` gained an
+  optional `retryable` override (a transport cut carries no HTTP status to derive it from).
+
+### Changed
+
+- **OpenAI provider now sends `max_completion_tokens` by default instead of `max_tokens`.** Current
+  OpenAI GPT-5 models 400 on `max_tokens` ("Unsupported parameter … Use 'max_completion_tokens'"). New
+  constructor option `legacyMaxTokens: true` restores the legacy key for OpenAI-compatible servers that
+  only understand it. No model-name sniffing — the caller declares the dialect. **Behavior change:** a
+  compat server expecting `max_tokens` must now set `legacyMaxTokens: true`.
+
+### Added
+
+- **`loop:truncated` observability (fwdloop F4).** A round that stops at the output cap has empty text
+  and no tool call, reading exactly like a refusal (a cut reasoning round misdiagnosed for an hour
+  upstream). The Loop already error-tagged it (`error:'truncated:max_tokens'`, BA-13); now it also emits a
+  dedicated `loop:truncated` stream event, warns once per Loop instance, and carries `stopReason` on the
+  `onLlmResult` metering payload (so an audit row records the terminal without awaiting the result). The
+  run result also carries the resolved `model` id (F3).
+- **`options.toolChoice` on the OpenAI provider (`'auto' | 'required' | { name }`).** Forwarded as
+  `tool_choice`, attached only when tools are present (OpenAI 400s on a `tool_choice` with no tools). The
+  shape is validated **unconditionally** — an invalid value throws a `ProviderError` even when tools are
+  empty, rather than silently dropping a force (a branch-review catch: validation had been gated behind
+  the tools-present branch).
+
 ## [0.41.1] - 2026-09-01
 
 ### Changed
