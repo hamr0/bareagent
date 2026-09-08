@@ -95,4 +95,16 @@ describe('Ask 4: OpenAI tool_choice', () => {
       );
     } finally { s.server.close(); }
   });
+
+  it('throws on an invalid toolChoice EVEN when tools are empty (validation is not gated on tools)', async () => {
+    // Regression: validation used to live inside the tools-present branch, so an invalid value with no
+    // tools was silently dropped — contradicting the documented "invalid ⇒ throws" contract.
+    const s = await captureServer();
+    try {
+      await assert.rejects(
+        () => new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }).generate(MSGS, [], { toolChoice: 'banana' }),
+        (e) => e instanceof ProviderError && /invalid toolChoice/.test(e.message),
+      );
+    } finally { s.server.close(); }
+  });
 });

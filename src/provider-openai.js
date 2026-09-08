@@ -102,15 +102,17 @@ class OpenAIProvider {
       ...(options.temperature != null && { temperature: options.temperature }),
       ...(options.maxTokens && { [maxTokensKey]: options.maxTokens }),
     };
+    // Ask 4 (fwdloop): validate the toolChoice SHAPE unconditionally so an invalid value ALWAYS throws
+    // (a silently-dropped force is the exact confusion this surfaces) — even when tools happen to be
+    // empty. Attach it only when tools are present: OpenAI 400s on a tool_choice with no tools, so a
+    // valid choice with nothing to force is dropped (documented), while absent ⇒ the API default 'auto'.
+    const toolChoice = toOpenAIToolChoice(options.toolChoice);
     if (tools.length > 0) {
       body.tools = tools.map(t => ({
         type: 'function',
         function: { name: t.name, description: t.description, parameters: t.parameters },
       }));
-      // Ask 4 (fwdloop): forward an explicit tool_choice when the caller sets one. OpenAI 400s on a
-      // tool_choice with no tools, so it is scoped to the tools-present branch; absent ⇒ the API default 'auto'.
-      const tc = toOpenAIToolChoice(options.toolChoice);
-      if (tc != null) body.tool_choice = tc;
+      if (toolChoice != null) body.tool_choice = toolChoice;
     }
 
     // BA-10: newer models (o1/gpt-5-class) reject a non-default `temperature` with a 400 — drop it and
