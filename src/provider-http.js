@@ -1,6 +1,6 @@
 'use strict';
 
-const { TimeoutError, ValidationError } = require('./errors');
+const { TimeoutError, ValidationError, ProviderError } = require('./errors');
 
 /**
  * BA-18 — shared request-timeout helper for the http(s)-based providers (Anthropic, OpenAI,
@@ -123,4 +123,38 @@ function applyRequestBounds(req, bounds, providerName) {
   applyRequestDeadline(req, (bounds && bounds.deadlineMs) || 0, providerName);
 }
 
-module.exports = { DEFAULT_TIMEOUT_MS, resolveTimeoutMs, applyRequestTimeout, applyRequestDeadline, applyRequestBounds };
+/**
+ * BA-25 — guarantee the response promise SETTLES when the body is cut after headers. The provider
+ * `_request` handlers wired only `res 'data'` + `res 'end'` (and `req 'error'`), so a socket the
+ * server aborts or closes AFTER sending headers but BEFORE 'end' fired neither resolved nor rejected:
+ * 'end' never came, and the BA-18 idle timer can't rescue it because the socket is already dead (no
+ * further activity to time out against). The process then drains with an unsettled top-level await.
+ *
+ * Three terminal response events are the miss: `res 'aborted'` (peer reset mid-body), `res 'error'`
+ * (stream error), and `res 'close'` WITHOUT a prior 'end' (clean-looking FIN before the body
+ * completed). Each rejects with a RETRYABLE transport-class `ProviderError` (no HTTP status → the
+ * status-derived retryability can't classify it, so `retryable:true` is explicit) so a wired
+ * `Retry`/one-retry ladder (which keys on `err.retryable === true`) sees it instead of hanging.
+ *
+ * Returns `markEnded` — the 'end' handler MUST call it (before its own resolve/reject) so a normal
+ * 'close' firing after 'end' does not spuriously reject an already-settled promise. Extra rejects
+ * after settle are no-ops (Promise semantics), so ordering is safe either way; `markEnded` only
+ * suppresses the benign post-'end' 'close'.
+ * @param {import('http').IncomingMessage} res
+ * @param {(err: Error) => void} reject - the _request Promise's reject
+ * @param {string} providerName - for the error message (e.g. 'OpenAIProvider')
+ * @returns {{ markEnded: () => void }}
+ */
+function guardResponseSettles(res, reject, providerName) {
+  let ended = false;
+  const fail = (/** @type {string} */ event, /** @type {any} */ cause = null) => reject(new ProviderError(
+    `[${providerName}] response stream ${event} before the body completed`,
+    { retryable: true, context: { bound: 'transport', event, ...(cause && cause.code && { causeCode: cause.code }) } },
+  ));
+  res.on('aborted', () => fail('aborted'));
+  res.on('error', (e) => fail('error', e));
+  res.on('close', () => { if (!ended) fail('close'); });
+  return { markEnded: () => { ended = true; } };
+}
+
+module.exports = { DEFAULT_TIMEOUT_MS, resolveTimeoutMs, applyRequestTimeout, applyRequestDeadline, applyRequestBounds, guardResponseSettles };

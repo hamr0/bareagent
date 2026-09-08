@@ -11,6 +11,7 @@
  * @typedef {object} ProviderErrorOptions
  * @property {number} [status] - HTTP status from the provider.
  * @property {any} [body] - Raw response body.
+ * @property {boolean} [retryable] - Override the status-derived retryability (for transport-class failures with no status).
  * @property {Record<string, any>} [context] - Arbitrary structured context.
  */
 
@@ -40,9 +41,11 @@ class ProviderError extends BareAgentError {
    * @param {string} message
    * @param {ProviderErrorOptions} [options]
    */
-  constructor(message, { status, body, context = {} } = {}) {
-    const retryable = status === 429 || (status != null && status >= 500 && status <= 504);
-    super(message, { code: 'PROVIDER_ERROR', retryable, context });
+  constructor(message, { status, body, retryable, context = {} } = {}) {
+    // A transport-class failure (BA-25: socket aborted / closed before the body completed) carries no
+    // HTTP status, so the status-derived default can't classify it — an explicit `retryable` overrides.
+    const derived = status === 429 || (status != null && status >= 500 && status <= 504);
+    super(message, { code: 'PROVIDER_ERROR', retryable: retryable != null ? retryable : derived, context });
     this.status = status;
     this.body = body;
   }
