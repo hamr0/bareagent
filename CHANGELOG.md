@@ -17,6 +17,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   JSON is **never repaired** (a guessed brace could execute the wrong action), and it is all-or-nothing
   (one bad call voids the round's calls — mirrors BA-4's refusal of a truncated round's calls). Anthropic
   is unaffected (arguments arrive pre-parsed). Shared `parseToolCalls` helper (`src/provider-toolcalls.js`).
+  `Loop.run()` surfaces `malformedToolCall` on its return (for the terminating round, like `stopReason`/
+  BA-13) — a Loop caller that reads `run()` (not `generate()` directly) can otherwise not tell a broken
+  call apart from "the model sent no call": both present as `toolCalls: []`. The round is not itself
+  error-tagged (`error` stays `null`); the marker is the signal, and `usage` is metered.
 - **BA-27 (sibling) — an OpenAI 200 whose body carried no `choices` threw a bare `TypeError`.** Some
   compat servers return a 4xx-shaped error object with HTTP 200; `data.choices[0]` then threw with no
   context. Now a `ProviderError` (`context.bound:'no-choices'`) carrying the first ~300 bytes of the

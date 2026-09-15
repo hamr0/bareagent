@@ -15,9 +15,13 @@ const http = require('node:http');
 const { OpenAIProvider } = require('../src/provider-openai');
 const { OllamaProvider } = require('../src/provider-ollama');
 const { ProviderError } = require('../src/errors');
+const { Loop } = require('../src/loop');
 
 const MSGS = [{ role: 'user', content: 'hi' }];
 const TOOLS = [{ type: 'function', function: { name: 'find', parameters: {} } }];
+// Loop validates a richer tool shape ({name, execute, ...}); execute never runs here (a malformed
+// round yields no usable call) but the list is validated up front.
+const LOOP_TOOLS = [{ name: 'find', description: 'find', parameters: {}, execute: async () => 'ok' }];
 // fwdloop's real sample ended `..."matches": ["c2", "c3"]}}` — one extra trailing brace.
 const BAD_ARGS = '{"matches": ["c2", "c3"]}}';
 const GOOD_ARGS = '{"matches": ["c2", "c3"]}';
@@ -126,6 +130,41 @@ describe('BA-27: malformed tool-call arguments do not throw (Ollama string argum
       assert.equal(r.toolCalls.length, 1);
       assert.deepEqual(r.toolCalls[0].arguments, { matches: ['c2'] });
       assert.ok(!('malformedToolCall' in r));
+    } finally {
+      s.server.close();
+    }
+  });
+});
+
+describe('BA-27: Loop.run() surfaces malformedToolCall (the adopter reads run(), not generate())', () => {
+  it('a malformed round reaches the run result with the marker, toolCalls:[], usage metered', async () => {
+    // Real OpenAIProvider + real Loop against a loopback server — the adopter's actual path. Without the
+    // marker on run()'s return, a caller sees toolCalls:[] and cannot tell malformed from "no call sent".
+    const s = await serve(openaiBody(BAD_ARGS));
+    try {
+      const provider = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
+      const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'hi' }], LOOP_TOOLS);
+      assert.ok(result.malformedToolCall, 'run() surfaces the marker (like stopReason/BA-13)');
+      assert.equal(result.malformedToolCall.name, 'find');
+      assert.deepEqual(result.toolCalls, [], 'no usable tool calls');
+      assert.equal(result.error, null, 'a malformed round is not itself an error tag — the marker is the signal');
+      assert.equal(result.metrics.turns, 1, 'the billed round was metered, not lost to a throw');
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('a clean final round carries no marker on run()', async () => {
+    const s = await serve({
+      model: 'deepseek-flash',
+      choices: [{ finish_reason: 'stop', message: { content: 'done', tool_calls: [] } }],
+      usage: { prompt_tokens: 5, completion_tokens: 2 },
+    });
+    try {
+      const provider = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
+      const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'hi' }], LOOP_TOOLS);
+      assert.ok(!('malformedToolCall' in result), 'no marker on a clean run');
+      assert.equal(result.text, 'done');
     } finally {
       s.server.close();
     }
