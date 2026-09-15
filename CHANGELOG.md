@@ -23,8 +23,12 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   error-tagged (`error` stays `null`); the marker is the signal, and `usage` is metered.
 - **BA-27 (sibling) — an OpenAI 200 whose body carried no `choices` threw a bare `TypeError`.** Some
   compat servers return a 4xx-shaped error object with HTTP 200; `data.choices[0]` then threw with no
-  context. Now a `ProviderError` (`context.bound:'no-choices'`) carrying the first ~300 bytes of the
-  body, so a 4xx-in-200 can be told apart from other failures.
+  context. Now a `ProviderError` with `context.bound:'no-choices'` (always present — the stable signal
+  that distinguishes a 4xx-in-200 from other failures). The first ~300 bytes of the raw body are appended
+  to the message (and the parsed body attached to `err.body`) only when the provider was constructed with
+  `exposeErrorBody: true` — matching every other error path here, so an unexpected field in a compat
+  server's error body can't leak into logs/audit rows (`err.message` flows into `Loop.run().error`) unless
+  the caller opts in.
 
 ## [0.42.0] - 2026-09-08
 

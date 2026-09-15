@@ -130,9 +130,14 @@ class OpenAIProvider {
     // 4xx-shaped error object with HTTP 200) reached `data.choices[0]` as a bare TypeError with no
     // context. Throw a ProviderError carrying the first ~300 bytes of the body so it can be told apart.
     if (!Array.isArray(data.choices) || data.choices.length === 0) {
+      // The `context.bound:'no-choices'` marker ALWAYS distinguishes a 4xx-in-200 from other failures.
+      // The raw body snippet is gated behind `exposeErrorBody` (default off) like every other error path
+      // here — an unexpected field in a compat server's error body must not leak into logs/audit rows
+      // (err.message flows into Loop.run().error) unless the caller opts in.
       throw new ProviderError(
-        `[OpenAIProvider] response has no choices: ${JSON.stringify(data).slice(0, 300)}`,
-        /** @type {any} */ ({ context: { bound: 'no-choices' } })
+        `[OpenAIProvider] response has no choices` +
+          (this.exposeErrorBody ? `: ${JSON.stringify(data).slice(0, 300)}` : ''),
+        /** @type {any} */ ({ context: { bound: 'no-choices' }, body: this.exposeErrorBody ? data : undefined })
       );
     }
     const choice = data.choices[0];

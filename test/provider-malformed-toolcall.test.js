@@ -172,28 +172,33 @@ describe('BA-27: Loop.run() surfaces malformedToolCall (the adopter reads run(),
 });
 
 describe('BA-27: a 200 with no `choices` throws a diagnosable ProviderError (OpenAI)', () => {
-  it('surfaces the body snippet, not a bare TypeError', async () => {
-    const s = await serve({ error: { message: 'quota exceeded', type: 'insufficient_quota' } });
+  it('by default: a diagnosable ProviderError + bound marker, but NO raw body in the message', async () => {
+    // exposeErrorBody off (default) — the body must NOT leak into err.message (it flows into
+    // Loop.run().error → audit rows). The bound marker still distinguishes the 4xx-in-200 case.
+    const s = await serve({ error: { message: 'quota exceeded', type: 'insufficient_quota', secretField: 'leak-me' } });
     try {
       const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
       let err;
       try { await p.generate(MSGS, []); } catch (e) { err = e; }
       assert.ok(err instanceof ProviderError, `expected ProviderError, got ${err && err.name}`);
       assert.match(err.message, /no choices/i, 'names the shape');
-      assert.match(err.message, /quota exceeded/, 'includes the body snippet for diagnosis');
+      assert.doesNotMatch(err.message, /leak-me|quota exceeded/, 'raw body must NOT be in the message by default');
       assert.equal(err.context && err.context.bound, 'no-choices', 'carries a distinguishing bound marker');
+      assert.equal(err.body, undefined, 'no body attached without exposeErrorBody');
     } finally {
       s.server.close();
     }
   });
 
-  it('bounds the body snippet to ~300 bytes', async () => {
+  it('with exposeErrorBody: the body snippet is included for diagnosis, bounded to ~300 bytes', async () => {
     const s = await serve({ error: { message: 'x'.repeat(9000) } });
     try {
-      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
+      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeErrorBody: true });
       let err;
       try { await p.generate(MSGS, []); } catch (e) { err = e; }
       assert.ok(err instanceof ProviderError);
+      assert.match(err.message, /no choices/i);
+      assert.match(err.message, /xxxx/, 'the opted-in body snippet is present');
       assert.ok(err.message.length < 400, `snippet bounded, got ${err.message.length} chars`);
     } finally {
       s.server.close();
