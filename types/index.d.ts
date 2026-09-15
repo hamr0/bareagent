@@ -135,6 +135,16 @@ export interface GenerateResult {
    */
   temperatureDropped?: boolean;
   /**
+   * BA-27 — present ONLY when the model emitted a tool call whose `function.arguments` was
+   * syntactically-broken JSON (an extra brace, a truncated object). The billed round already
+   * succeeded, so rather than throw (which loses the round's usage and hangs metering), the provider
+   * returns NO usable tool calls (`toolCalls: []`) plus this marker. A caller treats it as "no usable
+   * tool call" and retries; `usage`/`model` still flow so the round is metered. The JSON is NEVER
+   * repaired. Absent on a clean round. OpenAI-compatible + Ollama string-arguments only; Anthropic
+   * arrives pre-parsed and cannot hit this.
+   */
+  malformedToolCall?: { name: string | undefined; error: string };
+  /**
    * BA-7 — provider-native content blocks the normalized `{text, toolCalls}` shape cannot express
    * (Anthropic `thinking` / `redacted_thinking`), captured opaquely so the Loop can put them on the
    * transcript and the provider can replay them on the next round.

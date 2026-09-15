@@ -6,6 +6,7 @@ const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
+const { parseToolCalls } = require('./provider-toolcalls');
 
 // BA-24: raw Ollama usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
 const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
@@ -85,8 +86,11 @@ class OllamaProvider {
     });
     const msg = data.message || {};
 
-    /** @type {import('../types').ToolCall[]} */
-    const toolCalls = (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
+    // BA-27: Ollama returns `function.arguments` as an OBJECT for well-formed calls, but some builds
+    // pass it through as a model-generated STRING — a malformed one must not throw here (the round
+    // already billed; a throw loses usage + hangs metering). Mirror the OpenAI path: no usable calls
+    // + a marker, never repair. The object case is untouched (JSON.parse only runs on a string).
+    const { toolCalls, malformedToolCall } = parseToolCalls(msg.tool_calls, (/** @type {any} */ tc) => ({
       id: tc.id || `call_${Date.now()}`,
       name: tc.function.name,
       arguments: typeof tc.function.arguments === 'string'
@@ -97,6 +101,7 @@ class OllamaProvider {
     return {
       text: msg.content || '',
       toolCalls,
+      ...(malformedToolCall && { malformedToolCall }),
       model: data.model || this.model,
       // BA-6: `length` ⇒ cut off at num_predict. VERIFIED LIVE on qwen2.5:0.5b
       // (`poc/ba6-stop-reason-gemini-ollama.mjs`): stop→end_turn, length→max_tokens. Lifecycle values

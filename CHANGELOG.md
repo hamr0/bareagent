@@ -2,6 +2,26 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **BA-27 — OpenAI/Ollama providers crashed on malformed tool-call JSON and lost the round's usage.**
+  `provider-openai.js` ran `JSON.parse(tc.function.arguments)` with no try/catch, *after* the HTTP round
+  succeeded and `data.usage` came back. A model that emits syntactically-broken arguments (an extra
+  brace, a truncated object — seen live on deepseek-flash and other OpenAI-compat servers) made
+  `generate()` throw a raw `SyntaxError`, losing the billed round so no caller could meter it. The same
+  unguarded parse sat in `provider-ollama.js` (string-arguments path). Now: on the first unparseable
+  call the provider returns **no usable tool calls** (`toolCalls: []`) plus a `malformedToolCall:
+  { name, error }` marker, with the normal `usage`/`model` still flowing so the round is metered. The
+  JSON is **never repaired** (a guessed brace could execute the wrong action), and it is all-or-nothing
+  (one bad call voids the round's calls — mirrors BA-4's refusal of a truncated round's calls). Anthropic
+  is unaffected (arguments arrive pre-parsed). Shared `parseToolCalls` helper (`src/provider-toolcalls.js`).
+- **BA-27 (sibling) — an OpenAI 200 whose body carried no `choices` threw a bare `TypeError`.** Some
+  compat servers return a 4xx-shaped error object with HTTP 200; `data.choices[0]` then threw with no
+  context. Now a `ProviderError` (`context.bound:'no-choices'`) carrying the first ~300 bytes of the
+  body, so a 4xx-in-200 can be told apart from other failures.
+
 ## [0.42.0] - 2026-09-08
 
 Four upstream asks from the fwdloop and bareloop adopters (consolidated filing, 2026-09-08).
