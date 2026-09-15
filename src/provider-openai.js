@@ -7,6 +7,7 @@ const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
+const { parseToolCalls } = require('./provider-toolcalls');
 
 // BA-24: raw OpenAI usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
 const OPENAI_USAGE_KEYS = ['prompt_tokens', 'completion_tokens', 'prompt_tokens_details'];
@@ -30,7 +31,13 @@ function toOpenAIToolChoice(choice) {
   if (typeof choice === 'object' && typeof choice.name === 'string' && choice.name) {
     return { type: 'function', function: { name: choice.name } };
   }
-  throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${JSON.stringify(choice)}`);
+  let describedChoice;
+  try {
+    describedChoice = JSON.stringify(choice);
+  } catch {
+    describedChoice = '<unserializable>';
+  }
+  throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${describedChoice}`);
 }
 
 /** @param {string} hostname @returns {boolean} */
@@ -125,11 +132,27 @@ class OpenAIProvider {
       stripTemperature: () => { delete body.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
     });
+    // BA-27: a successful 200 whose body carries no `choices` (some OpenAI-compat servers return a
+    // 4xx-shaped error object with HTTP 200) reached `data.choices[0]` as a bare TypeError with no
+    // context. Throw a ProviderError carrying the first ~300 bytes of the body so it can be told apart.
+    if (!Array.isArray(data.choices) || data.choices.length === 0) {
+      // The `context.bound:'no-choices'` marker ALWAYS distinguishes a 4xx-in-200 from other failures.
+      // The raw body snippet is gated behind `exposeErrorBody` (default off) like every other error path
+      // here — an unexpected field in a compat server's error body must not leak into logs/audit rows
+      // (err.message flows into Loop.run().error) unless the caller opts in.
+      throw new ProviderError(
+        `[OpenAIProvider] response has no choices` +
+          (this.exposeErrorBody ? `: ${JSON.stringify(data).slice(0, 300)}` : ''),
+        /** @type {any} */ ({ context: { bound: 'no-choices' }, body: this.exposeErrorBody ? data : undefined })
+      );
+    }
     const choice = data.choices[0];
     const msg = choice.message;
 
-    /** @type {import('../types').ToolCall[]} */
-    const toolCalls = (msg.tool_calls || []).map((/** @type {any} */ tc) => ({
+    // BA-27: `function.arguments` is a model-generated JSON STRING — a malformed one (extra brace,
+    // truncated object) must NOT throw here (the round already billed; a throw loses usage + hangs
+    // metering). parseToolCalls returns no usable calls + a marker; usage/model still flow below.
+    const { toolCalls, malformedToolCall } = parseToolCalls(msg.tool_calls, (/** @type {any} */ tc) => ({
       id: tc.id,
       name: tc.function.name,
       arguments: JSON.parse(tc.function.arguments),
@@ -138,6 +161,7 @@ class OpenAIProvider {
     return {
       text: msg.content || '',
       toolCalls,
+      ...(malformedToolCall && { malformedToolCall }),
       model: data.model || this.model,
       // BA-6: `length` ⇒ cut off at the output cap (normalized to 'max_tokens'). Note OpenAI refuses to
       // emit a tool call it cannot finish — it 400s instead — so a truncated round here carries no

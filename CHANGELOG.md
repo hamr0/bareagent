@@ -2,6 +2,44 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.43.0] - 2026-09-15
+
+BA-27 (fwdloop + bareloop adopters): malformed tool-call JSON no longer crashes the OpenAI/Ollama
+providers or loses the billed round.
+
+### Fixed
+
+- **BA-27 — OpenAI/Ollama providers crashed on malformed tool-call JSON and lost the round's usage.**
+  `provider-openai.js` ran `JSON.parse(tc.function.arguments)` with no try/catch, *after* the HTTP round
+  succeeded and `data.usage` came back. A model that emits syntactically-broken arguments (an extra
+  brace, a truncated object — seen live on deepseek-flash and other OpenAI-compat servers) made
+  `generate()` throw a raw `SyntaxError`, losing the billed round so no caller could meter it. The same
+  unguarded parse sat in `provider-ollama.js` (string-arguments path). Now: on the first unparseable
+  call the provider returns **no usable tool calls** (`toolCalls: []`) plus a `malformedToolCall:
+  { name, error }` marker, with the normal `usage`/`model` still flowing so the round is metered. The
+  JSON is **never repaired** (a guessed brace could execute the wrong action), and it is all-or-nothing
+  (one bad call voids the round's calls — mirrors BA-4's refusal of a truncated round's calls). Anthropic
+  is unaffected (arguments arrive pre-parsed). Shared `parseToolCalls` helper (`src/provider-toolcalls.js`).
+  `Loop.run()` surfaces `malformedToolCall` on its return (for the terminating round, like `stopReason`/
+  BA-13) — a Loop caller that reads `run()` (not `generate()` directly) can otherwise not tell a broken
+  call apart from "the model sent no call": both present as `toolCalls: []`. The round is not itself
+  error-tagged (`error` stays `null`); the marker is the signal, and `usage` is metered.
+- **BA-27 (sibling) — an OpenAI 200 whose body carried no `choices` threw a bare `TypeError`.** Some
+  compat servers return a 4xx-shaped error object with HTTP 200; `data.choices[0]` then threw with no
+  context. Now a `ProviderError` with `context.bound:'no-choices'` (always present — the stable signal
+  that distinguishes a 4xx-in-200 from other failures). The first ~300 bytes of the raw body are appended
+  to the message (and the parsed body attached to `err.body`) only when the provider was constructed with
+  `exposeErrorBody: true` — matching every other error path here, so an unexpected field in a compat
+  server's error body can't leak into logs/audit rows (`err.message` flows into `Loop.run().error`) unless
+  the caller opts in.
+- **OpenAI provider threw a raw `TypeError` (not the documented `ProviderError`) on a circular `toolChoice`
+  object.** `toOpenAIToolChoice`'s invalid-shape error message built its description with
+  `JSON.stringify(choice)`; a circular object makes `JSON.stringify` itself throw, so the *reporting* path
+  crashed before the documented `ProviderError` could be raised. Now the stringify is wrapped in a
+  try/catch, falling back to the literal `'<unserializable>'` in the message. No contract change — an
+  invalid `toolChoice` still always throws `ProviderError` naming the invalid shape; only this one
+  malformed-input edge is fixed.
+
 ## [0.42.0] - 2026-09-08
 
 Four upstream asks from the fwdloop and bareloop adopters (consolidated filing, 2026-09-08).
