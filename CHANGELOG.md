@@ -2,7 +2,10 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.43.0] - 2026-09-15
+
+BA-27 (fwdloop + bareloop adopters): malformed tool-call JSON no longer crashes the OpenAI/Ollama
+providers or loses the billed round.
 
 ### Fixed
 
@@ -29,6 +32,13 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `exposeErrorBody: true` — matching every other error path here, so an unexpected field in a compat
   server's error body can't leak into logs/audit rows (`err.message` flows into `Loop.run().error`) unless
   the caller opts in.
+- **OpenAI provider threw a raw `TypeError` (not the documented `ProviderError`) on a circular `toolChoice`
+  object.** `toOpenAIToolChoice`'s invalid-shape error message built its description with
+  `JSON.stringify(choice)`; a circular object makes `JSON.stringify` itself throw, so the *reporting* path
+  crashed before the documented `ProviderError` could be raised. Now the stringify is wrapped in a
+  try/catch, falling back to the literal `'<unserializable>'` in the message. No contract change — an
+  invalid `toolChoice` still always throws `ProviderError` naming the invalid shape; only this one
+  malformed-input edge is fixed.
 
 ## [0.42.0] - 2026-09-08
 
