@@ -107,4 +107,19 @@ describe('Ask 4: OpenAI tool_choice', () => {
       );
     } finally { s.server.close(); }
   });
+
+  it('throws ProviderError (not a raw TypeError) on a circular invalid toolChoice', async () => {
+    // A toolChoice that fails the { name } shape check but is circular used to hit
+    // JSON.stringify(choice) inside the throw's own message construction, raising an
+    // uncaught "Converting circular structure to JSON" TypeError instead of ProviderError.
+    const s = await captureServer();
+    try {
+      const circular = {};
+      circular.self = circular;
+      await assert.rejects(
+        () => new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }).generate(MSGS, TOOLS, { toolChoice: circular }),
+        (e) => e instanceof ProviderError && /invalid toolChoice/.test(e.message),
+      );
+    } finally { s.server.close(); }
+  });
 });

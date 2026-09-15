@@ -31,7 +31,13 @@ function toOpenAIToolChoice(choice) {
   if (typeof choice === 'object' && typeof choice.name === 'string' && choice.name) {
     return { type: 'function', function: { name: choice.name } };
   }
-  throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${JSON.stringify(choice)}`);
+  let describedChoice;
+  try {
+    describedChoice = JSON.stringify(choice);
+  } catch {
+    describedChoice = '<unserializable>';
+  }
+  throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${describedChoice}`);
 }
 
 /** @param {string} hostname @returns {boolean} */
