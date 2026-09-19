@@ -2,6 +2,23 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.44.2] - 2026-09-19
+
+Follow-up hardening for `scripts/gen-primitives.mjs` and a small provider diagnostic fix.
+
+### Fixed
+
+- **`gen-primitives.mjs` no longer follows symlinks during the source walk** — a committed
+  `*.js` symlink could previously be traversed and double-counted; the walker now skips
+  symlink entries.
+- **`gen-primitives.mjs`'s callable-detection regex tightened** so a bare `(` only matches an
+  arrow function, not any parenthesis following a symbol name. Output is byte-identical for
+  bareagent's own manifest today; this closes a latent false-positive for other layouts in the
+  suite.
+- **`provider-openai.js` now describes the value type of an unstringifiable `toolChoice`**
+  (e.g. one containing a function or symbol) instead of silently emitting `undefined` in the
+  thrown error string.
+
 ## [0.44.1] - 2026-09-19
 
 Manifest hardening for the bare-suite standard, from bareguard's adoption of `primitives.json`.
