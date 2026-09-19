@@ -324,7 +324,7 @@ failure behavior is documented in prose today (`@throws` is sparse — ~94 tags,
 concentrated in providers; `recurse` has one), so a `@fails` convention is added
 and authored per primitive.
 
-**As built (bareagent reference, v0.44.0).** 49 primitives. The generator
+**As built (bareagent reference, v0.44.1).** 49 primitives. The generator
 (`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; four tags beyond the
 core design earned their place under contact with the real surface: `@name`
 (overrides an aliased export — `readQueue`→`readDeferQueue`, `SQLiteStore`→

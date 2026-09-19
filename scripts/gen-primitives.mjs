@@ -75,7 +75,7 @@ function symbolAfter(src, afterIdx) {
   // value — rendering the latter as `X()` invents an API that does not exist.
   const cst = tail.match(/^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*([\s\S]{0,40})/);
   if (cst) {
-    const callable = /^(?:async\s+)?(?:function\b|\(|<|[A-Za-z0-9_$]+\s*=>)/.test(cst[2]);
+    const callable = /^(?:async\s+)?(?:function\b|<[^>]*>\s*\(|\((?:[^()]|\([^()]*\))*\)\s*=>|[A-Za-z0-9_$]+\s*=>)/.test(cst[2]);
     return { name: cst[1], kind: callable ? 'function' : 'value' };
   }
   return null;
@@ -139,9 +139,11 @@ async function exportIndex() {
 // A hand-rolled walker (not readdirSync's `recursive` option) keeps the suite's
 // engines floor of node >=18: the option only landed in 18.17.
 function walk(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(e =>
-    e.isDirectory() ? walk(join(dir, e.name))
-      : e.name.endsWith('.js') ? [join(dir, e.name)] : []);
+  return readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+    if (e.isSymbolicLink()) return [];
+    return e.isDirectory() ? walk(join(dir, e.name))
+      : e.name.endsWith('.js') ? [join(dir, e.name)] : [];
+  });
 }
 const ROOTS = ['src', 'tools'].filter(d => existsSync(join(CWD, d)));
 const imports = await exportIndex();

@@ -37,6 +37,7 @@ function toOpenAIToolChoice(choice) {
   } catch {
     describedChoice = '<unserializable>';
   }
+  if (describedChoice === undefined) describedChoice = `<${typeof choice}>`;
   throw new ProviderError(`[OpenAIProvider] invalid toolChoice: expected 'auto', 'required', or { name }, got ${describedChoice}`);
 }
 
