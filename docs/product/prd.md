@@ -225,6 +225,110 @@ debug noise doesn't pollute JSONL); MCP cache invalidation (on config change vs
 TTL-only — lean TTL-only, force-refresh via `mcp_discover({ refresh: true })`)
 (prd.md:780-796).
 
+## Primitives manifest (`primitives.json`)
+
+**Purpose.** So an agent or developer can `npm`-fetch a package and know, without
+reading the ~1,500-line context doc, what primitives it offers and how to call
+them. It is an **author-time selection aid**, not a runtime tool surface — a
+menu you assemble a runner from, read once *before* the loop exists. This is the
+`baresuite` answer to "agentic automation is converging on LLM-with-tool-calling,
+so how does a model pick up a library's primitives without eating prose?" An
+`llms.txt`-shaped answer is explicitly rejected: that tells a human what packages
+exist; this tells a model what it can *call*.
+
+**Scope.** bareagent first — it is the hardest case (`recurse` opts, `Loop`,
+HaltError semantics, null-vs-zero contracts), so a schema that survives it
+survives the rest. Once proven here the same shape is adopted by the other
+build-with repos (bareguard, bareloop, fwdloop). The runtime-callable packages —
+barebrowse, baremobile, litectx — are **out of scope**: they are already MCP
+servers, the correct shape for tools a model calls at runtime. A model does not
+"call" a budget gate or a loop; it builds with them and gets caged by them. That
+split (author-time manifest vs runtime MCP) is deliberate.
+
+**Inclusion rule.** Anything an agent *or* developer can construct or call to
+build/run automation is a primitive — the "author" may itself be an agent
+spawning a child, so resilience knobs it must attach (`Retry`, `CircuitBreaker`,
+`Stream`, `JsonlTransport`) count too. The only exclusion is bare error classes:
+you catch them, you don't construct them as a capability, so they fold into the
+`fails` line of whatever throws them rather than getting their own entry. Net for
+bareagent: the whole components table + providers + stores + tools. They are
+called **primitives** — not "functions" (many are classes) and not "tools" (that
+collides with the runtime tool-calling surface).
+
+**Schema.** One file, fixed name `primitives.json` at package root. The repo name
+is a field, not part of the filename, so the discovery path stays predictable:
+
+```json
+{
+  "package": "bare-agent",
+  "version": "0.43.0",
+  "primitives": [
+    {
+      "name": "recurse",
+      "category": "orchestration",
+      "when": "a task is too big for one model pass and you want it split, fanned out, verified, and merged — with total cost capped by a gate",
+      "import": "import { recurse } from 'bare-agent'",
+      "signature": "recurse(task: string, ctx: object, opts?: object) => Promise<{result, verdict, receipts} | {incomplete, best, receipts}>",
+      "fails": "returns {incomplete, best} on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.",
+      "example": "const ctx = wireGate(gate);\nconst { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });\nif (incomplete) retryOrEscalate(result);"
+    }
+  ]
+}
+```
+
+Per-entry fields: `name`, `when`, `category`, `import`, `signature`, `fails`
+(required — one plain line on what happens when it fails or refuses), `example`
+(a fresh ~3-line canonical call, copy-paste ready). `when` is the load-bearing
+field, not `what`: this is the bareloop selection finding one layer out —
+capability without a trigger is inert (litectx was drafted 1.4% of the time vs
+`read` 99.3% despite zero zero-hit recalls). A description tells the model what a
+primitive does; `when` is what gets it picked.
+
+**Authoring.** `when` and `fails` are the only hand-written fields — authored as
+JSDoc tags (`@when`, `@fails`) on the source symbol, so they travel with it, die
+with it, and show up in the same diff as any code change (they cannot drift out
+of sync — same discipline as never hand-editing a `.d.ts`). `name`, `import` and
+`signature` generate from JSDoc + the existing `.d.ts` pipeline. `example` is a
+hand-written snippet per entry, validated (see below).
+
+**Generation.** A generator runs alongside `build:types`, parses JSDoc, and emits
+`primitives.json`. Never hand-written — a hand-written manifest drifts the moment
+source moves, for the same reason a `.d.ts` is generated.
+
+**Discovery.** Fixed filename `primitives.json` at package root → pointed at from
+`package.json` (`"primitives": "./primitives.json"`) → reachable at
+`unpkg.com/<pkg>/primitives.json` **without install**, so a model can fetch-to-
+decide-then-`npm`. Plus a ≤10-line suite index that names only the *packages* and
+their manifest paths, never the primitives (naming primitives centrally = drift;
+each repo owns its own truth). The `package.json` key + fixed filename *is* the
+discovery contract, documented once and conformed to by all build-with repos.
+
+**Validation (CI gate, publish-blocking).** Mirrors bareloop's export-contract
+check: every manifested name is actually exported; every `signature` matches the
+emitted `.d.ts`; every entry carries `when`/`fails`/`example`; every `example`
+typechecks. A lying or stale manifest fails the build — a manifest a model trusts
+for `import`/`signature` is worse than none if it can drift.
+
+**Known real work (not free).** `signature`/`import` generate from what JSDoc
+already carries. `when`/`fails`/`example` are net-new hand authoring across the
+full inclusion list — the bulk of v1. `fails` in particular cannot be scraped:
+failure behavior is documented in prose today (`@throws` is sparse — ~94 tags,
+concentrated in providers; `recurse` has one), so a `@fails` convention is added
+and authored per primitive.
+
+**As built (bareagent reference, v0.44.0).** 49 primitives. The generator
+(`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; three tags beyond the
+core design earned their place under contact with the real surface: `@name`
+(overrides an aliased export — `readQueue`→`readDeferQueue`, `SQLiteStore`→
+`SQLite`), `@category` (overrides the file-inferred category), and a `category:
+"integration"` for the litectx *connectors* (`litectxCorpus`, `buildSearchTool`,
+`liteCtxMcpBridgeConfig`) — bareagent-owned glue into litectx, kept in bareagent's
+manifest because they are bareagent exports (litectx's own verbs stay in litectx's
+manifest; zero overlap). Completeness is a CI test (`test/primitives-completeness.js`)
+that owns the deliberate-exclusion allow-list (error classes, provider aliases,
+calibration helpers, unit converters) and fails if any other public export is
+unmanifested — so a new export cannot silently miss the manifest.
+
 ## Appendix A: relationship to other bare suite components
 
 bareagent (the agent loop runner, this doc) depends on bareguard (policy +

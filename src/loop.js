@@ -273,6 +273,12 @@ class Loop {
    * tool outcomes to `gate.record` (via wireGate) and never kill the loop on error.
    * @param {LoopOptions} options
    * @throws {Error} `[Loop] requires a provider` — when options.provider is missing.
+   * @when you are running a model think/act/observe cycle and need round accounting, tool dispatch, spin guards, and a governance chokepoint
+   * @fails returns the last assistant text with an `error` tag on any bound (halt/deny-streak/truncation/provider error); throws only if constructed without a provider. A policy HaltError exits clean.
+   * @example
+   *   const loop = new Loop({ provider, policy });
+   *   const { text, error, metrics } = await loop.run(messages, tools);
+   *   if (error) handle(error);
    */
   constructor(options = /** @type {LoopOptions} */ ({})) {
     if (!options.provider) throw new Error('[Loop] requires a provider');

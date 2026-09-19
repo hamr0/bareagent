@@ -36,6 +36,11 @@
 class Stream {
   /**
    * @param {StreamOptions} [options={}]
+   * @when you want a structured event emitter for loop/tool/governance events, optionally piped to a transport sink
+   * @fails never throws on emit; a transport write error is isolated and does not interrupt the run.
+   * @example
+   *   const stream = new Stream({ transport });
+   *   stream.emit('loop:round', { n: 1 });
    */
   constructor(options = {}) {
     /** @type {Transport|null} */

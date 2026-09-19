@@ -32,7 +32,14 @@ const { readFileSync, writeFileSync, existsSync } = require('node:fs');
  */
 
 class Scheduler {
-  /** @param {SchedulerOptions} [options={}] */
+  /**
+   * @param {SchedulerOptions} [options={}]
+   * @when you need to fire agent turns on a schedule — cron expressions or relative intervals — driven by a periodic tick
+   * @fails an errored job routes to the onError handler and never crashes the tick loop; a malformed cron/interval is rejected when the job is added.
+   * @example
+   *   const sched = new Scheduler({ interval: 60000 });
+   *   sched.add({ id: 'poll', cron: '0 * * * *', run });
+   */
   constructor(options = {}) {
     this._file = options.file || null;
     this._interval = options.interval || 60000;

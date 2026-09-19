@@ -18,5 +18,7 @@ jobs:
         run: npm ci
       - name: Typecheck (tsc --checkJs)
         run: npm run typecheck
+      - name: Primitives manifest current & valid
+        run: npm run check:primitives
       - name: Test
         run: npm test

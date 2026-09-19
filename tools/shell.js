@@ -499,6 +499,11 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * gating is the caller's responsibility via `new Loop({ policy })`.
  *
  * @returns {{tools: ToolDef[]}}
+ * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
+ * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, and shell_edit refuses a non-unique anchor as a tool result (file untouched).
+ * @example
+ *   const { tools } = createShellTools();
+ *   const loop = new Loop({ provider, tools, policy });
  */
 function createShellTools() {
   /** @type {ToolDef[]} */

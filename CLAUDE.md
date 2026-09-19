@@ -51,6 +51,7 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 | `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, spawnChild, createDeferTool, readDeferQueue |
 | `bare-agent/bareguard` | wireGate (returns `{ policy, wrapTool, wrapTools }`) + `judgeToAnnotation` (pure judge→gate.annotate render) |
 | `bare-agent/mcp` | createMCPBridge (returns `{tools, metaTools, ...}`), discoverServers, buildMetaTools |
+| `primitives.json` | Generated machine-readable manifest of every callable primitive (49 entries: `name`/`category`/`when`/`import`/`signature`/`fails`/`example`). Author-time discovery for an agent/dev — `unpkg.com/bare-agent/primitives.json` without install. A primitive = any export whose JSDoc has `@when`; `@when`/`@fails` are the only hand-authored fields, `@name`/`@category` override alias/inferred category. NOT a runtime tool surface (that stays MCP). See docs/product/prd.md § "Primitives manifest" |
 
 ## Commands
 
@@ -60,9 +61,11 @@ node --test test/integration*.test.js       # Integration only (needs API keys)
 node --test test/e2e.test.js                # E2E composition tests
 npm run typecheck                           # tsc --checkJs (strictNullChecks) over JSDoc — runs in CI
 npm run build:types                         # emit .d.ts from JSDoc (auto-runs on prepublishOnly)
+npm run build:primitives                    # regenerate primitives.json from JSDoc (auto-runs on prepublishOnly)
+npm run check:primitives                    # CI gate: fail if primitives.json is stale/invalid
 ```
 
-Source is pure JS + JSDoc; `.d.ts` are generated (git-ignored, shipped on publish). Keep JSDoc accurate — CI runs `npm run typecheck` on every push/PR and gates publish. Shared type shapes live in `types/`.
+Source is pure JS + JSDoc; `.d.ts` are generated (git-ignored, shipped on publish). Keep JSDoc accurate — CI runs `npm run typecheck` on every push/PR and gates publish. Shared type shapes live in `types/`. `primitives.json` is generated from `@when`/`@fails` JSDoc tags by `scripts/gen-primitives.mjs`; CI gates on `check:primitives` + `test/primitives-completeness.test.js` (every public export is manifested or explicitly excluded).
 
 ## Key Patterns
 

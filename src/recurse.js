@@ -395,6 +395,12 @@ function auditSafeCtx(ctx, overrides = {}) {
  * @returns {Promise<RecurseResult>} `{ result, verdict, receipts }` on convergence; `{ incomplete, best,
  *   receipts }` on guard exhaustion. NEVER a fabricated success (RC-9).
  * @throws {Error} no provider supplied (on neither `ctx.provider` nor `opts.provider`).
+ * @when a task is too big for one model pass and you want it split, fanned out, verified, and merged — with total cost capped by a gate
+ * @fails returns `{incomplete, best}` on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.
+ * @example
+ *   const ctx = wireGate(gate);
+ *   const { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });
+ *   if (incomplete) retryOrEscalate(result);
  */
 async function recurse(task, ctx = {}, opts = {}) {
   if (typeof task !== 'string' || task.length === 0) {

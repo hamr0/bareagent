@@ -5,6 +5,11 @@
  * Returns { tools, close } or null if barebrowse is not installed.
  * @param {object} [opts] - Options passed to barebrowse createBrowseTools
  * @returns {Promise<{tools: Array, close: Function}|null>}
+ * @when you want to give an agent browser tools (navigate, click, read) via barebrowse for inline snapshots
+ * @fails returns null if barebrowse (optional dep) is not installed; otherwise returns {tools, close} — call close() to release the browser.
+ * @example
+ *   const b = await createBrowsingTools();
+ *   const loop = new Loop({ provider, tools: b.tools });
  */
 async function createBrowsingTools(opts = {}) {
   try {

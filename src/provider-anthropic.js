@@ -41,6 +41,10 @@ class AnthropicProvider {
   /**
    * @param {AnthropicOptions} [options]
    * @throws {Error} `[AnthropicProvider] requires apiKey` — when apiKey is missing.
+   * @when you want Claude models as the Loop's provider — native Messages API with opt-in prompt caching and thinking-block passthrough
+   * @fails throws on a missing apiKey; normalizes stopReason and usage (usage:null when the API omits it); a socket idle/deadline/transport cut rejects with a retryable Timeout/ProviderError.
+   * @example
+   *   const provider = new AnthropicProvider({ apiKey, model: 'claude-sonnet-5' });
    */
   constructor(options = {}) {
     if (!options.apiKey) throw new Error('[AnthropicProvider] requires apiKey');

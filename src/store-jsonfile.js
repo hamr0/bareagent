@@ -31,6 +31,11 @@ class JsonFileStore {
   /**
    * @param {{ path?: string }} [options]
    * @throws {Error} `[JsonFileStore] requires options.path` — when path is missing.
+   * @name JsonFile
+   * @when you want zero-dependency JSON-file storage for Memory (store/search/get/delete) — the simplest durable backend, no native deps
+   * @fails throws on a missing path; implements the four-verb Store socket over a plain JSON file.
+   * @example
+   *   const store = new JsonFile({ path: './agent.json' });
    */
   constructor(options = {}) {
     if (!options.path) throw new Error('[JsonFileStore] requires options.path');

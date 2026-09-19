@@ -86,6 +86,8 @@ let warnedWrap = false;
  *   does NOT activate `bash`/`fs`/`net` primitives — those need their own
  *   `action.type` value. Adopters using those primitives must translate.
  * @returns {{policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}}
+ * @when you have a bareguard Gate and want to wire it into a Loop as the policy + metering chokepoint in one line
+ * @fails never throws; a gate halt surfaces as a HaltError the Loop catches and exits cleanly, and a deny is an advisory string fed back to the model.
  *
  * @example
  *   const { Gate } = require('bareguard');
@@ -385,6 +387,10 @@ function renderWhereString(where) {
  * @param {import('./judge').JudgeVerdict | { verdict?: string, where?: any }} verdict - a `judge()` return value.
  * @param {JudgeToAnnotationOptions} [opts]
  * @returns {Annotation}
+ * @when you want to surface a judge() verdict on a gate's audit/humanChannel via gate.annotate, keeping the render pure (it never calls the gate)
+ * @fails never throws and never calls the gate; surfaces fail-open (a non-honored verdict surfaces) and bounds fields against the sink's silent caps with a visible clip marker.
+ * @example
+ *   gate.annotate(judgeToAnnotation(await judge({ request, artifact, provider })));
  */
 function judgeToAnnotation(verdict, opts = {}) {
   const v = verdict && typeof verdict === 'object' ? verdict : {};

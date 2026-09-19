@@ -82,6 +82,11 @@ const INSTRUCTIONS =
  * @param {number} [options.compaction.keepRecentTurns=3] - Recent turns to keep at the END (live working set).
  * @param {(msg: string) => void} [options.onNote=console.warn] - Sink for the loud one-time/backstop notes.
  * @returns {{ skill: { name: string, description: string, instructions: string, tools: ToolDef[] }, trim: (msgs: any[], ctx: any) => Promise<any[]>, restoreHandles: () => string[] }}
+ * @when you need compaction-first context hygiene — a registrable skill whose checkpoint/compact/restore tools fold the live transcript at round boundaries
+ * @fails never throws for a fold; degrades LOUDLY to a lossless park when summarize is unwired. Preserves tool-pairing and role alternation by construction.
+ * @example
+ *   const { skill, trim } = createStashSkill({ compaction: { ceilingTokens: 100000 } });
+ *   const loop = new Loop({ provider, trim });
  */
 function createStashSkill(options = {}) {
   const {

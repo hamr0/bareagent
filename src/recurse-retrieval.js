@@ -188,6 +188,12 @@ function normalizeCorpus(corpus) {
  * @param {{recall: Function}} litectx
  * @param {{kinds?: string[], n?: number}} [opts]
  * @returns {ToolDef}
+ * @category integration
+ * @when you want to give a recurse worker a needle-search handle over litectx (embeddings recall for the relevant few) — for FINDING, never counting
+ * @fails returns matched bodies only and CANNOT count (the completeness guard blocks a "how many" ask before it is offered); a dead window yields nothing, never a fabricated hit.
+ * @example
+ *   const tool = buildSearchTool(litectx, { n: 8 });
+ *   await recurse(task, ctx, { retrieval: 'search', tools: [tool] });
  */
 function buildSearchTool(litectx, opts = {}) {
   const kinds = Array.isArray(opts.kinds) && opts.kinds.length ? opts.kinds : ['fact', 'episode'];
@@ -224,6 +230,11 @@ function buildSearchTool(litectx, opts = {}) {
  * OFF to stay exact — deferred; the code-side filter is the embeddings-free path shipped now.)
  * @param {Slice[]} corpus - The validated slice-source.
  * @returns {ToolDef}
+ * @when you want an embeddings-free, exact AND-term filter handle over a slice-source — complete over its slices, for precise lexical matches
+ * @fails only as good as a lexical rule; complete over the slices it is given (no recall cap) but matches nothing outside them.
+ * @example
+ *   const tool = buildExactTool(corpus);
+ *   await recurse(task, ctx, { retrieval: 'exact', tools: [tool] });
  */
 function buildExactTool(corpus) {
   const slices = normalizeCorpus(corpus);
@@ -269,6 +280,11 @@ function buildExactTool(corpus) {
  *   materialized lazily on first call and cached for the tool's lifetime.
  * @param {{provider: Provider, window?: number, passes?: number, ctx?: object, onLlmResult?: Function, policy?: Function}} opts
  * @returns {ToolDef}
+ * @when you need the complete count/"all" path — scan every slice + LLM-judge + code-count — the only retrieval mode that can honestly answer "how many"
+ * @fails a dead window surfaces as `INCOMPLETE — the count is a floor`, never a clean number over a hole; a governance HaltError propagates clean.
+ * @example
+ *   const tool = buildScanTool(corpus, { provider, window: 8 });
+ *   await recurse('how many mention X', ctx, { tools: [tool] });
  */
 function buildScanTool(corpus, opts) {
   /** @type {Slice[]|null} */
@@ -337,6 +353,12 @@ const ENUM_PAGE = 200;
  * @param {{enumerate: Function}} litectx
  * @param {{kind?: 'fact'|'episode', pageSize?: number}} [opts]
  * @returns {() => Promise<Slice[]>}
+ * @category integration
+ * @when you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding scan/partition
+ * @fails never ingests a fresh corpus (strictly worse than scanning an in-hand array); returns an async source materialized once and cached.
+ * @example
+ *   const corpus = litectxCorpus(litectx, { kind: 'fact' });
+ *   await recurse(task, ctx, { mode: 'partition', corpus });
  */
 function litectxCorpus(litectx, opts = {}) {
   const kind = opts.kind === 'episode' ? 'episode' : 'fact'; // enumerate v1 is the memory axis (fact/episode)

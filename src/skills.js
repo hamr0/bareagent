@@ -51,6 +51,12 @@ class SkillRegistry {
    *   skill tool that would collide with one is rejected at `register` time. Tool names are globally unique
    *   for DISPATCH (PRD §2.6, D6) — this is the collision check across native + MCP + skills, not security.
    * @param {string} [options.metaToolName='skill_use'] - Override the meta-tool name if `skill_use` is taken.
+   * @when you want to expose operator-registered skill bundles to a model by progressive disclosure — one meta-tool whose catalog unlocks a skill's tools on demand
+   * @fails register() rejects an unsafe or colliding name fail-fast and commits nothing on failure; governance is unchanged — discovery never authorizes.
+   * @example
+   *   const skills = new SkillRegistry();
+   *   skills.register({ name: 'deploy', description: 'ship a release', instructions: '...', tools: [] });
+   *   const loop = new Loop({ provider, tools: skills.activeTools });
    */
   constructor(options = {}) {
     /** @type {Map<string, {name: string, description: string, instructions: string, tools: ToolDef[]}>} */

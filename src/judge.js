@@ -145,6 +145,11 @@ function normalizeWhere(where) {
  * @throws {ValidationError} on bad inputs (missing request/artifact/provider) — stamped `context.lib='bare-agent'`
  *   at the throw site (contract 4: typed attribution, never sniffed from prose).
  * @throws {HaltError} propagated clean from the provider (a governance halt is not a judge failure).
+ * @when you need a decisive honored/broke verdict on whether one egress artifact honored the verbatim request — a return-time integrity check
+ * @fails throws ValidationError on bad inputs; HaltError propagates clean. Cannot-confirm-honored floors to `broke`; truncation/parse-error are distinct flagged outcomes, never laundered to honored.
+ * @example
+ *   const { verdict, where } = await judge({ request, artifact, provider });
+ *   if (verdict === 'broke') flag(where);
  */
 async function judge(options = /** @type {JudgeOptions} */ ({})) {
   const { request, artifact, provider } = options;

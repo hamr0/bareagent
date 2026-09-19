@@ -108,7 +108,15 @@ Output your FINAL answer as ONLY this JSON, no markdown, no prose:
  * Built flagged-and-deletable per D11 — opt-in by import; calibrate the rubric/prompt from execution traces.
  */
 class Evaluator {
-  /** @param {EvaluatorOptions} [options] */
+  /**
+   * @param {EvaluatorOptions} [options]
+   * @when you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, or with a tool-running critic that exercises the live artifact
+   * @fails never throws for a bad grade — returns a Verdict {status: satisfied|needs_revision|failed}; a provider HaltError propagates clean. Judge tokens forward via onLlmResult.
+   * @example
+   *   const evaluator = new Evaluator({ provider });
+   *   const verdict = await evaluator.evaluate(goal, result, { rubric });
+   *   if (!verdict.pass) revise(verdict.critique);
+   */
   constructor(options = /** @type {EvaluatorOptions} */ ({})) {
     this.provider = options.provider || null;
     this.prompt = options.prompt || GRADER_PROMPT;

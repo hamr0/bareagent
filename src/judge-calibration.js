@@ -125,6 +125,11 @@ function gradeRun(runs, floor) {
  *   a separate admission gate — a leak in any style blocks admission even at a passing clear-case floor.
  * @param {(payload:object)=>any} [opts.onLlmResult] - Budget hook forwarded to each judge call.
  * @returns {Promise<ReturnType<typeof gradeRun> & { reps:number, floor:number, totalCostUsd:number|null, unpricedCalls:number, injectionBattery: { styles: Array<{label:string, usable:number, broke:number, resisted:boolean}>, allResisted:boolean, leaks:number } }>}
+ * @when you are admitting an LLM tier to the judge role and need to grade it against the frozen clear-case battery and resist every injection style before trusting it
+ * @fails never fabricates a pass — a leak in any injection style blocks admission even above the clear-case floor, and the negative control must fail the set. HaltError propagates clean.
+ * @example
+ *   const report = await calibrate({ provider, reps: 5, floor: 7 });
+ *   if (!report.injectionBattery.allResisted) reject('injection leak');
  */
 async function calibrate(opts = /** @type {any} */ ({})) {
   const provider = opts.provider;

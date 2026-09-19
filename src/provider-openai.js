@@ -76,6 +76,10 @@ function isLoopbackHost(hostname) {
 class OpenAIProvider {
   /**
    * @param {OpenAIOptions} [options]
+   * @when you want OpenAI or any OpenAI-compatible endpoint as the Loop's provider — tool-calling, toolChoice, and a custom baseUrl
+   * @fails throws on a missing apiKey; a malformed tool-call JSON returns no usable calls with usage still metered (BA-27); a socket idle/deadline/transport cut rejects with a retryable error.
+   * @example
+   *   const provider = new OpenAIProvider({ apiKey, model: 'gpt-5' });
    */
   constructor(options = {}) {
     this.apiKey = options.apiKey?.trim();

@@ -47,6 +47,11 @@
  * @throws {Error} `[runPlan] executeFn must be a function` — when executeFn is not a function.
  * @throws {Error} `[runPlan] duplicate step id: "X"` — when two steps share an id.
  * @throws {Error} `[runPlan] step "X" depends on unknown step "Y"` — when dependsOn references missing id.
+ * @when you have a step DAG from the Planner and want to execute it with wave-based parallelism (independent steps run concurrently)
+ * @fails throws on a malformed DAG (empty steps, non-function executeFn, duplicate ids, unknown dependency); a step's own error surfaces per StepResult, never crashing the wave.
+ * @example
+ *   const steps = await planner.plan(goal);
+ *   const results = await runPlan(steps, step => execute(step));
  */
 async function runPlan(steps, executeFn, options = {}) {
   if (!Array.isArray(steps) || steps.length === 0) {
