@@ -105,7 +105,7 @@
       "category": "tools",
       "when": "you want a tool that queues an action to a JSONL file for an external waker (cron) to fire later — two-phase governance (emit-time + fire-time)",
       "import": "import { createDeferTool } from 'bare-agent/tools'",
-      "signature": "createDeferTool(options?: object) => {tool: import('../types').ToolDef, readQueue: () => Promise<Record<string, any>[]>, queuePath: string}",
+      "signature": "createDeferTool(options?: object) => {tool: ToolDef, readQueue: () => Promise<Record<string, any>[]>, queuePath: string}",
       "fails": "returns {tool, readQueue, queuePath}; the inner action is re-gated at fire time when the waker runs. bareguard caps via defer.ratePerMinute.",
       "example": "const { tool } = createDeferTool();\nconst loop = new Loop({ provider, tools: [tool] });"
     },
@@ -141,7 +141,7 @@
       "category": "tools",
       "when": "you want an LLM-callable spawn tool so a model can fork child bareagents itself — governed per-family by bareguard",
       "import": "import { createSpawnTool } from 'bare-agent/tools'",
-      "signature": "createSpawnTool(options?: object) => {tool: import('../types').ToolDef, spawnChild: typeof spawnChild}",
+      "signature": "createSpawnTool(options?: object) => {tool: ToolDef, spawnChild: typeof spawnChild}",
       "fails": "returns {tool, spawnChild}; the tool blocks per child and child stderr is re-emitted as child:stderr on the wired Stream.",
       "example": "const { tool } = createSpawnTool();\nconst loop = new Loop({ provider, tools: [tool] });"
     },
@@ -240,7 +240,7 @@
       "category": "governance",
       "when": "you want to surface a judge() verdict on a gate's audit/humanChannel via gate.annotate, keeping the render pure (it never calls the gate)",
       "import": "import { judgeToAnnotation } from 'bare-agent'",
-      "signature": "judgeToAnnotation(verdict: import('./judge').JudgeVerdict | { verdict?: string, where?: any }, opts?: JudgeToAnnotationOptions) => Annotation",
+      "signature": "judgeToAnnotation(verdict: JudgeVerdict | { verdict?: string, where?: any }, opts?: JudgeToAnnotationOptions) => Annotation",
       "fails": "never throws and never calls the gate; surfaces fail-open (a non-honored verdict surfaces) and bounds fields against the sink's silent caps with a visible clip marker.",
       "example": "gate.annotate(judgeToAnnotation(await judge({ request, artifact, provider })));"
     },
@@ -258,7 +258,7 @@
       "category": "integration",
       "when": "you want to connect a litectx instance to a bareagent runner over the MCP bridge — a curated, child-db-local litectx server",
       "import": "import { liteCtxMcpBridgeConfig } from 'bare-agent/tools'",
-      "signature": "liteCtxMcpBridgeConfig(opts: object) => import('../src/mcp-bridge').BridgeConfig",
+      "signature": "liteCtxMcpBridgeConfig(opts: object) => BridgeConfig",
       "fails": "read-only by default (opt-in `writable` allows remember/forget); pre-seeding `now` makes createMCPBridge skip IDE discovery and connect straight to this server.",
       "example": "const cfg = liteCtxMcpBridgeConfig({ root: './child.db' });\nconst { tools } = await createMCPBridge({ config: cfg });"
     },
@@ -440,7 +440,7 @@
       "import": "import { wireGate } from 'bare-agent'",
       "signature": "wireGate(gate: Gate, options?: object) => {policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}",
       "fails": "never throws; a gate halt surfaces as a HaltError the Loop catches and exits cleanly, and a deny is an advisory string fed back to the model.",
-      "example": "const { Gate } = require('bareguard');\nconst { Loop } = require('bare-agent');\nconst { wireGate } = require('bare-agent/bareguard');\n\nconst gate = new Gate({\n budget: { maxCostUsd: 0.50 },\n limits: { maxTurns: 20 },\n audit:  { path: './audit.jsonl' },\n});\nawait gate.init();\n\nconst { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);\nconst loop = new Loop({ provider, policy, onLlmResult, onToolResult });\nconst tools = await filterTools(myTools);\nawait loop.run(messages, tools);"
+      "example": "const { Gate } = require('bareguard');\nconst { Loop } = require('bare-agent');\nconst { wireGate } = require('bare-agent/bareguard');\n\nconst gate = new Gate({\n  budget: { maxCostUsd: 0.50 },\n  limits: { maxTurns: 20 },\n  audit:  { path: './audit.jsonl' },\n});\nawait gate.init();\n\nconst { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);\nconst loop = new Loop({ provider, policy, onLlmResult, onToolResult });\nconst tools = await filterTools(myTools);\nawait loop.run(messages, tools);"
     }
   ]
 }

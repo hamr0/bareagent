@@ -328,7 +328,9 @@ and authored per primitive.
 (`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; three tags beyond the
 core design earned their place under contact with the real surface: `@name`
 (overrides an aliased export — `readQueue`→`readDeferQueue`, `SQLiteStore`→
-`SQLite`), `@category` (overrides the file-inferred category), and a `category:
+`SQLite`), `@category` (overrides the file-inferred category), `@signature` (pins
+an exact literal signature when the derived one would leak a private/test-only
+seam), and a `category:
 "integration"` for the litectx *connectors* (`litectxCorpus`, `buildSearchTool`,
 `liteCtxMcpBridgeConfig`) — bareagent-owned glue into litectx, kept in bareagent's
 manifest because they are bareagent exports (litectx's own verbs stay in litectx's

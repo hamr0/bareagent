@@ -24,6 +24,24 @@ Manifest hardening for the bare-suite standard, from bareguard's adoption of `pr
   `node >=18` engines floor (the option landed in 18.17). No effect on bareagent's own
   manifest — its `src/` and `tools/` are flat — but the reference generator is now correct
   for the whole suite.
+- **Signatures no longer carry `import("./path").Type` spellings.** A JSDoc type is written
+  for `tsc`, which resolves those relative paths from the source file; read out of
+  `node_modules` they are meaningless. The generator now strips the `import(...)` wrapper and
+  keeps the bare type name (4 of bareagent's 49 signatures were affected).
+- **Multi-line `@example` blocks keep their relative indentation.** The old fixed 0–3-char
+  dedent flattened nested object literals to one column; the generator now dedents by the
+  common leading-whitespace prefix.
+- **A data-bound `export const` no longer renders as a phantom `X()` call.** The generator
+  distinguishes a const bound to a function from one bound to a value and emits `name: Type`
+  for the latter (no data-const primitives in bareagent today; correctness for the suite).
+
+### Added
+
+- **`@signature` JSDoc override** — pins an exact literal signature when the derived one would
+  leak a private/test-only seam.
+- **Two manifest guard tests** — the manifest shape is exactly `{package, primitives}` (pins the
+  no-version decision so it cannot drift back), and every `@example` is syntactically valid ESM
+  (a copy-paste example that does not parse is a confident wrong answer).
 
 ## [0.44.0] - 2026-09-19
 

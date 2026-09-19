@@ -12,6 +12,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const manifest = require(path.join(ROOT, 'primitives.json'));
@@ -69,5 +72,30 @@ test('manifest is well-formed: every entry has the required fields', () => {
     for (const f of ['name', 'category', 'when', 'import', 'signature', 'fails', 'example']) {
       assert.ok(p[f] && String(p[f]).trim(), `primitive ${p.name || '(unnamed)'} missing field: ${f}`);
     }
+  }
+});
+
+test('manifest shape is exactly {package, primitives} — pins the no-version decision', () => {
+  // Suite-wide convention: no `version` field (package.json carries the authoritative
+  // one, beside the manifest in the same tarball). This pins it so it cannot drift back.
+  assert.deepStrictEqual(Object.keys(manifest).sort(), ['package', 'primitives']);
+});
+
+test('every @example is syntactically valid ESM', () => {
+  // A copy-paste example that does not even parse is a confident wrong answer to
+  // "how do I call this?". Syntax-only check (node --check) — never executes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prim-ex-'));
+  try {
+    for (const p of manifest.primitives) {
+      const file = path.join(dir, `${p.name.replace(/[^\w$]/g, '_')}.mjs`);
+      fs.writeFileSync(file, p.example + '\n');
+      try {
+        execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+      } catch (e) {
+        assert.fail(`primitive ${p.name}: @example is not valid ESM syntax:\n${p.example}\n\n${(e.stderr || '').toString()}`);
+      }
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
