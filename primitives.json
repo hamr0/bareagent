@@ -1,0 +1,447 @@
+{
+  "package": "bare-agent",
+  "version": "0.44.0",
+  "primitives": [
+    {
+      "name": "AnthropicProvider",
+      "category": "providers",
+      "when": "you want Claude models as the Loop's provider — native Messages API with opt-in prompt caching and thinking-block passthrough",
+      "import": "import { AnthropicProvider } from 'bare-agent/providers'",
+      "signature": "new AnthropicProvider(options?: AnthropicOptions)",
+      "fails": "throws on a missing apiKey; normalizes stopReason and usage (usage:null when the API omits it); a socket idle/deadline/transport cut rejects with a retryable Timeout/ProviderError.",
+      "example": "const provider = new AnthropicProvider({ apiKey, model: 'claude-sonnet-5' });"
+    },
+    {
+      "name": "assessComplexity",
+      "category": "routing",
+      "when": "you want a fast, no-LLM read of how hard a goal is (simple/medium/complex/critical) to decide whether to invoke the Planner",
+      "import": "import { assessComplexity } from 'bare-agent'",
+      "signature": "assessComplexity(prompt: string) => ComplexityResult",
+      "fails": "never throws — pure text scoring; non-string/blank input scores lowest. Keyword lists are frozen and a critical-safety override always wins.",
+      "example": "const { level, needsPlanning } = assessComplexity(goal);\nif (needsPlanning) await planner.plan(goal);"
+    },
+    {
+      "name": "buildExactTool",
+      "category": "retrieval",
+      "when": "you want an embeddings-free, exact AND-term filter handle over a slice-source — complete over its slices, for precise lexical matches",
+      "import": "import { buildExactTool } from 'bare-agent'",
+      "signature": "buildExactTool(corpus: Slice[]) => ToolDef",
+      "fails": "only as good as a lexical rule; complete over the slices it is given (no recall cap) but matches nothing outside them.",
+      "example": "const tool = buildExactTool(corpus);\nawait recurse(task, ctx, { retrieval: 'exact', tools: [tool] });"
+    },
+    {
+      "name": "buildMetaTools",
+      "category": "mcp",
+      "when": "you want the two bulk MCP meta-tools (mcp_discover, mcp_invoke) instead of exposing every discovered tool individually — one gate-check per invocation",
+      "import": "import { buildMetaTools } from 'bare-agent/mcp'",
+      "signature": "buildMetaTools(tools: ToolDef[], discoveredAt?: string) => ToolDef[]",
+      "fails": "returns [mcp_discover, mcp_invoke]; a tool name does not travel as action.type (a deliberate v0.9 trade for one gate-check per call).",
+      "example": "const metaTools = buildMetaTools(tools);"
+    },
+    {
+      "name": "buildScanTool",
+      "category": "retrieval",
+      "when": "you need the complete count/\"all\" path — scan every slice + LLM-judge + code-count — the only retrieval mode that can honestly answer \"how many\"",
+      "import": "import { buildScanTool } from 'bare-agent'",
+      "signature": "buildScanTool(corpus: Slice[] | (() => Promise<Slice[]>), opts: {provider: Provider, window?: number, passes?: number, ctx?: object, onLlmResult?: Function, policy?: Function}) => ToolDef",
+      "fails": "a dead window surfaces as `INCOMPLETE — the count is a floor`, never a clean number over a hole; a governance HaltError propagates clean.",
+      "example": "const tool = buildScanTool(corpus, { provider, window: 8 });\nawait recurse('how many mention X', ctx, { tools: [tool] });"
+    },
+    {
+      "name": "buildSearchTool",
+      "category": "integration",
+      "when": "you want to give a recurse worker a needle-search handle over litectx (embeddings recall for the relevant few) — for FINDING, never counting",
+      "import": "import { buildSearchTool } from 'bare-agent'",
+      "signature": "buildSearchTool(litectx: {recall: Function}, opts?: {kinds?: string[], n?: number}) => ToolDef",
+      "fails": "returns matched bodies only and CANNOT count (the completeness guard blocks a \"how many\" ask before it is offered); a dead window yields nothing, never a fabricated hit.",
+      "example": "const tool = buildSearchTool(litectx, { n: 8 });\nawait recurse(task, ctx, { retrieval: 'search', tools: [tool] });"
+    },
+    {
+      "name": "calibrate",
+      "category": "evaluation",
+      "when": "you are admitting an LLM tier to the judge role and need to grade it against the frozen clear-case battery and resist every injection style before trusting it",
+      "import": "import { calibrate } from 'bare-agent'",
+      "signature": "calibrate(opts: object) => Promise<ReturnType<typeof gradeRun> & { reps:number, floor:number, totalCostUsd:number|null, unpricedCalls:number, injectionBattery: { styles: Array<{label:string, usable:number, broke:number, resisted:boolean}>, allResisted:boolean, leaks:number } }>",
+      "fails": "never fabricates a pass — a leak in any injection style blocks admission even above the clear-case floor, and the negative control must fail the set. HaltError propagates clean.",
+      "example": "const report = await calibrate({ provider, reps: 5, floor: 7 });\nif (!report.injectionBattery.allResisted) reject('injection leak');"
+    },
+    {
+      "name": "Checkpoint",
+      "category": "hitl",
+      "when": "you want an always-prompt human-in-the-loop approval gate on chosen tools — complementary to bareguard's policy-driven pauses",
+      "import": "import { Checkpoint } from 'bare-agent'",
+      "signature": "new Checkpoint(options?: CheckpointOptions)",
+      "fails": "auto-denies on timeout (0 disables) and denies safe when no reply channel is wired; a TimeoutError is surfaced, never swallowed.",
+      "example": "const checkpoint = new Checkpoint({ tools: ['deploy'], waitForReply });\nconst ok = await checkpoint.confirm('deploy', args);"
+    },
+    {
+      "name": "CircuitBreaker",
+      "category": "resilience",
+      "when": "you want per-key failure isolation — trip open after N failures, probe half-open after a cooldown — so one failing dependency doesn't cascade",
+      "import": "import { CircuitBreaker } from 'bare-agent'",
+      "signature": "new CircuitBreaker(options?: object)",
+      "fails": "throws CircuitOpenError while open (fail-fast, no downstream call); transitions emit onStateChange and reset on a successful half-open probe.",
+      "example": "const cb = new CircuitBreaker({ threshold: 5 });\nawait cb.call('api', () => fetch(url));"
+    },
+    {
+      "name": "CLIPipeProvider",
+      "category": "providers",
+      "when": "you want to drive a CLI (e.g. the claude CLI) as the Loop's provider — native MCP tools or a JSON emulation envelope",
+      "import": "import { CLIPipeProvider } from 'bare-agent/providers'",
+      "signature": "new CLIPipeProvider(options?: CLIPipeOptions)",
+      "fails": "throws on a missing command; in native mode it owns its own cycle (ownsCycle), so per-round Loop seams are refused at construction rather than left silently dead.",
+      "example": "const provider = new CLIPipeProvider({ command: 'claude' });"
+    },
+    {
+      "name": "createBrowsingTools",
+      "category": "tools",
+      "when": "you want to give an agent browser tools (navigate, click, read) via barebrowse for inline snapshots",
+      "import": "import { createBrowsingTools } from 'bare-agent/tools'",
+      "signature": "createBrowsingTools(opts?: object) => Promise<{tools: Array, close: Function}|null>",
+      "fails": "returns null if barebrowse (optional dep) is not installed; otherwise returns {tools, close} — call close() to release the browser.",
+      "example": "const b = await createBrowsingTools();\nconst loop = new Loop({ provider, tools: b.tools });"
+    },
+    {
+      "name": "createDeferTool",
+      "category": "tools",
+      "when": "you want a tool that queues an action to a JSONL file for an external waker (cron) to fire later — two-phase governance (emit-time + fire-time)",
+      "import": "import { createDeferTool } from 'bare-agent/tools'",
+      "signature": "createDeferTool(options?: object) => {tool: import('../types').ToolDef, readQueue: () => Promise<Record<string, any>[]>, queuePath: string}",
+      "fails": "returns {tool, readQueue, queuePath}; the inner action is re-gated at fire time when the waker runs. bareguard caps via defer.ratePerMinute.",
+      "example": "const { tool } = createDeferTool();\nconst loop = new Loop({ provider, tools: [tool] });"
+    },
+    {
+      "name": "createMCPBridge",
+      "category": "mcp",
+      "when": "you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution",
+      "import": "import { createMCPBridge } from 'bare-agent/mcp'",
+      "signature": "createMCPBridge(opts?: object) => Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, close: Function}>",
+      "fails": "a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); returns tools plus a close() to shut servers down.",
+      "example": "const { tools, close } = await createMCPBridge();\nconst loop = new Loop({ provider, tools });"
+    },
+    {
+      "name": "createMobileTools",
+      "category": "tools",
+      "when": "you want to give an agent Android/iOS device control (tap, type, snapshot) via baremobile",
+      "import": "import { createMobileTools } from 'bare-agent/tools'",
+      "signature": "createMobileTools(opts?: object) => Promise<{tools: ToolDef[], close: Function}|null>",
+      "fails": "returns null if baremobile (optional dep) is not installed; otherwise returns {tools, close} — call close() to disconnect.",
+      "example": "const m = await createMobileTools({ platform: 'android' });\nconst loop = new Loop({ provider, tools: m.tools });"
+    },
+    {
+      "name": "createShellTools",
+      "category": "tools",
+      "when": "you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps",
+      "import": "import { createShellTools } from 'bare-agent/tools'",
+      "signature": "createShellTools() => {tools: ToolDef[]}",
+      "fails": "never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, and shell_edit refuses a non-unique anchor as a tool result (file untouched).",
+      "example": "const { tools } = createShellTools();\nconst loop = new Loop({ provider, tools, policy });"
+    },
+    {
+      "name": "createSpawnTool",
+      "category": "tools",
+      "when": "you want an LLM-callable spawn tool so a model can fork child bareagents itself — governed per-family by bareguard",
+      "import": "import { createSpawnTool } from 'bare-agent/tools'",
+      "signature": "createSpawnTool(options?: object) => {tool: import('../types').ToolDef, spawnChild: typeof spawnChild}",
+      "fails": "returns {tool, spawnChild}; the tool blocks per child and child stderr is re-emitted as child:stderr on the wired Stream.",
+      "example": "const { tool } = createSpawnTool();\nconst loop = new Loop({ provider, tools: [tool] });"
+    },
+    {
+      "name": "createStashSkill",
+      "category": "skills",
+      "when": "you need compaction-first context hygiene — a registrable skill whose checkpoint/compact/restore tools fold the live transcript at round boundaries",
+      "import": "import { createStashSkill } from 'bare-agent'",
+      "signature": "createStashSkill(options?: Object) => { skill: { name: string, description: string, instructions: string, tools: ToolDef[] }, trim: (msgs: any[], ctx: any) => Promise<any[]>, restoreHandles: () => string[] }",
+      "fails": "never throws for a fold; degrades LOUDLY to a lossless park when summarize is unwired. Preserves tool-pairing and role alternation by construction.",
+      "example": "const { skill, trim } = createStashSkill({ compaction: { ceilingTokens: 100000 } });\nconst loop = new Loop({ provider, trim });"
+    },
+    {
+      "name": "discoverServers",
+      "category": "mcp",
+      "when": "you want to find configured MCP servers from the trusted $HOME/IDE config paths (or explicit paths) — discovery without invoking them",
+      "import": "import { discoverServers } from 'bare-agent/mcp'",
+      "signature": "discoverServers(configPaths?: string[], opts?: { includeProjectConfig?: boolean }) => Map<string, ServerDef>",
+      "fails": "honors explicit configPaths verbatim and scans trusted defaults otherwise; returns a Map and never executes a server command.",
+      "example": "const servers = discoverServers();"
+    },
+    {
+      "name": "Evaluator",
+      "category": "evaluation",
+      "when": "you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, or with a tool-running critic that exercises the live artifact",
+      "import": "import { Evaluator } from 'bare-agent'",
+      "signature": "new Evaluator(options?: EvaluatorOptions)",
+      "fails": "never throws for a bad grade — returns a Verdict {status: satisfied|needs_revision|failed}; a provider HaltError propagates clean. Judge tokens forward via onLlmResult.",
+      "example": "const evaluator = new Evaluator({ provider });\nconst verdict = await evaluator.evaluate(goal, result, { rubric });\nif (!verdict.pass) revise(verdict.critique);"
+    },
+    {
+      "name": "FallbackProvider",
+      "category": "providers",
+      "when": "you want to try several providers in order, failing over to the next when one errors — resilience across tiers or vendors",
+      "import": "import { FallbackProvider } from 'bare-agent/providers'",
+      "signature": "new FallbackProvider(providers: Provider[], options?: FallbackOptions)",
+      "fails": "throws if given no providers; returns the first provider's success, else propagates the last provider's error.",
+      "example": "const provider = new FallbackProvider([primary, backup]);"
+    },
+    {
+      "name": "GeminiProvider",
+      "category": "providers",
+      "when": "you want Gemini models as the Loop's provider — native generateContent with implicit prompt caching",
+      "import": "import { GeminiProvider } from 'bare-agent/providers'",
+      "signature": "new GeminiProvider(options?: GeminiOptions)",
+      "fails": "throws on a missing apiKey; normalizes stopReason (promoting a complete tool call) and usage; a socket idle/deadline/transport cut rejects with a retryable error.",
+      "example": "const provider = new GeminiProvider({ apiKey, model: 'gemini-2.5-pro' });"
+    },
+    {
+      "name": "harvestKey",
+      "category": "context",
+      "when": "you need the stable content-address for a transcript unit (the key harvest-before-evict writes under) — a collision-resistant 64-bit id",
+      "import": "import { harvestKey } from 'bare-agent'",
+      "signature": "harvestKey(unit: Record<string, any>) => string",
+      "fails": "never throws; normal provider ids round-trip unchanged, and two near-independent hash streams avoid 32-bit birthday collisions.",
+      "example": "const key = harvestKey(unit); // stable id for this turn's harvest"
+    },
+    {
+      "name": "isCritical",
+      "category": "routing",
+      "when": "you want the durable critical-safety floor alone (security/production/compliance/financial) to gate extra scrutiny, without the full scorer",
+      "import": "import { isCritical } from 'bare-agent'",
+      "signature": "isCritical(prompt: string) => boolean",
+      "fails": "never throws — deterministic override; non-string/blank input is false. This floor is non-overridable by design.",
+      "example": "if (isCritical(goal)) verdict = await evaluator.evaluate(goal, result, { contract });"
+    },
+    {
+      "name": "JsonFile",
+      "category": "stores",
+      "when": "you want zero-dependency JSON-file storage for Memory (store/search/get/delete) — the simplest durable backend, no native deps",
+      "import": "import { JsonFile } from 'bare-agent/stores'",
+      "signature": "new JsonFile(options?: { path?: string })",
+      "fails": "throws on a missing path; implements the four-verb Store socket over a plain JSON file.",
+      "example": "const store = new JsonFile({ path: './agent.json' });"
+    },
+    {
+      "name": "JsonlTransport",
+      "category": "transports",
+      "when": "you want to pipe structured Stream events as JSONL to a writable stream — pipe-friendly observability",
+      "import": "import { JsonlTransport } from 'bare-agent/transports'",
+      "signature": "new JsonlTransport(options?: JsonlTransportOptions)",
+      "fails": "never throws on write; defaults to process.stdout when no output stream is given.",
+      "example": "const stream = new Stream({ transport: new JsonlTransport() });"
+    },
+    {
+      "name": "judge",
+      "category": "evaluation",
+      "when": "you need a decisive honored/broke verdict on whether one egress artifact honored the verbatim request — a return-time integrity check",
+      "import": "import { judge } from 'bare-agent'",
+      "signature": "judge(options: JudgeOptions) => Promise<JudgeVerdict>",
+      "fails": "throws ValidationError on bad inputs; HaltError propagates clean. Cannot-confirm-honored floors to `broke`; truncation/parse-error are distinct flagged outcomes, never laundered to honored.",
+      "example": "const { verdict, where } = await judge({ request, artifact, provider });\nif (verdict === 'broke') flag(where);"
+    },
+    {
+      "name": "judgeToAnnotation",
+      "category": "governance",
+      "when": "you want to surface a judge() verdict on a gate's audit/humanChannel via gate.annotate, keeping the render pure (it never calls the gate)",
+      "import": "import { judgeToAnnotation } from 'bare-agent'",
+      "signature": "judgeToAnnotation(verdict: import('./judge').JudgeVerdict | { verdict?: string, where?: any }, opts?: JudgeToAnnotationOptions) => Annotation",
+      "fails": "never throws and never calls the gate; surfaces fail-open (a non-honored verdict surfaces) and bounds fields against the sink's silent caps with a visible clip marker.",
+      "example": "gate.annotate(judgeToAnnotation(await judge({ request, artifact, provider })));"
+    },
+    {
+      "name": "litectxCorpus",
+      "category": "integration",
+      "when": "you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding scan/partition",
+      "import": "import { litectxCorpus } from 'bare-agent'",
+      "signature": "litectxCorpus(litectx: {enumerate: Function}, opts?: {kind?: 'fact'|'episode', pageSize?: number}) => () => Promise<Slice[]>",
+      "fails": "never ingests a fresh corpus (strictly worse than scanning an in-hand array); returns an async source materialized once and cached.",
+      "example": "const corpus = litectxCorpus(litectx, { kind: 'fact' });\nawait recurse(task, ctx, { mode: 'partition', corpus });"
+    },
+    {
+      "name": "liteCtxMcpBridgeConfig",
+      "category": "integration",
+      "when": "you want to connect a litectx instance to a bareagent runner over the MCP bridge — a curated, child-db-local litectx server",
+      "import": "import { liteCtxMcpBridgeConfig } from 'bare-agent/tools'",
+      "signature": "liteCtxMcpBridgeConfig(opts: object) => import('../src/mcp-bridge').BridgeConfig",
+      "fails": "read-only by default (opt-in `writable` allows remember/forget); pre-seeding `now` makes createMCPBridge skip IDE discovery and connect straight to this server.",
+      "example": "const cfg = liteCtxMcpBridgeConfig({ root: './child.db' });\nconst { tools } = await createMCPBridge({ config: cfg });"
+    },
+    {
+      "name": "Loop",
+      "category": "loop",
+      "when": "you are running a model think/act/observe cycle and need round accounting, tool dispatch, spin guards, and a governance chokepoint",
+      "import": "import { Loop } from 'bare-agent'",
+      "signature": "new Loop(options: LoopOptions)",
+      "fails": "returns the last assistant text with an `error` tag on any bound (halt/deny-streak/truncation/provider error); throws only if constructed without a provider. A policy HaltError exits clean.",
+      "example": "const loop = new Loop({ provider, policy });\nconst { text, error, metrics } = await loop.run(messages, tools);\nif (error) handle(error);"
+    },
+    {
+      "name": "Memory",
+      "category": "memory",
+      "when": "you want thin store-backed memory (store/search/get/delete) an agent can write to and recall from, over any swappable backend",
+      "import": "import { Memory } from 'bare-agent'",
+      "signature": "new Memory(options?: { store?: Store })",
+      "fails": "throws if constructed without a store; recall/store metering is opt-in via ctx. All persistence delegates to the backend.",
+      "example": "const memory = new Memory({ store: new JsonFile({ path: './mem.json' }) });\nawait memory.store({ text: 'a durable fact' });"
+    },
+    {
+      "name": "OllamaProvider",
+      "category": "providers",
+      "when": "you want local models via Ollama as the Loop's provider — no API key, self-hosted",
+      "import": "import { OllamaProvider } from 'bare-agent/providers'",
+      "signature": "new OllamaProvider(options?: OllamaOptions)",
+      "fails": "normalizes stopReason (promoting a complete tool call) and usage; a malformed tool-call JSON returns no usable calls with usage metered; a socket idle/deadline cut rejects with a retryable error.",
+      "example": "const provider = new OllamaProvider({ model: 'llama3' });"
+    },
+    {
+      "name": "OpenAIProvider",
+      "category": "providers",
+      "when": "you want OpenAI or any OpenAI-compatible endpoint as the Loop's provider — tool-calling, toolChoice, and a custom baseUrl",
+      "import": "import { OpenAIProvider } from 'bare-agent/providers'",
+      "signature": "new OpenAIProvider(options?: OpenAIOptions)",
+      "fails": "throws on a missing apiKey; a malformed tool-call JSON returns no usable calls with usage still metered (BA-27); a socket idle/deadline/transport cut rejects with a retryable error.",
+      "example": "const provider = new OpenAIProvider({ apiKey, model: 'gpt-5' });"
+    },
+    {
+      "name": "Planner",
+      "category": "orchestration",
+      "when": "you need to turn a goal into an ordered step DAG for an LLM to execute — optionally forcing exactly N independent steps for fan-out",
+      "import": "import { Planner } from 'bare-agent'",
+      "signature": "new Planner(options: PlannerOptions)",
+      "fails": "throws if constructed without a provider; a plan call's HaltError (governance cap) propagates clean. Plan-call usage forwards via onLlmResult.",
+      "example": "const planner = new Planner({ provider });\nconst steps = await planner.plan('ship the release', { count: 4 });\nawait runPlan(steps, ctx);"
+    },
+    {
+      "name": "readDeferQueue",
+      "category": "tools",
+      "when": "you want to read the deferred-action queue and reconstruct each id's live status (an external waker or a status check)",
+      "import": "import { readDeferQueue } from 'bare-agent/tools'",
+      "signature": "readDeferQueue(queuePath?: string)",
+      "fails": "never throws on a missing/empty queue; folds append-only status lines (latest wins) and returns the reconstructed records.",
+      "example": "const queue = await readDeferQueue();"
+    },
+    {
+      "name": "recurse",
+      "category": "orchestration",
+      "when": "a task is too big for one model pass and you want it split, fanned out, verified, and merged — with total cost capped by a gate",
+      "import": "import { recurse } from 'bare-agent'",
+      "signature": "recurse(task: string, ctx?: RecurseCtx, opts?: RecurseOptions) => Promise<RecurseResult>",
+      "fails": "returns `{incomplete, best}` on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.",
+      "example": "const ctx = wireGate(gate);\nconst { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });\nif (incomplete) retryOrEscalate(result);"
+    },
+    {
+      "name": "refine",
+      "category": "evaluation",
+      "when": "you have a caller-supplied attempt + evaluate pair and want to iterate generate → grade → regenerate until it passes or hits a bound",
+      "import": "import { refine } from 'bare-agent'",
+      "signature": "refine(options: RefineOptions) => Promise<RefineOutcome>",
+      "fails": "returns the last outcome on maxIterations or a terminal `failed` verdict (never a faked pass); a HaltError from either callback propagates clean.",
+      "example": "const { result, passed } = await refine({ attempt, evaluate, maxIterations: 3 });\nif (!passed) escalate(result);"
+    },
+    {
+      "name": "remember",
+      "category": "evaluation",
+      "when": "you want to distill durable facts from harvested transcript spans and persist them through a Store socket (the consolidation pass)",
+      "import": "import { remember } from 'bare-agent'",
+      "signature": "remember(spans: Array<string | { content?: string, text?: string }>, options: RememberOptions) => Promise<RememberOutcome>",
+      "fails": "skips empty spans and never fabricates; a provider HaltError propagates clean. Each pass forwards usage via onLlmResult; a fact counts once via ctx.recordMemoryOp.",
+      "example": "const { facts } = await remember(spans, { provider, store });\nconsole.log(`consolidated ${facts.length} durable facts`);"
+    },
+    {
+      "name": "Retry",
+      "category": "resilience",
+      "when": "you want backoff-with-jitter around a flaky async call (a provider request, a plan step) — the retry seam Loop and runPlan wrap providers with",
+      "import": "import { Retry } from 'bare-agent'",
+      "signature": "new Retry(options?: RetryOptions)",
+      "fails": "rethrows the last error once attempts are exhausted; by default only transient errors (429/5xx/ECONNRESET/ETIMEDOUT) are retried.",
+      "example": "const retry = new Retry({ maxAttempts: 3, jitter: true });\nconst res = await retry.call(() => provider.generate(msgs));"
+    },
+    {
+      "name": "runPlan",
+      "category": "orchestration",
+      "when": "you have a step DAG from the Planner and want to execute it with wave-based parallelism (independent steps run concurrently)",
+      "import": "import { runPlan } from 'bare-agent'",
+      "signature": "runPlan(steps: Step[], executeFn: (step: Step) => any, options?: RunPlanOptions) => Promise<StepResult[]>",
+      "fails": "throws on a malformed DAG (empty steps, non-function executeFn, duplicate ids, unknown dependency); a step's own error surfaces per StepResult, never crashing the wave.",
+      "example": "const steps = await planner.plan(goal);\nconst results = await runPlan(steps, step => execute(step));"
+    },
+    {
+      "name": "Scheduler",
+      "category": "scheduling",
+      "when": "you need to fire agent turns on a schedule — cron expressions or relative intervals — driven by a periodic tick",
+      "import": "import { Scheduler } from 'bare-agent'",
+      "signature": "new Scheduler(options?: SchedulerOptions)",
+      "fails": "an errored job routes to the onError handler and never crashes the tick loop; a malformed cron/interval is rejected when the job is added.",
+      "example": "const sched = new Scheduler({ interval: 60000 });\nsched.add({ id: 'poll', cron: '0 * * * *', run });"
+    },
+    {
+      "name": "SkillRegistry",
+      "category": "skills",
+      "when": "you want to expose operator-registered skill bundles to a model by progressive disclosure — one meta-tool whose catalog unlocks a skill's tools on demand",
+      "import": "import { SkillRegistry } from 'bare-agent'",
+      "signature": "new SkillRegistry(options?: Object)",
+      "fails": "register() rejects an unsafe or colliding name fail-fast and commits nothing on failure; governance is unchanged — discovery never authorizes.",
+      "example": "const skills = new SkillRegistry();\nskills.register({ name: 'deploy', description: 'ship a release', instructions: '...', tools: [] });\nconst loop = new Loop({ provider, tools: skills.activeTools });"
+    },
+    {
+      "name": "spawnChild",
+      "category": "tools",
+      "when": "you want to fork a child bareagent process programmatically and get a handle — heavyweight delegation, not the in-process recurse default",
+      "import": "import { spawnChild } from 'bare-agent/tools'",
+      "signature": "spawnChild(opts?: SpawnChildOptions)",
+      "fails": "bounded by timeoutMs (wall-clock) and opt-in idleTimeoutMs (heartbeat); the result carries idleKilled if the watchdog fired. Threads BAREGUARD env vars to the child.",
+      "example": "const handle = spawnChild({ config, input });\nconst result = await handle.wait();"
+    },
+    {
+      "name": "SQLite",
+      "category": "stores",
+      "when": "you want durable, queryable SQLite-backed storage for Memory (store/search/get/delete) persisted on disk",
+      "import": "import { SQLite } from 'bare-agent/stores'",
+      "signature": "new SQLite(options?: { path?: string })",
+      "fails": "throws on a missing path or an absent better-sqlite3 peer dep; implements the four-verb Store socket.",
+      "example": "const store = new SQLite({ path: './agent.db' });"
+    },
+    {
+      "name": "StateMachine",
+      "category": "state",
+      "when": "you need to track task lifecycle (pending/running/done/failed/waiting/cancelled) with enforced transitions and optional file persistence",
+      "import": "import { StateMachine } from 'bare-agent'",
+      "signature": "new StateMachine(options?: { file?: string|null })",
+      "fails": "rejects an illegal state transition and never throws on a valid one; state changes are emitted as events.",
+      "example": "const sm = new StateMachine();\nsm.create('t1'); sm.transition('t1', 'running');"
+    },
+    {
+      "name": "Stream",
+      "category": "observability",
+      "when": "you want a structured event emitter for loop/tool/governance events, optionally piped to a transport sink",
+      "import": "import { Stream } from 'bare-agent'",
+      "signature": "new Stream(options?: StreamOptions)",
+      "fails": "never throws on emit; a transport write error is isolated and does not interrupt the run.",
+      "example": "const stream = new Stream({ transport });\nstream.emit('loop:round', { n: 1 });"
+    },
+    {
+      "name": "unitAssembler",
+      "category": "context",
+      "when": "you want to adapt a litectx-style neutral-unit assemble(units, ctx) verb into the Loop's assemble(msgs, ctx) context-assembly seam",
+      "import": "import { unitAssembler } from 'bare-agent'",
+      "signature": "unitAssembler(assembleUnits: (units: Array<Record<string, any>>, ctx: any) => (any | Promise<any>)) => (msgs: Array<Record<string, any>>, ctx: any) => Promise<Array<Record<string, any>>>",
+      "fails": "fail-open — any unexpected return shape sends the original msgs unchanged; a thrown error (incl. HaltError) is left to the Loop's own handling.",
+      "example": "const loop = new Loop({ provider, assemble: unitAssembler(litectx.assemble) });"
+    },
+    {
+      "name": "unitTrimmer",
+      "category": "context",
+      "when": "you want to adapt litectx's trim(units, policy) verb into the Loop's destructive trim(msgs, ctx) seam — harvest-before-evict with an F2 residual .flush",
+      "import": "import { unitTrimmer } from 'bare-agent'",
+      "signature": "unitTrimmer(opts?: { trim?: Function, onHarvest?: Function, policy?: any }) => ((msgs: Array<Record<string, any>>, ctx?: any) => Promise<Array<Record<string, any>>>) & { flush: (msgs: Array<Record<string, any>>, ctx?: any) => Promise<void> }",
+      "fails": "throws if the trim/onHarvest verbs are missing (runtime-checked); the fold is fail-open and a HaltError propagates. `.flush` drains the residual harvest.",
+      "example": "const loop = new Loop({ provider, trim: unitTrimmer({ trim: litectx.trim, onHarvest, policy: { keepLastN: 20 } }) });"
+    },
+    {
+      "name": "wireGate",
+      "category": "governance",
+      "when": "you have a bareguard Gate and want to wire it into a Loop as the policy + metering chokepoint in one line",
+      "import": "import { wireGate } from 'bare-agent'",
+      "signature": "wireGate(gate: Gate, options?: object) => {policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}",
+      "fails": "never throws; a gate halt surfaces as a HaltError the Loop catches and exits cleanly, and a deny is an advisory string fed back to the model.",
+      "example": "const { Gate } = require('bareguard');\nconst { Loop } = require('bare-agent');\nconst { wireGate } = require('bare-agent/bareguard');\n\nconst gate = new Gate({\n budget: { maxCostUsd: 0.50 },\n limits: { maxTurns: 20 },\n audit:  { path: './audit.jsonl' },\n});\nawait gate.init();\n\nconst { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate);\nconst loop = new Loop({ provider, policy, onLlmResult, onToolResult });\nconst tools = await filterTools(myTools);\nawait loop.run(messages, tools);"
+    }
+  ]
+}

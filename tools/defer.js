@@ -128,7 +128,14 @@ async function appendRecord(queuePath, record) {
  * append-only status lines (latest wins). Exposed for tests + library
  * users; the wake script does its own jq-based fold.
  */
-/** @param {string} [queuePath] */
+/**
+ * @param {string} [queuePath]
+ * @name readDeferQueue
+ * @when you want to read the deferred-action queue and reconstruct each id's live status (an external waker or a status check)
+ * @fails never throws on a missing/empty queue; folds append-only status lines (latest wins) and returns the reconstructed records.
+ * @example
+ *   const queue = await readDeferQueue();
+ */
 async function readQueue(queuePath) {
   const path = resolveQueuePath(queuePath);
   try {
@@ -156,6 +163,11 @@ async function readQueue(queuePath) {
  * @param {object} [options]
  * @param {string} [options.queuePath] - Override queue file path.
  * @returns {{tool: import('../types').ToolDef, readQueue: () => Promise<Record<string, any>[]>, queuePath: string}}
+ * @when you want a tool that queues an action to a JSONL file for an external waker (cron) to fire later — two-phase governance (emit-time + fire-time)
+ * @fails returns {tool, readQueue, queuePath}; the inner action is re-gated at fire time when the waker runs. bareguard caps via defer.ratePerMinute.
+ * @example
+ *   const { tool } = createDeferTool();
+ *   const loop = new Loop({ provider, tools: [tool] });
  */
 function createDeferTool(options = {}) {
   const queuePath = resolveQueuePath(options.queuePath);

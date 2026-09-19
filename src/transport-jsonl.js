@@ -15,6 +15,10 @@
 class JsonlTransport {
   /**
    * @param {JsonlTransportOptions} [options={}]
+   * @when you want to pipe structured Stream events as JSONL to a writable stream — pipe-friendly observability
+   * @fails never throws on write; defaults to process.stdout when no output stream is given.
+   * @example
+   *   const stream = new Stream({ transport: new JsonlTransport() });
    */
   constructor(options = {}) {
     this._output = options.output || process.stdout;

@@ -21,6 +21,11 @@ class Memory {
   /**
    * @param {{ store?: Store }} [options] - Store backend (must implement store/search/get/delete).
    * @throws {Error} `[Memory] requires options.store` — when options.store is missing.
+   * @when you want thin store-backed memory (store/search/get/delete) an agent can write to and recall from, over any swappable backend
+   * @fails throws if constructed without a store; recall/store metering is opt-in via ctx. All persistence delegates to the backend.
+   * @example
+   *   const memory = new Memory({ store: new JsonFile({ path: './mem.json' }) });
+   *   await memory.store({ text: 'a durable fact' });
    */
   constructor(options = {}) {
     if (!options.store) throw new Error('[Memory] requires options.store');

@@ -1,9 +1,10 @@
 {
   "name": "bare-agent",
-  "version": "0.43.0",
+  "version": "0.44.0",
   "files": [
     "index.js",
     "index.d.ts",
+    "primitives.json",
     "bareagent.context.md",
     "src/",
     "bin/",
@@ -22,6 +23,7 @@
   },
   "main": "index.js",
   "types": "./index.d.ts",
+  "primitives": "./primitives.json",
   "bin": {
     "bare-agent": "bin/cli.js"
   },
@@ -58,7 +60,8 @@
       "types": "./src/bareguard-adapter.d.ts",
       "default": "./src/bareguard-adapter.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./primitives.json": "./primitives.json"
   },
   "engines": {
     "node": ">=18"
@@ -97,7 +100,9 @@
     "typecheck": "tsc --noEmit",
     "prebuild:types": "node scripts/clean-types.js",
     "build:types": "tsc",
-    "prepublishOnly": "npm run build:types"
+    "build:primitives": "node scripts/gen-primitives.mjs",
+    "check:primitives": "node scripts/gen-primitives.mjs --check",
+    "prepublishOnly": "npm run build:primitives && npm run build:types"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",

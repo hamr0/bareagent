@@ -21,7 +21,14 @@ const TRANSITIONS = {
  */
 
 class StateMachine extends EventEmitter {
-  /** @param {{ file?: string|null }} [options={}] */
+  /**
+   * @param {{ file?: string|null }} [options={}]
+   * @when you need to track task lifecycle (pending/running/done/failed/waiting/cancelled) with enforced transitions and optional file persistence
+   * @fails rejects an illegal state transition and never throws on a valid one; state changes are emitted as events.
+   * @example
+   *   const sm = new StateMachine();
+   *   sm.create('t1'); sm.transition('t1', 'running');
+   */
   constructor(options = {}) {
     super();
     this.file = options.file || null;

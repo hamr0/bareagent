@@ -74,6 +74,11 @@ function resolveCliPath() {
  * @property {Stream} [stream] - bareagent Stream — child:stderr events get re-emitted here.
  *
  * @param {SpawnChildOptions} [opts]
+ * @when you want to fork a child bareagent process programmatically and get a handle — heavyweight delegation, not the in-process recurse default
+ * @fails bounded by timeoutMs (wall-clock) and opt-in idleTimeoutMs (heartbeat); the result carries idleKilled if the watchdog fired. Threads BAREGUARD env vars to the child.
+ * @example
+ *   const handle = spawnChild({ config, input });
+ *   const result = await handle.wait();
  */
 function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream } = {}) {
   if (typeof config !== 'string' || !config) {
@@ -257,6 +262,11 @@ function spawnChild({ config, input, cliPath, timeoutMs, idleTimeoutMs, stream }
  *   (heartbeat watchdog; default off). Resets on every line, so slow-but-working children survive.
  * @param {Stream} [options.stream] - bareagent Stream instance — child:stderr events get re-emitted here.
  * @returns {{tool: import('../types').ToolDef, spawnChild: typeof spawnChild}}
+ * @when you want an LLM-callable spawn tool so a model can fork child bareagents itself — governed per-family by bareguard
+ * @fails returns {tool, spawnChild}; the tool blocks per child and child stderr is re-emitted as child:stderr on the wired Stream.
+ * @example
+ *   const { tool } = createSpawnTool();
+ *   const loop = new Loop({ provider, tools: [tool] });
  */
 function createSpawnTool(options = {}) {
   const tool = {

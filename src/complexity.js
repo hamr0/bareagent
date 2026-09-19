@@ -89,6 +89,11 @@ const MAX_ASSESS_LEN = 4000;
  * Assess the complexity of a goal/prompt from its text alone (no LLM).
  * @param {string} prompt - The goal to classify.
  * @returns {ComplexityResult}
+ * @when you want a fast, no-LLM read of how hard a goal is (simple/medium/complex/critical) to decide whether to invoke the Planner
+ * @fails never throws — pure text scoring; non-string/blank input scores lowest. Keyword lists are frozen and a critical-safety override always wins.
+ * @example
+ *   const { level, needsPlanning } = assessComplexity(goal);
+ *   if (needsPlanning) await planner.plan(goal);
  */
 function assessComplexity(prompt) {
   if (typeof prompt !== 'string' || !prompt.trim()) {
@@ -169,6 +174,10 @@ function assessComplexity(prompt) {
  * non-string / blank input is `false`.
  * @param {string} prompt - The goal to test.
  * @returns {boolean}
+ * @when you want the durable critical-safety floor alone (security/production/compliance/financial) to gate extra scrutiny, without the full scorer
+ * @fails never throws — deterministic override; non-string/blank input is false. This floor is non-overridable by design.
+ * @example
+ *   if (isCritical(goal)) verdict = await evaluator.evaluate(goal, result, { contract });
  */
 function isCritical(prompt) {
   if (typeof prompt !== 'string' || !prompt.trim()) return false;

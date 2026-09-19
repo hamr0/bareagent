@@ -23,6 +23,11 @@ class SQLiteStore {
    * @param {{ path?: string }} [options]
    * @throws {Error} `[SQLiteStore] requires options.path` — when path is missing.
    * @throws {Error} `[SQLiteStore] requires better-sqlite3` — when peer dep is not installed.
+   * @name SQLite
+   * @when you want durable, queryable SQLite-backed storage for Memory (store/search/get/delete) persisted on disk
+   * @fails throws on a missing path or an absent better-sqlite3 peer dep; implements the four-verb Store socket.
+   * @example
+   *   const store = new SQLite({ path: './agent.db' });
    */
   constructor(options = {}) {
     if (!options.path) throw new Error('[SQLiteStore] requires options.path');

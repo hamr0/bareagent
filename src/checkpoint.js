@@ -16,6 +16,11 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 class Checkpoint {
   /**
    * @param {CheckpointOptions} [options={}]
+   * @when you want an always-prompt human-in-the-loop approval gate on chosen tools — complementary to bareguard's policy-driven pauses
+   * @fails auto-denies on timeout (0 disables) and denies safe when no reply channel is wired; a TimeoutError is surfaced, never swallowed.
+   * @example
+   *   const checkpoint = new Checkpoint({ tools: ['deploy'], waitForReply });
+   *   const ok = await checkpoint.confirm('deploy', args);
    */
   constructor(options = /** @type {CheckpointOptions} */ ({})) {
     this.tools = new Set(options.tools || []);

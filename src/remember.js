@@ -73,6 +73,11 @@ const DISTILL_PROMPT = [
  *   Each is a transcript chunk — a raw string, or an object with `content`/`text`. Empty/blank spans are skipped.
  * @param {RememberOptions} options
  * @returns {Promise<RememberOutcome>}
+ * @when you want to distill durable facts from harvested transcript spans and persist them through a Store socket (the consolidation pass)
+ * @fails skips empty spans and never fabricates; a provider HaltError propagates clean. Each pass forwards usage via onLlmResult; a fact counts once via ctx.recordMemoryOp.
+ * @example
+ *   const { facts } = await remember(spans, { provider, store });
+ *   console.log(`consolidated ${facts.length} durable facts`);
  */
 async function remember(spans, options = /** @type {RememberOptions} */ ({})) {
   if (!Array.isArray(spans)) throw new Error('[remember] spans must be an array');

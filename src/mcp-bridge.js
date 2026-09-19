@@ -80,6 +80,10 @@ const TRUSTED_CONFIG_PATHS = [
  * @param {{ includeProjectConfig?: boolean }} [opts] - When no explicit `configPaths` are given,
  *   set `includeProjectConfig: true` to also scan `./.mcp.json`. Default false — see PROJECT_CONFIG_PATH.
  * @returns {Map<string, ServerDef>}
+ * @when you want to find configured MCP servers from the trusted $HOME/IDE config paths (or explicit paths) — discovery without invoking them
+ * @fails honors explicit configPaths verbatim and scans trusted defaults otherwise; returns a Map and never executes a server command.
+ * @example
+ *   const servers = discoverServers();
  */
 function discoverServers(configPaths, { includeProjectConfig = false } = {}) {
   let paths;
@@ -523,6 +527,10 @@ function buildSystemContext(servers, tools, denied) {
  * @param {ToolDef[]} tools - The bulk-loaded, name-prefixed tools array.
  * @param {string} [discoveredAt] - ISO timestamp from .mcp-bridge.json.
  * @returns {ToolDef[]} [mcp_discover, mcp_invoke]
+ * @when you want the two bulk MCP meta-tools (mcp_discover, mcp_invoke) instead of exposing every discovered tool individually — one gate-check per invocation
+ * @fails returns [mcp_discover, mcp_invoke]; a tool name does not travel as action.type (a deliberate v0.9 trade for one gate-check per call).
+ * @example
+ *   const metaTools = buildMetaTools(tools);
  */
 function buildMetaTools(tools, discoveredAt) {
   // Catalog descriptors: same info the LLM would see for bulk-loaded tools,
@@ -637,6 +645,11 @@ function buildMetaTools(tools, discoveredAt) {
  *   of this hook also opts default discovery into the project-cwd `./.mcp.json`,
  *   since each command is then vetted regardless of source.
  * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, close: Function}>}
+ * @when you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution
+ * @fails a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); returns tools plus a close() to shut servers down.
+ * @example
+ *   const { tools, close } = await createMCPBridge();
+ *   const loop = new Loop({ provider, tools });
  */
 async function createMCPBridge(opts = {}) {
   if ('policy' in opts) {

@@ -112,6 +112,10 @@ class CLIPipeProvider {
    * Provider that pipes prompts to a CLI command via stdin and reads stdout.
    * @param {CLIPipeOptions} [options]
    * @throws {Error} `[CLIPipeProvider] requires command` — when options.command is missing.
+   * @when you want to drive a CLI (e.g. the claude CLI) as the Loop's provider — native MCP tools or a JSON emulation envelope
+   * @fails throws on a missing command; in native mode it owns its own cycle (ownsCycle), so per-round Loop seams are refused at construction rather than left silently dead.
+   * @example
+   *   const provider = new CLIPipeProvider({ command: 'claude' });
    */
   constructor(options = {}) {
     if (!options.command) throw new Error('[CLIPipeProvider] requires command');

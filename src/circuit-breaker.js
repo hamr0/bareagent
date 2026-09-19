@@ -13,6 +13,11 @@ class CircuitBreaker {
    * @param {number} [options.threshold=5] - Failures before opening.
    * @param {number} [options.resetAfter=60000] - Ms before half-open probe.
    * @param {((key: string, from: CircuitState, to: CircuitState) => void)} [options.onStateChange] - Callback(key, from, to).
+   * @when you want per-key failure isolation — trip open after N failures, probe half-open after a cooldown — so one failing dependency doesn't cascade
+   * @fails throws CircuitOpenError while open (fail-fast, no downstream call); transitions emit onStateChange and reset on a successful half-open probe.
+   * @example
+   *   const cb = new CircuitBreaker({ threshold: 5 });
+   *   await cb.call('api', () => fetch(url));
    */
   constructor(options = {}) {
     this.threshold = options.threshold || 5;

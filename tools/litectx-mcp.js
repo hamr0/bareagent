@@ -36,6 +36,12 @@ const ADMIN_VERBS = ['index', 'promotions'];
  * @param {string} [opts.now] - ISO timestamp for `discovered` (default: now). Pre-seed fresh so
  *   `createMCPBridge` skips IDE discovery and connects straight to this curated server.
  * @returns {import('../src/mcp-bridge').BridgeConfig}
+ * @category integration
+ * @when you want to connect a litectx instance to a bareagent runner over the MCP bridge — a curated, child-db-local litectx server
+ * @fails read-only by default (opt-in `writable` allows remember/forget); pre-seeding `now` makes createMCPBridge skip IDE discovery and connect straight to this server.
+ * @example
+ *   const cfg = liteCtxMcpBridgeConfig({ root: './child.db' });
+ *   const { tools } = await createMCPBridge({ config: cfg });
  */
 function liteCtxMcpBridgeConfig(opts) {
   if (!opts || typeof opts.root !== 'string' || !opts.root) {

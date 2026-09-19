@@ -207,6 +207,10 @@ function fromUnits(units) {
  * error (incl. HaltError) is left to the Loop's own fail-open / HaltError handling — not swallowed here.
  * @param {(units: Array<Record<string, any>>, ctx: any) => (any | Promise<any>)} assembleUnits
  * @returns {(msgs: Array<Record<string, any>>, ctx: any) => Promise<Array<Record<string, any>>>}
+ * @when you want to adapt a litectx-style neutral-unit assemble(units, ctx) verb into the Loop's assemble(msgs, ctx) context-assembly seam
+ * @fails fail-open — any unexpected return shape sends the original msgs unchanged; a thrown error (incl. HaltError) is left to the Loop's own handling.
+ * @example
+ *   const loop = new Loop({ provider, assemble: unitAssembler(litectx.assemble) });
  */
 function unitAssembler(assembleUnits) {
   if (typeof assembleUnits !== 'function') {
@@ -240,6 +244,10 @@ function unitAssembler(assembleUnits) {
  * distinct turns). Normal provider ids (`call_…`) round-trip unchanged through the escape.
  * @param {Record<string, any>} unit - a unit from {@link toUnits} (its `_msgs` backing is read).
  * @returns {string}
+ * @when you need the stable content-address for a transcript unit (the key harvest-before-evict writes under) — a collision-resistant 64-bit id
+ * @fails never throws; normal provider ids round-trip unchanged, and two near-independent hash streams avoid 32-bit birthday collisions.
+ * @example
+ *   const key = harvestKey(unit); // stable id for this turn's harvest
  */
 function harvestKey(unit) {
   const back = (unit && unit._msgs) || [];
@@ -296,6 +304,10 @@ function harvestKey(unit) {
  *   `({ key, content, unit }) => void|Promise` (REQUIRED; the harvest policy point). `policy` — litectx
  *   TrimPolicy: `{ keepLastN }` or `{ maxTokens }` (maxTokens wins). Both verbs are runtime-checked.
  * @returns {((msgs: Array<Record<string, any>>, ctx?: any) => Promise<Array<Record<string, any>>>) & { flush: (msgs: Array<Record<string, any>>, ctx?: any) => Promise<void> }}
+ * @when you want to adapt litectx's trim(units, policy) verb into the Loop's destructive trim(msgs, ctx) seam — harvest-before-evict with an F2 residual .flush
+ * @fails throws if the trim/onHarvest verbs are missing (runtime-checked); the fold is fail-open and a HaltError propagates. `.flush` drains the residual harvest.
+ * @example
+ *   const loop = new Loop({ provider, trim: unitTrimmer({ trim: litectx.trim, onHarvest, policy: { keepLastN: 20 } }) });
  */
 function unitTrimmer(opts) {
   const { trim, onHarvest, policy = {} } = opts || {};

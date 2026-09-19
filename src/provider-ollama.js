@@ -27,6 +27,10 @@ const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
 class OllamaProvider {
   /**
    * @param {OllamaOptions} [options]
+   * @when you want local models via Ollama as the Loop's provider — no API key, self-hosted
+   * @fails normalizes stopReason (promoting a complete tool call) and usage; a malformed tool-call JSON returns no usable calls with usage metered; a socket idle/deadline cut rejects with a retryable error.
+   * @example
+   *   const provider = new OllamaProvider({ model: 'llama3' });
    */
   constructor(options = {}) {
     this.model = options.model || 'llama3.2';

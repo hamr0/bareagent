@@ -38,6 +38,11 @@
  *
  * @param {RefineOptions} options
  * @returns {Promise<RefineOutcome>}
+ * @when you have a caller-supplied attempt + evaluate pair and want to iterate generate → grade → regenerate until it passes or hits a bound
+ * @fails returns the last outcome on maxIterations or a terminal `failed` verdict (never a faked pass); a HaltError from either callback propagates clean.
+ * @example
+ *   const { result, passed } = await refine({ attempt, evaluate, maxIterations: 3 });
+ *   if (!passed) escalate(result);
  */
 async function refine(options) {
   const { attempt, evaluate } = options;

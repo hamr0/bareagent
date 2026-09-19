@@ -17,6 +17,10 @@ class FallbackProvider {
    * @param {Provider[]} providers - Ordered list of providers with generate().
    * @param {FallbackOptions} [options={}]
    * @throws {Error} `[FallbackProvider] requires at least one provider` — when providers is empty.
+   * @when you want to try several providers in order, failing over to the next when one errors — resilience across tiers or vendors
+   * @fails throws if given no providers; returns the first provider's success, else propagates the last provider's error.
+   * @example
+   *   const provider = new FallbackProvider([primary, backup]);
    */
   constructor(providers, options = {}) {
     if (!Array.isArray(providers) || providers.length === 0) {

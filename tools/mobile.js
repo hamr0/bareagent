@@ -21,6 +21,11 @@
  * @param {string} [opts.device] - Device serial or 'auto'
  * @param {boolean} [opts.termux] - Use Termux ADB on-device mode
  * @returns {Promise<{tools: ToolDef[], close: Function}|null>}
+ * @when you want to give an agent Android/iOS device control (tap, type, snapshot) via baremobile
+ * @fails returns null if baremobile (optional dep) is not installed; otherwise returns {tools, close} — call close() to disconnect.
+ * @example
+ *   const m = await createMobileTools({ platform: 'android' });
+ *   const loop = new Loop({ provider, tools: m.tools });
  */
 async function createMobileTools(opts = {}) {
   const platform = opts.platform || 'android';

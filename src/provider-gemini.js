@@ -40,7 +40,13 @@ function isLoopbackHost(hostname) {
  * cache-read tier populates with no opt-in.
  */
 class GeminiProvider {
-  /** @param {GeminiOptions} [options] */
+  /**
+   * @param {GeminiOptions} [options]
+   * @when you want Gemini models as the Loop's provider — native generateContent with implicit prompt caching
+   * @fails throws on a missing apiKey; normalizes stopReason (promoting a complete tool call) and usage; a socket idle/deadline/transport cut rejects with a retryable error.
+   * @example
+   *   const provider = new GeminiProvider({ apiKey, model: 'gemini-2.5-pro' });
+   */
   constructor(options = {}) {
     this.apiKey = options.apiKey?.trim();
     this.model = options.model || 'gemini-2.5-flash';

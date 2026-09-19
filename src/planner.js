@@ -39,6 +39,12 @@ class Planner {
   /**
    * @param {PlannerOptions} options
    * @throws {Error} `[Planner] requires a provider` — when options.provider is missing.
+   * @when you need to turn a goal into an ordered step DAG for an LLM to execute — optionally forcing exactly N independent steps for fan-out
+   * @fails throws if constructed without a provider; a plan call's HaltError (governance cap) propagates clean. Plan-call usage forwards via onLlmResult.
+   * @example
+   *   const planner = new Planner({ provider });
+   *   const steps = await planner.plan('ship the release', { count: 4 });
+   *   await runPlan(steps, ctx);
    */
   constructor(options = /** @type {PlannerOptions} */ ({})) {
     if (!options.provider) throw new Error('[Planner] requires a provider');
