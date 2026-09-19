@@ -51,7 +51,7 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 | `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools, createSpawnTool, spawnChild, createDeferTool, readDeferQueue |
 | `bare-agent/bareguard` | wireGate (returns `{ policy, wrapTool, wrapTools }`) + `judgeToAnnotation` (pure judge→gate.annotate render) |
 | `bare-agent/mcp` | createMCPBridge (returns `{tools, metaTools, ...}`), discoverServers, buildMetaTools |
-| `primitives.json` | Generated machine-readable manifest of every callable primitive (49 entries: `name`/`category`/`when`/`import`/`signature`/`fails`/`example`). Author-time discovery for an agent/dev — `unpkg.com/bare-agent/primitives.json` without install. A primitive = any export whose JSDoc has `@when`; `@when`/`@fails` are the only hand-authored fields, `@name`/`@category`/`@signature` override alias/inferred category/derived signature. NOT a runtime tool surface (that stays MCP). See docs/product/prd.md § "Primitives manifest" |
+| `primitives.json` | Generated machine-readable manifest of every callable primitive (49 entries: `name`/`category`/`when`/`import`/`signature`/`fails`/`example`). Author-time discovery for an agent/dev — `unpkg.com/bare-agent/primitives.json` without install. A primitive = any export whose JSDoc has `@when`; `@when`/`@fails` are the only hand-authored fields, `@name`/`@category`/`@signature`/`@type` override alias/inferred category/derived signature/derived-value-type (`@type` renders a data-bound `const`'s type; unused by any bareagent primitive today). NOT a runtime tool surface (that stays MCP). See docs/product/prd.md § "Primitives manifest" |
 
 ## Commands
 

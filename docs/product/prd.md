@@ -325,12 +325,15 @@ concentrated in providers; `recurse` has one), so a `@fails` convention is added
 and authored per primitive.
 
 **As built (bareagent reference, v0.44.0).** 49 primitives. The generator
-(`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; three tags beyond the
+(`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; four tags beyond the
 core design earned their place under contact with the real surface: `@name`
 (overrides an aliased export — `readQueue`→`readDeferQueue`, `SQLiteStore`→
 `SQLite`), `@category` (overrides the file-inferred category), `@signature` (pins
 an exact literal signature when the derived one would leak a private/test-only
-seam), and a `category:
+seam), `@type` (supplies the rendered type for a data-bound `const` export — one
+bound to a value rather than a function/arrow has no params/return to derive a
+signature from; unused by any bareagent primitive today, suite parity for an
+adopter with a data-bound export), and a `category:
 "integration"` for the litectx *connectors* (`litectxCorpus`, `buildSearchTool`,
 `liteCtxMcpBridgeConfig`) — bareagent-owned glue into litectx, kept in bareagent's
 manifest because they are bareagent exports (litectx's own verbs stay in litectx's
