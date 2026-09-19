@@ -2,6 +2,29 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.44.1] - 2026-09-19
+
+Manifest hardening for the bare-suite standard, from bareguard's adoption of `primitives.json`.
+
+### Changed
+
+- **`primitives.json` drops the `version` field** — the manifest is now `{package, primitives}`.
+  `package.json` ships beside it in the same tarball with the authoritative version, so a copy
+  here was only a release pin that went silently stale (a 0.44.0 manifest could ship stamped
+  0.43.0). Removing it makes the manifest pure content: its diff changes only when primitives
+  change, and the release flow loses the bump-then-regenerate step. Suite-wide convention —
+  bareagent, bareguard, and litectx all ship `{package, primitives}`.
+
+### Fixed
+
+- **`scripts/gen-primitives.mjs` now scans source roots recursively.** The previous
+  non-recursive `readdirSync` silently missed nested layouts (e.g. a sibling repo's
+  `src/primitives/*.js`), emitting a short manifest and exiting 0. A hand-rolled walker is
+  used rather than `readdirSync`'s `recursive` option so the scan stays within the suite's
+  `node >=18` engines floor (the option landed in 18.17). No effect on bareagent's own
+  manifest — its `src/` and `tools/` are flat — but the reference generator is now correct
+  for the whole suite.
+
 ## [0.44.0] - 2026-09-19
 
 Machine-readable **primitives manifest** (`primitives.json`) — so an agent or developer can

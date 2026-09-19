@@ -256,12 +256,16 @@ called **primitives** — not "functions" (many are classes) and not "tools" (th
 collides with the runtime tool-calling surface).
 
 **Schema.** One file, fixed name `primitives.json` at package root. The repo name
-is a field, not part of the filename, so the discovery path stays predictable:
+is a field, not part of the filename, so the discovery path stays predictable.
+There is **no `version` field**: `package.json` sits beside the manifest in the
+same tarball with the authoritative version, so duplicating it here would only add
+a pin that goes silently stale on every release. Leaving it out makes the manifest
+pure content — its diff changes only when primitives change. Suite-wide convention
+(bareagent, bareguard, litectx all ship `{package, primitives}`):
 
 ```json
 {
   "package": "bare-agent",
-  "version": "0.43.0",
   "primitives": [
     {
       "name": "recurse",

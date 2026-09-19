@@ -9,7 +9,7 @@
 // See docs/product/prd.md § "Primitives manifest".
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { join, resolve, basename } from 'node:path';
+import { join, resolve, basename, relative } from 'node:path';
 
 const CWD = process.cwd();
 const CHECK = process.argv.includes('--check');
@@ -115,12 +115,19 @@ async function exportIndex() {
 }
 
 // --- scan --------------------------------------------------------------------
-// Scan every shipped source root that exists (src/ always; tools/ when present).
-// bareguard/litectx have only src/ and are unaffected.
+// Scan every shipped source root that exists (src/ always; tools/ when present),
+// RECURSIVELY — nested layouts like bareguard's src/primitives/*.js must be seen.
+// A hand-rolled walker (not readdirSync's `recursive` option) keeps the suite's
+// engines floor of node >=18: the option only landed in 18.17.
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? walk(join(dir, e.name))
+      : e.name.endsWith('.js') ? [join(dir, e.name)] : []);
+}
 const ROOTS = ['src', 'tools'].filter(d => existsSync(join(CWD, d)));
 const imports = await exportIndex();
 const out = [], problems = [];
-const jsFiles = ROOTS.flatMap(d => readdirSync(join(CWD, d)).filter(f => f.endsWith('.js')).map(f => join(d, f)));
+const jsFiles = ROOTS.flatMap(d => walk(join(CWD, d)).map(abs => relative(CWD, abs)));
 for (const rel of jsFiles) {
   const f = basename(rel);
   const src = readFileSync(join(CWD, rel), 'utf8');
@@ -146,7 +153,10 @@ for (const rel of jsFiles) {
   }
 }
 out.sort((a, b) => a.name.localeCompare(b.name));
-const manifest = { package: pkg.name, version: pkg.version, primitives: out };
+// No `version` field by design: package.json sits beside the manifest in the
+// same tarball with the authoritative version, so a copy here would only be a
+// pin that goes silently stale on every release. The manifest is pure content.
+const manifest = { package: pkg.name, primitives: out };
 const json = JSON.stringify(manifest, null, 2) + '\n';
 const target = join(CWD, 'primitives.json');
 
