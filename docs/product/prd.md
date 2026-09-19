@@ -304,10 +304,14 @@ each repo owns its own truth). The `package.json` key + fixed filename *is* the
 discovery contract, documented once and conformed to by all build-with repos.
 
 **Validation (CI gate, publish-blocking).** Mirrors bareloop's export-contract
-check: every manifested name is actually exported; every `signature` matches the
-emitted `.d.ts`; every entry carries `when`/`fails`/`example`; every `example`
-typechecks. A lying or stale manifest fails the build — a manifest a model trusts
-for `import`/`signature` is worse than none if it can drift.
+check: every manifested name is actually exported; every entry carries
+`when`/`fails`/`example`. A lying or stale manifest fails the build — a manifest
+a model trusts for `import`/`signature` is worse than none if it can drift.
+**As shipped in v1** (`check:primitives` + `test/primitives-completeness.test.js`),
+the gate covers exports-map presence, required-field non-emptiness, and the
+completeness/allow-list pair — checking that `signature` matches the emitted
+`.d.ts` and that every `example` typechecks are NOT yet built; both stay
+deferred validation, tracked here rather than silently assumed.
 
 **Known real work (not free).** `signature`/`import` generate from what JSDoc
 already carries. `when`/`fails`/`example` are net-new hand authoring across the
