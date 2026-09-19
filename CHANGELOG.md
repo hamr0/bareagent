@@ -2,6 +2,47 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.44.1] - 2026-09-19
+
+Manifest hardening for the bare-suite standard, from bareguard's adoption of `primitives.json`.
+
+### Changed
+
+- **`primitives.json` drops the `version` field** — the manifest is now `{package, primitives}`.
+  `package.json` ships beside it in the same tarball with the authoritative version, so a copy
+  here was only a release pin that went silently stale (a 0.44.0 manifest could ship stamped
+  0.43.0). Removing it makes the manifest pure content: its diff changes only when primitives
+  change, and the release flow loses the bump-then-regenerate step. Suite-wide convention —
+  bareagent, bareguard, and litectx all ship `{package, primitives}`.
+
+### Fixed
+
+- **`scripts/gen-primitives.mjs` now scans source roots recursively.** The previous
+  non-recursive `readdirSync` silently missed nested layouts (e.g. a sibling repo's
+  `src/primitives/*.js`), emitting a short manifest and exiting 0. A hand-rolled walker is
+  used rather than `readdirSync`'s `recursive` option so the scan stays within the suite's
+  `node >=18` engines floor (the option landed in 18.17). No effect on bareagent's own
+  manifest — its `src/` and `tools/` are flat — but the reference generator is now correct
+  for the whole suite.
+- **Signatures no longer carry `import("./path").Type` spellings.** A JSDoc type is written
+  for `tsc`, which resolves those relative paths from the source file; read out of
+  `node_modules` they are meaningless. The generator now strips the `import(...)` wrapper and
+  keeps the bare type name (4 of bareagent's 49 signatures were affected).
+- **Multi-line `@example` blocks keep their relative indentation.** The old fixed 0–3-char
+  dedent flattened nested object literals to one column; the generator now dedents by the
+  common leading-whitespace prefix.
+- **A data-bound `export const` no longer renders as a phantom `X()` call.** The generator
+  distinguishes a const bound to a function from one bound to a value and emits `name: Type`
+  for the latter (no data-const primitives in bareagent today; correctness for the suite).
+
+### Added
+
+- **`@signature` JSDoc override** — pins an exact literal signature when the derived one would
+  leak a private/test-only seam.
+- **Two manifest guard tests** — the manifest shape is exactly `{package, primitives}` (pins the
+  no-version decision so it cannot drift back), and every `@example` is syntactically valid ESM
+  (a copy-paste example that does not parse is a confident wrong answer).
+
 ## [0.44.0] - 2026-09-19
 
 Machine-readable **primitives manifest** (`primitives.json`) — so an agent or developer can

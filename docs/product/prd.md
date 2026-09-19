@@ -256,12 +256,16 @@ called **primitives** — not "functions" (many are classes) and not "tools" (th
 collides with the runtime tool-calling surface).
 
 **Schema.** One file, fixed name `primitives.json` at package root. The repo name
-is a field, not part of the filename, so the discovery path stays predictable:
+is a field, not part of the filename, so the discovery path stays predictable.
+There is **no `version` field**: `package.json` sits beside the manifest in the
+same tarball with the authoritative version, so duplicating it here would only add
+a pin that goes silently stale on every release. Leaving it out makes the manifest
+pure content — its diff changes only when primitives change. Suite-wide convention
+(bareagent, bareguard, litectx all ship `{package, primitives}`):
 
 ```json
 {
   "package": "bare-agent",
-  "version": "0.43.0",
   "primitives": [
     {
       "name": "recurse",
@@ -321,10 +325,15 @@ concentrated in providers; `recurse` has one), so a `@fails` convention is added
 and authored per primitive.
 
 **As built (bareagent reference, v0.44.0).** 49 primitives. The generator
-(`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; three tags beyond the
+(`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; four tags beyond the
 core design earned their place under contact with the real surface: `@name`
 (overrides an aliased export — `readQueue`→`readDeferQueue`, `SQLiteStore`→
-`SQLite`), `@category` (overrides the file-inferred category), and a `category:
+`SQLite`), `@category` (overrides the file-inferred category), `@signature` (pins
+an exact literal signature when the derived one would leak a private/test-only
+seam), `@type` (supplies the rendered type for a data-bound `const` export — one
+bound to a value rather than a function/arrow has no params/return to derive a
+signature from; unused by any bareagent primitive today, suite parity for an
+adopter with a data-bound export), and a `category:
 "integration"` for the litectx *connectors* (`litectxCorpus`, `buildSearchTool`,
 `liteCtxMcpBridgeConfig`) — bareagent-owned glue into litectx, kept in bareagent's
 manifest because they are bareagent exports (litectx's own verbs stay in litectx's

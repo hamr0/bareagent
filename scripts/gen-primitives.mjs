@@ -9,7 +9,7 @@
 // See docs/product/prd.md § "Primitives manifest".
 import { readFileSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { join, resolve, basename } from 'node:path';
+import { join, resolve, basename, relative } from 'node:path';
 
 const CWD = process.cwd();
 const CHECK = process.argv.includes('--check');
@@ -17,6 +17,10 @@ const pkg = JSON.parse(readFileSync(join(CWD, 'package.json'), 'utf8'));
 
 // --- JSDoc extraction ---------------------------------------------------------
 const strip = (l) => l.replace(/^\s*\*\s?/, '');
+// A JSDoc type is written for tsc, which resolves `import("./x").T` relative to
+// the SOURCE file. Read out of node_modules that path means nothing, so strip the
+// import() wrapper and keep the bare type name for the manifest's human reader.
+const cleanType = (t) => (t || '').replace(/import\((["'])[^"')]+\1\)\./g, '');
 function braced(s) {
   const start = s.indexOf('{'); if (start === -1) return null;
   let d = 0;
@@ -29,6 +33,7 @@ function braced(s) {
 function parseBlock(block) {
   const inner = block.replace(/^\/\*\*/, '').replace(/\*\/\s*$/, '');
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
+  let type = null, sigOverride = null;
   const example = []; let mode = null;
   for (const raw of inner.split('\n').map(strip)) {
     const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
@@ -36,8 +41,10 @@ function parseBlock(block) {
       mode = null; const [, name, rest] = tag;
       if (name === 'param') {
         const b = braced(rest); const nm = b && b.rest.match(/^\s*(\[?)([\w.$]+)/);
-        if (b && nm && !nm[2].includes('.')) params.push({ name: nm[2], type: b.inner, optional: nm[1] === '[' });
-      } else if (name === 'returns') { const b = braced(rest); returns = b ? b.inner : null; }
+        if (b && nm && !nm[2].includes('.')) params.push({ name: nm[2], type: cleanType(b.inner), optional: nm[1] === '[' });
+      } else if (name === 'returns') { const b = braced(rest); returns = b ? cleanType(b.inner) : null; }
+      else if (name === 'type') { const b = braced(rest); type = b ? cleanType(b.inner) : null; }
+      else if (name === 'signature') sigOverride = rest.trim(); // exact literal, overrides the derived signature
       else if (name === 'when') when = rest.trim();
       else if (name === 'fails') fails = rest.trim();
       else if (name === 'category') category = rest.trim();
@@ -45,11 +52,16 @@ function parseBlock(block) {
       else if (name === 'example') mode = 'example';
       continue;
     }
-    if (mode === 'example') example.push(raw.replace(/^\s{0,3}/, ''));
+    if (mode === 'example') example.push(raw);
   }
   while (example.length && !example[0].trim()) example.shift();
   while (example.length && !example[example.length - 1].trim()) example.pop();
-  return { params, returns, when, fails, category, primName, example: example.join('\n') };
+  // Dedent by the COMMON leading-whitespace prefix so nested literals/blocks keep
+  // their RELATIVE indentation (a fixed 0-3 char cut flattened multi-line examples).
+  const indents = example.filter(l => l.trim()).map(l => l.match(/^\s*/)[0].length);
+  const pad = indents.length ? Math.min(...indents) : 0;
+  if (pad) for (let i = 0; i < example.length; i++) example[i] = example[i].slice(pad);
+  return { params, returns, type, sigOverride, when, fails, category, primName, example: example.join('\n') };
 }
 function symbolAfter(src, afterIdx) {
   const tail = src.slice(afterIdx);
@@ -59,11 +71,18 @@ function symbolAfter(src, afterIdx) {
     const cm = [...src.slice(0, afterIdx).matchAll(/class\s+([A-Za-z0-9_$]+)/g)].pop();
     if (cm) return { name: cm[1], kind: 'class' };
   }
-  const cst = tail.match(/^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=/);
-  if (cst) return { name: cst[1], kind: 'function' };
+  // A const bound to a function/arrow is a callable; a const bound to DATA is a
+  // value — rendering the latter as `X()` invents an API that does not exist.
+  const cst = tail.match(/^\s*(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*([\s\S]{0,40})/);
+  if (cst) {
+    const callable = /^(?:async\s+)?(?:function\b|\(|<|[A-Za-z0-9_$]+\s*=>)/.test(cst[2]);
+    return { name: cst[1], kind: callable ? 'function' : 'value' };
+  }
   return null;
 }
 function signature(sym, p) {
+  if (p.sigOverride) return p.sigOverride;
+  if (sym.kind === 'value') return `${sym.name}: ${p.type || 'unknown'}`;
   const args = p.params.map(a => `${a.name}${a.optional ? '?' : ''}: ${a.type}`).join(', ');
   return sym.kind === 'class' ? `new ${sym.name}(${args})` : `${sym.name}(${args})${p.returns ? ` => ${p.returns}` : ''}`;
 }
@@ -115,12 +134,19 @@ async function exportIndex() {
 }
 
 // --- scan --------------------------------------------------------------------
-// Scan every shipped source root that exists (src/ always; tools/ when present).
-// bareguard/litectx have only src/ and are unaffected.
+// Scan every shipped source root that exists (src/ always; tools/ when present),
+// RECURSIVELY — nested layouts like bareguard's src/primitives/*.js must be seen.
+// A hand-rolled walker (not readdirSync's `recursive` option) keeps the suite's
+// engines floor of node >=18: the option only landed in 18.17.
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? walk(join(dir, e.name))
+      : e.name.endsWith('.js') ? [join(dir, e.name)] : []);
+}
 const ROOTS = ['src', 'tools'].filter(d => existsSync(join(CWD, d)));
 const imports = await exportIndex();
 const out = [], problems = [];
-const jsFiles = ROOTS.flatMap(d => readdirSync(join(CWD, d)).filter(f => f.endsWith('.js')).map(f => join(d, f)));
+const jsFiles = ROOTS.flatMap(d => walk(join(CWD, d)).map(abs => relative(CWD, abs)));
 for (const rel of jsFiles) {
   const f = basename(rel);
   const src = readFileSync(join(CWD, rel), 'utf8');
@@ -146,7 +172,10 @@ for (const rel of jsFiles) {
   }
 }
 out.sort((a, b) => a.name.localeCompare(b.name));
-const manifest = { package: pkg.name, version: pkg.version, primitives: out };
+// No `version` field by design: package.json sits beside the manifest in the
+// same tarball with the authoritative version, so a copy here would only be a
+// pin that goes silently stale on every release. The manifest is pure content.
+const manifest = { package: pkg.name, primitives: out };
 const json = JSON.stringify(manifest, null, 2) + '\n';
 const target = join(CWD, 'primitives.json');
 
