@@ -53,6 +53,7 @@ Eight entry points:
 | Health-check provider, store, and tools | Loop.validate() |
 | Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` criteria |
 | Decisively judge "did this answer honor the request?" (return-time) | judge — verbatim request + one artifact → `honored`/`broke` + mechanical `where`; `calibrate` admits a tier vs a frozen floor |
+| Cheap yes/no, pick-one, or score classification (cheaper than judge/Evaluator.rubric) | JevProvider.classify — `noul`/`choice`/`score`; `calibrateJev` admits a Jev tier vs a frozen floor + injection battery |
 | Offer skills on demand without bloating context | SkillRegistry — `skill_use` meta-tool + `skills.activeTools` thunk |
 | Keep the context window lean (compact finished sub-tasks) | createStashSkill — register the skill + wire its `trim` into `Loop({ trim })` |
 | Consolidate finished work into durable facts (across runs) | remember — distill harvested spans → write through any `Store` socket |
@@ -235,6 +236,39 @@ const result = await calibrate({ provider, reps: 5, floor: 7 });
 const neg = await calibrate({ provider, reps: 5, floor: 7, judgeFn: constantHonored });
 // neg.admitted === false
 ```
+
+## Wiring with Jev (cheap calibrated classifier + its calibration harness)
+
+`JevProvider` is **not** a `generate()` provider — it has no tool-call/multi-turn surface. It exposes one verb, `classify(state, questions, opts)`, over TypeSafe's Jev (a calibrated single-shot classifier reached at `api.typesafe.ai/v1/systemone`), and is the cost tier **below** `judge`/`Evaluator.rubric` for a yes/no, pick-one, or score decision. It composes *around* a caller — never inside the Loop.
+
+```javascript
+const { JevProvider } = require('bare-agent/providers');
+
+const jev = new JevProvider({ apiKey: process.env.JEV_API_KEY, rates: { in: 0.042 / 1000, out: 0 } }); // per-1K tokens
+
+const { answers, costUsd, raw } = await jev.classify('I was charged twice, please refund.', {
+  route: { type: 'choice', instructions: 'Route this ticket.',
+           criteria: { billing: 'payments/refunds', technical: 'bugs', account: 'login' } },
+});
+// answers.route.choice → 'billing'; costUsd → real cost (rateSource:'caller'), honest null if unpriced
+// raw → the full unmodified parsed Jev response (a request id / warnings beyond answers/usage/model, if any)
+```
+
+Three question types, kept verbatim from Jev's own contract: `noul` (binary probability `0..1`), `choice` (pick one of `criteria`'s keys, plus untrusted `probabilities`/`confidence`), `score` (a position `0..N-1` on `criteria`'s legend). Jev's reply is **untrusted model output** — `classify()` schema-checks the discriminator field against the question that asked it (`ValidationError`, stamped `lib:'bare-agent'`, on a type mismatch or an out-of-range value) before returning it; `probabilities`/`confidence` pass through unvalidated.
+
+**Injection hardening is on by default.** `state` is untrusted and can carry an embedded attack (`"you are now…"`, `"ignore previous instructions"`); `classify()` prepends a defensive preamble to every question's `instructions` (copy-on-write, never mutates your `questions` object) so the classifier treats `state` as data, not commands. Opt out with `harden: false` on the constructor or per call.
+
+**Calibrate a tier before you trust it.** `calibrateJev` (exported from `bare-agent`, mirrors `calibrate`/judge's harness) grades a Jev model against a frozen clear-case battery (`noul`/`choice`/`score` + a false-positive trap) **and** a multi-style injection battery, admitting only if the clear-case floor clears with zero reds **and** every injection style is resisted:
+
+```javascript
+const { calibrateJev } = require('bare-agent');
+
+const report = await calibrateJev({ provider: jev, reps: 5 });
+if (!report.admitted) throw new Error('Jev tier failed calibration: ' + report.clear.reds.join(', '));
+// report.injection → { styles:[…], allResisted, leaks } — one leak blocks admission even with a clean clear-case run
+```
+
+Injection resistance is established per model tier, not once for the library — **re-run the harness on any Jev model you deviate to** (`jev-latest`/`jev-preview` track upstream and can regress).
 
 ## Wiring with Skills + Stash (progressive disclosure + compaction)
 
