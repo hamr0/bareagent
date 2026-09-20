@@ -101,6 +101,23 @@ describe('JevProvider happy path — the three question types', () => {
   });
 });
 
+describe('JevProvider raw passthrough (top-level fields beyond answers/usage/model)', () => {
+  it('surfaces the full parsed response on `raw`, including extra top-level fields', async () => {
+    const srv = await startJev((b) => {
+      const { model, answers, usage } = validAnswers(b);
+      return { json: { model, answers, usage, request_id: 'abc', warnings: ['low-confidence'] } };
+    });
+    const p = new JevProvider({ apiKey: 'k', baseUrl: srv.url });
+    const r = await p.classify('x', NOUL);
+    assert.equal(r.raw.request_id, 'abc');
+    assert.deepEqual(r.raw.warnings, ['low-confidence']);
+    assert.deepEqual(r.raw, { model: 'jev-1.13.0', answers: r.answers, usage: { input_tokens: 100, output_tokens: 10 }, request_id: 'abc', warnings: ['low-confidence'] });
+    // unchanged behavior: `answers` is still the validated raw.answers object
+    assert.equal(r.answers, r.raw.answers);
+    srv.server.close();
+  });
+});
+
 describe('JevProvider untrusted-output validation', () => {
   const bad = [
     ['answer type mismatch', (b) => ({ json: { model: 'm', answers: { q: { type: 'score', score: 1 } }, usage: null } })],

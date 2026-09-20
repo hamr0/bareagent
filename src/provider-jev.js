@@ -97,7 +97,9 @@ class JevProvider {
    * @param {number} [opts.deadlineMs] - Override deadline for this call.
    * @param {boolean} [opts.harden] - Override injection hardening for this call (constructor default otherwise).
    * @param {(payload: {usage: any, model: string|null, kind: 'classify', costUsd: number|null, rateSource: 'provider'|'caller'|'tier'|'default'|null}) => any} [opts.onLlmResult] - Budget hook; forwarded before return.
-   * @returns {Promise<{model: string, answers: Record<string, any>, usage: any, costUsd: number|null, rateSource: 'provider'|'caller'|'tier'|'default'|null}>}
+   * @returns {Promise<{model: string, answers: Record<string, any>, usage: any, costUsd: number|null, rateSource: 'provider'|'caller'|'tier'|'default'|null, raw: any}>}
+   *   `raw` is the full, unmodified parsed Jev response (mirrors `judge()`'s `raw`) — closes the silent drop of any
+   *   top-level field beyond `answers`/`usage`/`model` (e.g. a request id, warnings, moderation flags, timing).
    */
   async classify(state, questions, opts = {}) {
     const model = opts.model || this.model;
@@ -121,7 +123,7 @@ class JevProvider {
     // A governance HaltError thrown here propagates clean (never swallowed).
     if (onLlmResult) await onLlmResult({ usage, model: resolvedModel, kind: 'classify', costUsd, rateSource });
 
-    return { model: resolvedModel, answers, usage, costUsd, rateSource };
+    return { model: resolvedModel, answers, usage, costUsd, rateSource, raw };
   }
 
   /**
@@ -170,7 +172,10 @@ class JevProvider {
 
   /**
    * Answer-side validation — Jev's reply is UNTRUSTED model output; every answer must
-   * match the question that asked it. @param {any} questions @param {any} raw @returns {Record<string, any>}
+   * match the question that asked it. Only the discriminator field (`noul`/`choice`/`score`) is
+   * validated here — `probabilities`/`confidence` on a `choice`/`score` answer pass through
+   * UNVALIDATED (untrusted passthrough; the caller decides what to do with them).
+   * @param {any} questions @param {any} raw @returns {Record<string, any>}
    */
   _validateAnswers(questions, raw) {
     if (!isPlainObject(raw) || !isPlainObject(raw.answers)) {
