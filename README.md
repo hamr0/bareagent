@@ -1,4 +1,5 @@
-```
+
+
                          ╭─────────────────────────────────╮
                          │  ╔╗ ╔═╗╦═╗╔═╗ ╔═╗╔═╗╔═╗╔╗╔╔╦╗   │
                          │  ╠╩╗╠═╣╠╦╝╠╣  ╠═╣║ ╦╠╣ ║║║ ║    │
@@ -133,7 +134,7 @@ console.log(result.count, result.matchedIds);   // a code-derived count + the id
 
 **Cross-language:** Run as a subprocess; talk JSONL over stdin/stdout from Python, Go, Rust, Ruby, or Java. Wrappers in [`contrib/`](contrib/README.md).
 
-**Deps:** none required — the core imports nothing. Optional peers: `bareguard >=0.9.0 <1.0.0` (governance), `better-sqlite3` (SQLite store); optional: `cron-parser`, `barebrowse`, `baremobile`, `wearehere`.
+**Deps:** none required — the core imports nothing. Optional peers: `bareguard >=0.9.0 <1.0.0` (governance), `better-sqlite3` (SQLite store); optional: `cron-parser`, `barebrowse`, `baremobile`.
 
 This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/archive/usage-guide.md).
 
