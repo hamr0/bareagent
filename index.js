@@ -24,6 +24,7 @@ const { buildSearchTool, buildExactTool, buildScanTool, litectxCorpus } = requir
 const { remember } = require('./src/remember');
 const { judge } = require('./src/judge');
 const { calibrate, CALIBRATION_CASES, INJECTION_BATTERY, scoreCase, gradeRun, constantHonored } = require('./src/judge-calibration');
+const { calibrateJev } = require('./src/provider-jev-calibration');
 const { assessComplexity, isCritical } = require('./src/complexity');
 const { SkillRegistry } = require('./src/skills');
 const { createStashSkill } = require('./src/stash');
@@ -60,6 +61,7 @@ module.exports = {
   remember,
   judge,
   calibrate,
+  calibrateJev,
   CALIBRATION_CASES,
   INJECTION_BATTERY,
   scoreCase,

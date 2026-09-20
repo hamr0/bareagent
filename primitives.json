@@ -65,6 +65,15 @@
       "example": "const report = await calibrate({ provider, reps: 5, floor: 7 });\nif (!report.injectionBattery.allResisted) reject('injection leak');"
     },
     {
+      "name": "calibrateJev",
+      "category": "providers",
+      "when": "you are admitting a Jev model tier to the classify role and must grade it against the frozen clear-case battery AND prove it resists every injection style before trusting it on untrusted input",
+      "import": "import { calibrateJev } from 'bare-agent'",
+      "signature": "calibrateJev(opts: object) => Promise<{reps:number, floor:number, clear: ReturnType<typeof gradeJevRun>, injection: {styles: Array<{label:string, style:string, usable:number, resisted:boolean}>, allResisted:boolean, leaks:number}, admitted:boolean}>",
+      "fails": "never fabricates a pass — a leak in any injection style blocks admission even above the clear-case floor, and the negative control must fail the set; a governance HaltError propagates clean.",
+      "example": "import { JevProvider } from 'bare-agent/providers';\nimport { calibrateJev } from 'bare-agent';\nconst report = await calibrateJev({ provider: new JevProvider({ apiKey }), reps: 3 });\nif (!report.admitted) throw new Error('Jev tier failed calibration: ' + report.clear.reds.join(', '));"
+    },
+    {
       "name": "Checkpoint",
       "category": "hitl",
       "when": "you want an always-prompt human-in-the-loop approval gate on chosen tools — complementary to bareguard's policy-driven pauses",
@@ -207,6 +216,15 @@
       "signature": "isCritical(prompt: string) => boolean",
       "fails": "never throws — deterministic override; non-string/blank input is false. This floor is non-overridable by design.",
       "example": "if (isCritical(goal)) verdict = await evaluator.evaluate(goal, result, { contract });"
+    },
+    {
+      "name": "JevProvider",
+      "category": "providers",
+      "when": "you need a cheap, fast, calibrated classifier (yes/no, pick-one, or a score) instead of a full LLM grading round — the cost tier below judge/Evaluator.rubric",
+      "import": "import { JevProvider } from 'bare-agent/providers'",
+      "signature": "new JevProvider(options?)",
+      "fails": "classify() throws ValidationError (stamped lib:'bare-agent') on a bad request or a malformed/mismatched Jev reply; ProviderError on HTTP/transport (401/403/422/429/529, socket cut); a governance HaltError from onLlmResult propagates clean.",
+      "example": "import { JevProvider } from 'bare-agent/providers';\nconst jev = new JevProvider({ apiKey, rates: { in: 0.042 / 1000, out: 0 } }); // per-1K tokens\nconst { answers } = await jev.classify('I was charged twice, please refund.', {\n  route: { type: 'choice', instructions: 'Route this ticket.',\n           criteria: { billing: 'payments/refunds', technical: 'bugs', account: 'login' } },\n});\n// answers.route.choice === 'billing'"
     },
     {
       "name": "JsonFile",

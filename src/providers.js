@@ -6,6 +6,7 @@ const { GeminiProvider } = require('./provider-gemini');
 const { OllamaProvider } = require('./provider-ollama');
 const { CLIPipeProvider } = require('./provider-clipipe');
 const { FallbackProvider } = require('./provider-fallback');
+const { JevProvider } = require('./provider-jev');
 
 module.exports = {
   // Short names (canonical — used throughout docs and the integration guide)
@@ -15,6 +16,7 @@ module.exports = {
   Ollama: OllamaProvider,
   CLIPipe: CLIPipeProvider,
   Fallback: FallbackProvider,
+  Jev: JevProvider,
   // *Provider aliases match the class names in source/stack traces, so
   // `const { OpenAIProvider } = require('bare-agent/providers')` also works.
   OpenAIProvider,
@@ -23,4 +25,5 @@ module.exports = {
   OllamaProvider,
   CLIPipeProvider,
   FallbackProvider,
+  JevProvider,
 };
