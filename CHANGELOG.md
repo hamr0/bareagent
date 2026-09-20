@@ -2,6 +2,19 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Docs
+
+- **`JevProvider` hardening/threshold + non-determinism notes** — documented two
+  behaviors adopters can only discover empirically: (1) injection hardening
+  changes the returned values (the preamble is part of the question), and the
+  shift can be large enough to move a decision cutoff, so a threshold must be
+  tuned with hardening in the same state it ships in; (2) Jev is calibrated, not
+  deterministic (repeated identical calls differ slightly), so tests/thresholds
+  must assert on ranges or threshold-side, never an exact value. Added to the
+  `harden` and `classify()` JSDoc and `bareagent.context.md`. No code change.
+
 ## [0.46.2] - 2026-09-20
 
 ### Fixed
