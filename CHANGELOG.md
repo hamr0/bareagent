@@ -2,6 +2,25 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`JevProvider` `isPlainObject` tightened to a true plain-object test** —
+  the helper backing 8 validation sites (caller `questions`/`q`/`instructions`/
+  `criteria` + the untrusted API `raw`/`answers`) accepted anything
+  `typeof === 'object'` and not an array, so a boxed `String`/`Number`, a
+  `Map`, a `RegExp`, or a class instance with own keys passed as a "plain
+  object" and could be spread into the wire payload — contradicting the
+  documented "non-plain objects rejected" contract. Now also checks the
+  prototype is `Object.prototype` (or `null`, so `Object.create(null)`
+  dictionaries still validate). Response-side validation is unaffected: a
+  `JSON.parse`d Jev reply always carries `Object.prototype`. Backward-compatible
+  for real callers — only malformed/non-plain shapes newly reject. Note: the
+  v0.46.1 entry above stated "non-plain objects are rejected" before the check
+  was complete (only values without own enumerable keys, e.g. a `Date`, were
+  actually caught); this release makes that claim true.
+
 ## [0.46.1] - 2026-09-20
 
 ### Fixed
