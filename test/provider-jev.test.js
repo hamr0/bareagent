@@ -341,6 +341,46 @@ describe('JevProvider structured instructions (object/array forms)', () => {
     await assert.rejects(() => p.classify('x', { q: { type: 'noul', instructions: new Date() } }),
       (e) => e instanceof ValidationError);
   });
+
+  it('rejects a boxed String instructions', async () => {
+    const p = new JevProvider({ apiKey: 'k', baseUrl: 'http://127.0.0.1:1' }); // unreachable — must never be hit
+    // eslint-disable-next-line no-new-wrappers
+    await assert.rejects(() => p.classify('x', { q: { type: 'noul', instructions: new String('abc') } }),
+      (e) => e instanceof ValidationError);
+  });
+
+  it('rejects a class-instance instructions (own keys, wrong prototype)', async () => {
+    const p = new JevProvider({ apiKey: 'k', baseUrl: 'http://127.0.0.1:1' }); // unreachable — must never be hit
+    class Instr { constructor() { this.x = 1; } }
+    await assert.rejects(() => p.classify('x', { q: { type: 'noul', instructions: new Instr() } }),
+      (e) => e instanceof ValidationError);
+  });
+
+  it('rejects a Map instructions', async () => {
+    const p = new JevProvider({ apiKey: 'k', baseUrl: 'http://127.0.0.1:1' }); // unreachable — must never be hit
+    await assert.rejects(() => p.classify('x', { q: { type: 'noul', instructions: new Map([['a', 1]]) } }),
+      (e) => e instanceof ValidationError);
+  });
+
+  it('accepts an Object.create(null) dict instructions and round-trips it', async () => {
+    let seenBody = null;
+    const srv = await startJev((b) => { seenBody = b; return { json: validAnswers(b) }; });
+    const p = new JevProvider({ apiKey: 'k', baseUrl: srv.url, harden: false });
+    const ins = Object.create(null);
+    ins.question = 'Q?';
+    await p.classify('x', { q: { type: 'noul', instructions: ins } });
+    assert.equal(seenBody.questions.q.instructions.question, 'Q?');
+    srv.server.close();
+  });
+
+  it('accepts a normal plain-object instructions (regression)', async () => {
+    let seenBody = null;
+    const srv = await startJev((b) => { seenBody = b; return { json: validAnswers(b) }; });
+    const p = new JevProvider({ apiKey: 'k', baseUrl: srv.url, harden: false });
+    await p.classify('x', { q: { type: 'noul', instructions: { question: 'Q?' } } });
+    assert.deepEqual(seenBody.questions.q.instructions, { question: 'Q?' });
+    srv.server.close();
+  });
 });
 
 describe('JevProvider HTTP error mapping', () => {
