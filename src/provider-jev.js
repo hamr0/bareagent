@@ -77,7 +77,7 @@ class JevProvider {
    * @param {number} [options.deadlineMs] - Total call-duration deadline (ms); 0 disables (default).
    * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [options.rates] - Per-1K-token USD rates for authoritative pricing (Jev: `{ in: 0.042/1000, out: 0 }`).
    * @param {boolean} [options.exposeErrorBody=false] - Include the raw error body on a ProviderError (default off).
-   * @param {boolean} [options.harden=true] - Wrap each question's instructions with a defensive preamble (prefixed for a string, prepended as element 0 for an array, or added under a reserved key for an object), treating `state` as untrusted data and resisting embedded role/label-override attempts. Overridable per-call via `opts.harden`.
+   * @param {boolean} [options.harden=true] - Wrap each question's instructions with a defensive preamble (prefixed for a string, prepended as element 0 for an array, or added under a reserved key for an object), treating `state` as untrusted data and resisting embedded role/label-override attempts. Overridable per-call via `opts.harden`. NOTE: the preamble is part of the question, so hardened and unhardened calls can return DIFFERENT values for the same `state` — the shift can be large enough to move a decision cutoff. Tune any decision threshold with hardening in the SAME state you ship it in — a cutoff tuned against `harden:false` or the raw API will be off once hardening is on.
    */
   constructor(options = {}) {
     this.apiKey = options.apiKey;
@@ -92,6 +92,10 @@ class JevProvider {
 
   /**
    * Classify `state` against one or more typed `questions`. See the class doc for the primitive tags.
+   *
+   * Jev answers are CALIBRATED, not DETERMINISTIC — repeated identical calls can differ slightly,
+   * and a value sitting on a threshold can cross it between runs. Assert on RANGES or on the side of
+   * a threshold, never on an exact value (`toBe(0.62)` will flake).
    * @param {string|object|any[]} state - The shared input all questions judge (Jev's `state`).
    * @param {Record<string, {type: 'noul'|'choice'|'score', instructions: string|object|any[], criteria?: any}>} questions - Keyed questions; each judged independently against `state`.
    * @param {object} [opts]
