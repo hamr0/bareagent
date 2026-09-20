@@ -2,6 +2,33 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.46.0] - 2026-09-20
+
+Module 1 of the Jev integration: a 4th Evaluator criteria door composing
+`JevProvider` as a cheap calibrated classifier verdict tier.
+
+### Added
+
+- **`jev` Evaluator criteria type** — a new opt-in `criteria.jev = {question,
+  toVerdict}` door on `Evaluator.evaluate()`, alongside the existing
+  `predicate`/`rubric`/`agentic` doors. Composes `JevProvider.classify()` as a
+  cheap calibrated classification-shaped judgment (~100-1000x cheaper than the
+  `rubric` LLM-judge path) sitting one tier below it. Option A: the caller
+  supplies `toVerdict`, the mapping function from jev's `noul`/`choice`/`score`
+  answer shape to the tri-state `Verdict` status — the Evaluator itself stays
+  agnostic to jev's answer shapes. Mirrors the `predicate` door's BA-15
+  broken-arbiter guard (a `toVerdict` that throws or returns a malformed
+  verdict is a faulty arbiter, not a model failure — it throws a
+  `ValidationError` naming the type only, never leaking the bad return) and the
+  `rubric`/`agentic` doors' budget forwarding (`onLlmResult` re-tagged
+  `kind:'evaluate'`). The existing `predicate`/`rubric`/`agentic` doors are
+  unchanged.
+
+### Docs
+
+- README and `bareagent.context.md` Evaluator sections updated from "three
+  criteria types" to name the 4th `jev` door.
+
 ## [0.45.0] - 2026-09-20
 
 Module 0 of the Jev integration: a calibrated single-shot classifier provider,
