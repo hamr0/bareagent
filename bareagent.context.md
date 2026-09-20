@@ -51,7 +51,7 @@ Eight entry points:
 | Retry individual plan steps | runPlan({ stepRetry }) |
 | Use a CLI tool as an LLM provider | CLIPipe |
 | Health-check provider, store, and tools | Loop.validate() |
-| Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` criteria |
+| Verify an agent's output (judge / grade / critic) | Evaluator + refine — `predicate` / `rubric` / `agentic` / `jev` criteria |
 | Decisively judge "did this answer honor the request?" (return-time) | judge — verbatim request + one artifact → `honored`/`broke` + mechanical `where`; `calibrate` admits a tier vs a frozen floor |
 | Cheap yes/no, pick-one, or score classification (cheaper than judge/Evaluator.rubric) | JevProvider.classify — `noul`/`choice`/`score`; `calibrateJev` admits a Jev tier vs a frozen floor + injection battery |
 | Offer skills on demand without bloating context | SkillRegistry — `skill_use` meta-tool + `skills.activeTools` thunk |
@@ -824,12 +824,18 @@ const out = await recurse('Fix the failing function in calc.js', ctx, {
 ```javascript
 const { Evaluator, refine } = require('bare-agent');
 
-const evaluator = new Evaluator({ provider });   // provider REQUIRED for rubric/agentic; predicate needs none
+const evaluator = new Evaluator({ provider, jevProvider });   // provider REQUIRED for rubric/agentic; jevProvider REQUIRED for jev; predicate needs neither
 
-// Three criteria types — pass EXACTLY ONE:
+// Four criteria types — pass EXACTLY ONE:
 const v1 = await evaluator.evaluate(goal, result, { predicate: (r) => r.includes('DONE') });       // deterministic, 0 tokens
 const v2 = await evaluator.evaluate(goal, result, { rubric: 'Cites a source for every claim.' });  // isolated adversarial LLM grader
 const v3 = await evaluator.evaluate(goal, url,    { agentic: 'Open the page, click Submit, check the console for errors.' }); // tool-running critic that EXERCISES the artifact
+const v4 = await evaluator.evaluate(goal, result, {
+  jev: {
+    question: { type: 'noul', instructions: 'Does the result satisfy the goal?' },
+    toVerdict: (a) => (a.noul >= 0.5 ? 'satisfied' : 'failed'), // caller owns the threshold/band mapping
+  },
+});                                                              // cheap calibrated classifier tier (~100-1000x cheaper than rubric)
 
 // Verdict: { status: 'satisfied' | 'needs_revision' | 'failed', pass, score, critique, suggestions }
 //   pass = (status === 'satisfied');  needs_revision is retryable;  failed is terminal (stop spending).
@@ -839,7 +845,8 @@ if (!v2.pass) console.log(v2.critique, v2.suggestions);
 Key invariants:
 - The **rubric path runs an isolated adversarial grader** — a separate context window with a harsh, independent prompt, never the generator's transcript. That isolation (not a feedback knob) is what defeats the self-evaluation trap; the grader treats the RESULT as untrusted DATA (judge prompt-injection defence).
 - **`agentic`** (the third type) spins up a fresh Loop with scoped tools (set on the Evaluator, or per-call `opts.tools`) that **exercises** the live artifact — clicks, reads console/network — rather than reading text. Each critic round forwards to `onLlmResult`; a governance `HaltError` re-throws clean.
-- **`contract`** (a definition of done) is graded against instead of the loose goal: `evaluate(goal, result, { rubric, contract })`. Judge tokens forward to the gate via `onLlmResult` (`kind:'evaluate'`) so verification spend is visible to the budget.
+- **`jev`** (the fourth type) composes `JevProvider` for a cost tier BELOW rubric — `question` is the SOLE criterion sent to the classifier (no layered prompt), and the caller-supplied `toVerdict(answer)` maps jev's `noul`/`choice`/`score` answer shape to the tri-state status (the Evaluator stays agnostic to jev's answer shapes). A `toVerdict` return outside the tri-state set is a broken arbiter (BA-15 family): thrown as `ValidationError` naming the type only, never the value. Requires a `jevProvider` (on the Evaluator or per-call `opts.jevProvider`). `score` is always `null`.
+- **`contract`** (a definition of done) is graded against instead of the loose goal: `evaluate(goal, result, { rubric, contract })`. Judge tokens forward to the gate via `onLlmResult` (`kind:'evaluate'`) so verification spend is visible to the budget. For `jev`, `contract` is used only as the failed/needs-revision critique string — never folded into `question`.
 
 **`refine`** drives a caller-supplied `attempt`/`evaluate` until a satisfied verdict, a terminal `failed`, or `maxIterations` (the real bound is bareguard maxTurns/budget). It threads the latest `critique` into the next attempt (fresh-feedback, not anchoring on a failed answer) and a shared `contract` to both sides.
 
