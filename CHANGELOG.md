@@ -2,6 +2,26 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`JevProvider` structured `instructions`** — object- and array-shaped
+  `instructions` (the documented TypeSafe way to give a question named parts:
+  `question`/`inspect`/`focus`/`ignore`) were rejected by the request validator
+  and, worse, would have been silently stringified to `"[object Object]"` by the
+  injection hardening (`HARDENING_PREAMBLE + instructions`). The validator now
+  accepts a non-empty string, a non-empty array, or a plain object with at least
+  one key (empty `{}`/`[]` and non-plain objects are rejected as "missing
+  instructions", matching the existing stricter-than-API null/empty-string
+  guard), and hardening is
+  shape-aware: prefixed onto a string, prepended as element 0 of an array, or
+  added under a reserved `__hardening__` key on an object. A caller-supplied
+  `__hardening__` key on an object `instructions` is rejected (`ValidationError`,
+  key name only) so it can't silently overwrite the preamble. Injection
+  resistance re-verified live on jev-1.13.0 across all 6 battery styles for both
+  structured forms (0 leaks). Backward-compatible (string form unchanged).
+
 ## [0.46.0] - 2026-09-20
 
 Module 1 of the Jev integration: a 4th Evaluator criteria door composing
