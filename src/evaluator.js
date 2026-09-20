@@ -34,6 +34,9 @@ const { Loop } = require('./loop');
  * @property {ToolDef[]} [tools] - The critic's SCOPED functional tools (`barebrowse`/`baremobile`) for the
  *   agentic path — what lets it exercise the live artifact rather than read text. Overridable per call via
  *   `EvaluateOptions.tools`. Ignored by predicate/rubric.
+ * @property {import('./provider-jev').JevProvider} [jevProvider] - REQUIRED for the `jev` path — a cheap
+ *   calibrated classifier tier (~100-1000x cheaper than a rubric LLM round for classification-shaped verdicts).
+ *   Overridable per call via `EvaluateOptions.jevProvider`. Ignored by predicate/rubric/agentic.
  */
 
 /**
@@ -46,8 +49,17 @@ const { Loop } = require('./loop');
  * @property {string} [agentic] - Instructions for a tool-running critic (D9): how to EXERCISE the live artifact
  *   (open it, click, read console/network) and what would make it fail. Runs an ISOLATED Loop with the scoped
  *   `tools`. The strongest verification — catches what only running the thing reveals. Exactly one of the three.
+ * @property {{question: {type: 'noul'|'choice'|'score', instructions: string, criteria?: any}, toVerdict: (answer: any) => 'satisfied'|'needs_revision'|'failed'}} [jev] -
+ *   Cheap calibrated classifier door (composes `JevProvider`, the cost tier below `rubric`). `question` is
+ *   ONE Jev question object — the SOLE criterion (a classifier takes one instruction, not a layered prompt;
+ *   unlike rubric/agentic, `contract` is NOT folded into it here — it is used only as the failed-critique
+ *   string). `toVerdict` maps the classifier's per-question answer (`{type:'noul',noul}` /
+ *   `{type:'choice',choice,...}` / `{type:'score',score,...}`) to a tri-state status — the caller owns
+ *   thresholds/bands (Option A: caller-supplied mapping fn, open + simple, no premature abstraction over
+ *   jev's three answer shapes). Requires a `jevProvider` (on the Evaluator or per-call). Exactly one of the four.
  * @property {string} [contract] - The shared, authoritative "definition of done" the grader judges against
- *   (A3 / D10). When present it is what success means — not the loose goal. Folded into the rubric/agentic prompt.
+ *   (A3 / D10). When present it is what success means — not the loose goal. Folded into the rubric/agentic
+ *   prompt; for the `jev` door it is used ONLY as the failed-critique string (never folded into `question`).
  */
 
 /**
@@ -59,6 +71,8 @@ const { Loop } = require('./loop');
  * @property {ToolDef[]} [tools] - Per-call override of the agentic critic's scoped tools (else `EvaluatorOptions.tools`).
  * @property {Function} [policy] - bareguard `policy` forwarded to the agentic critic's Loop — a tool-running
  *   critic MUST be bounded (turn/budget caps come from the gate; the Loop's HARD_ROUND_LIMIT is only a net).
+ * @property {import('./provider-jev').JevProvider} [jevProvider] - Per-call override of the `jev` door's classifier
+ *   provider (else `EvaluatorOptions.jevProvider`).
  */
 
 // The adversarial grader system prompt — the anti-sycophancy core (A1, "Self-Evaluation is a Trap"). The
@@ -99,18 +113,20 @@ Output your FINAL answer as ONLY this JSON, no markdown, no prose:
 
 /**
  * Output-side judge — the mirror of `Planner` (input-side). Judges whether a result meets a goal, by a
- * deterministic `predicate`, an LLM `rubric`, or a tool-running `agentic` critic, returning one uniform
- * `Verdict`. The rubric and agentic paths run an ISOLATED adversarial critic (separate context + independent
- * system prompt) — that isolation, not a feedback knob, is what defeats the self-evaluation trap. The agentic
- * path additionally EXERCISES the artifact with scoped tools (it does not read the diff). Composes AROUND a
- * Loop (never inside `loop.js`).
+ * deterministic `predicate`, an LLM `rubric`, a tool-running `agentic` critic, or a cheap calibrated `jev`
+ * classifier tier, returning one uniform `Verdict`. The rubric and agentic paths run an ISOLATED adversarial
+ * critic (separate context + independent system prompt) — that isolation, not a feedback knob, is what
+ * defeats the self-evaluation trap. The agentic path additionally EXERCISES the artifact with scoped tools
+ * (it does not read the diff). The `jev` path composes `JevProvider` (a single classification call, ~100-1000x
+ * cheaper than a rubric round) for classification-shaped verdicts — the caller supplies a `toVerdict` mapping
+ * fn from the classifier's answer to the tri-state status. Composes AROUND a Loop (never inside `loop.js`).
  *
  * Built flagged-and-deletable per D11 — opt-in by import; calibrate the rubric/prompt from execution traces.
  */
 class Evaluator {
   /**
    * @param {EvaluatorOptions} [options]
-   * @when you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, or with a tool-running critic that exercises the live artifact
+   * @when you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, with a tool-running critic that exercises the live artifact, or by a cheap calibrated classifier (jev)
    * @fails never throws for a bad grade — returns a Verdict {status: satisfied|needs_revision|failed}; a provider HaltError propagates clean. Judge tokens forward via onLlmResult.
    * @example
    *   const evaluator = new Evaluator({ provider });
@@ -122,23 +138,25 @@ class Evaluator {
     this.prompt = options.prompt || GRADER_PROMPT;
     this.agenticPrompt = options.agenticPrompt || AGENTIC_PROMPT;
     this.tools = Array.isArray(options.tools) ? options.tools : [];
+    this.jevProvider = options.jevProvider || null;
   }
 
   /**
    * Judge `result` against `goal` by exactly one criteria type.
    * @param {string} goal - The objective the result is judged against.
    * @param {any} result - The output under judgment.
-   * @param {Criteria} criteria - Exactly one of `predicate` | `rubric` | `agentic` (none/more-than-one throws).
+   * @param {Criteria} criteria - Exactly one of `predicate` | `rubric` | `agentic` | `jev` (none/more-than-one throws).
    * @param {EvaluateOptions} [opts]
    * @returns {Promise<Verdict>}
-   * @throws {ValidationError} not-exactly-one criteria supplied, or rubric/agentic requested with no provider.
+   * @throws {ValidationError} not-exactly-one criteria supplied, or rubric/agentic/jev requested with no provider.
    */
   async evaluate(goal, result, criteria, opts = {}) {
     const predicate = typeof criteria?.predicate === 'function' ? criteria.predicate : null;
     const rubric = typeof criteria?.rubric === 'string' && criteria.rubric.length > 0 ? criteria.rubric : null;
     const agentic = typeof criteria?.agentic === 'string' && criteria.agentic.length > 0 ? criteria.agentic : null;
-    if ([predicate, rubric, agentic].filter(Boolean).length !== 1) {
-      throw new ValidationError('[Evaluator] criteria must supply exactly one of { predicate } | { rubric } | { agentic }');
+    const jev = criteria && typeof criteria.jev === 'object' && criteria.jev !== null ? criteria.jev : null;
+    if ([predicate, rubric, agentic, jev].filter(Boolean).length !== 1) {
+      throw new ValidationError('[Evaluator] criteria must supply exactly one of { predicate } | { rubric } | { agentic } | { jev }');
     }
 
     if (predicate) {
@@ -182,6 +200,12 @@ class Evaluator {
     // A1/D8), but this critic EXERCISES the artifact with scoped functional tools instead of reading text.
     if (agentic) {
       return this._evaluateAgentic(goal, result, agentic, contract, opts);
+    }
+
+    // Jev path — a cheap calibrated classifier tier (the cost tier below rubric). No layered prompt: the
+    // question's `instructions` is the sole criterion; `contract` (if any) is used only as the failed-critique.
+    if (jev) {
+      return this._evaluateJev(result, jev, contract, opts);
     }
 
     // Rubric path — isolated adversarial grader.
@@ -273,6 +297,63 @@ class Evaluator {
       throw new ValidationError(`[Evaluator] agentic critic loop failed: ${out.error}`);
     }
     return this._parse(out.text);
+  }
+
+  /**
+   * Jev path — a cheap calibrated classifier verdict tier (the cost tier below `rubric`; ~100-1000x cheaper
+   * for classification-shaped verdicts). Unlike rubric/agentic there is NO layered prompt: `question.instructions`
+   * is the SOLE criterion sent to the classifier (a classifier takes one instruction, not goal+contract+rubric).
+   * `toVerdict` — caller-supplied (Option A: open + simple, no premature abstraction over jev's three answer
+   * shapes) — maps the classifier's answer to a tri-state status; the caller owns thresholds/bands.
+   * @param {any} result
+   * @param {{question: {type: 'noul'|'choice'|'score', instructions: string, criteria?: any}, toVerdict: (answer: any) => any}} jevCriteria
+   * @param {string|null} contract - Used ONLY as the failed-critique string (never folded into the question).
+   * @param {EvaluateOptions} opts
+   * @returns {Promise<Verdict>}
+   * @throws {ValidationError} no jevProvider, `toVerdict` isn't a function, or it returns something other
+   *   than a valid tri-state status (BA-15 family — a broken arbiter is named loudly, never coerced; the
+   *   error names the TYPE only, never the returned VALUE, F16/BA-1 audit-safety).
+   */
+  async _evaluateJev(result, jevCriteria, contract, opts) {
+    const jevProvider = opts.jevProvider || this.jevProvider;
+    if (!jevProvider) {
+      throw new ValidationError('[Evaluator] jev criteria requires a jevProvider (on the Evaluator or per-call opts.jevProvider)');
+    }
+    const toVerdict = typeof jevCriteria?.toVerdict === 'function' ? jevCriteria.toVerdict : null;
+    if (!toVerdict) {
+      throw new ValidationError('[Evaluator] jev criteria requires a toVerdict(answer) => status function');
+    }
+    const question = jevCriteria.question;
+    const forward = opts.onLlmResult;
+
+    const out = await jevProvider.classify(stringifyResult(result), { q: question }, {
+      // Re-tag jev's own kind:'classify' as kind:'evaluate' at the Evaluator boundary (mirrors rubric/agentic).
+      // A HaltError thrown by the consumer's hook propagates clean (JevProvider awaits it, no swallow).
+      onLlmResult: forward
+        ? async (/** @type {any} */ e) => { await forward({ usage: e.usage, model: e.model, kind: 'evaluate' }); }
+        : undefined,
+    });
+    const answer = out.answers.q;
+
+    const status = await toVerdict(answer);
+    if (status !== 'satisfied' && status !== 'needs_revision' && status !== 'failed') {
+      // Name the TYPE only, never the value — mirrors the predicate door's broken-arbiter guard (BA-15/F16).
+      const got = status === null ? 'null'
+        : status === undefined ? 'undefined'
+        : Array.isArray(status) ? 'an array'
+        : typeof status === 'object' ? 'an object'
+        : `a ${typeof status}`;
+      throw new ValidationError(
+        `[Evaluator] jev criteria toVerdict must return 'satisfied'|'needs_revision'|'failed', got ${got}.`,
+      );
+    }
+    return {
+      status,
+      pass: status === 'satisfied',
+      score: null,
+      critique: status === 'satisfied' ? '' : (typeof contract === 'string' ? contract : ''),
+      suggestions: [],
+    };
   }
 
   /**

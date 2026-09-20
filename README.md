@@ -88,7 +88,7 @@ Every piece works alone — take what you need, ignore the rest. Two axes: **Act
 
 | Component | What it does |
 |---|---|
-| **Evaluator + refine** | Judge output by `predicate` (no tokens), `rubric` (an isolated adversarial grader), or `agentic` (a critic that exercises the live artifact). `refine` is the bounded generate→evaluate→regenerate loop |
+| **Evaluator + refine** | Judge output by `predicate` (no tokens), `rubric` (an isolated adversarial grader), `agentic` (a critic that exercises the live artifact), or `jev` (a cheap calibrated classifier tier). `refine` is the bounded generate→evaluate→regenerate loop |
 | **SkillRegistry** | Surface skills on demand: one meta-tool catalog; activating a skill injects its instructions and unlocks its tools |
 | **stash** | Compact finished work out of the live window (restorable), or auto-fold the middle under token pressure |
 

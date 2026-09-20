@@ -63,6 +63,15 @@ describe('Evaluator — criteria validation', () => {
   it('throws when agentic is requested but no provider is on the Evaluator', async () => {
     await assert.rejects(() => new Evaluator().evaluate('g', 'r', { agentic: 'open the page and click' }), ValidationError);
   });
+  it('throws when BOTH jev and rubric are supplied (exactly-one-of guard covers the 4th door)', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => 'satisfied' },
+        rubric: 'x',
+      }),
+      ValidationError,
+    );
+  });
 });
 
 describe('Evaluator — agentic path runs an ISOLATED tool-running critic', () => {
@@ -273,6 +282,158 @@ describe('Evaluator — rubric path runs an ISOLATED adversarial grader', () => 
     const { provider } = graderStub('{"status":"satisfied","score":9,"critique":"","suggestions":[]}');
     const v2 = await new Evaluator({ provider }).evaluate('g', 'r', { rubric: 'is it good?' });
     assert.notEqual(v2.temperatureDropped, true, 'an honored temperature must not be flagged as dropped');
+  });
+});
+
+// A JevProvider stub — mirrors the real classify() contract ({model, answers, usage}) closely enough to
+// drive the Evaluator's jev door without the network (JevProvider's own wire behavior is covered by
+// test/provider-jev.test.js). Records calls so a test can prove the state/question/onLlmResult forwarding.
+function jevStub(answer, usage = { inputTokens: 50, outputTokens: 5 }) {
+  const calls = [];
+  return {
+    calls,
+    jevProvider: {
+      async classify(state, questions, opts = {}) {
+        calls.push({ state, questions, opts });
+        const out = { model: 'jev-1.13.0', answers: { q: answer }, usage, costUsd: null, rateSource: 'default', raw: {} };
+        if (typeof opts.onLlmResult === 'function') {
+          await opts.onLlmResult({ usage, model: out.model, kind: 'classify', costUsd: null, rateSource: 'default' });
+        }
+        return out;
+      },
+    },
+  };
+}
+
+describe('Evaluator — jev path (cheap calibrated classifier tier)', () => {
+  it('throws when jev is requested but no jevProvider is on the Evaluator', async () => {
+    await assert.rejects(
+      () => new Evaluator().evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => 'satisfied' },
+      }),
+      ValidationError,
+    );
+  });
+
+  it('noul answer -> toVerdict maps to satisfied (pass derived true, score null)', async () => {
+    const { jevProvider, calls } = jevStub({ type: 'noul', noul: 0.92 });
+    const v = await new Evaluator({ jevProvider }).evaluate('is this positive?', 'great work', {
+      jev: {
+        question: { type: 'noul', instructions: 'Is this positive?' },
+        toVerdict: (a) => (a.noul >= 0.5 ? 'satisfied' : 'failed'),
+      },
+    });
+    assert.equal(v.status, 'satisfied');
+    assert.equal(v.pass, true);
+    assert.equal(v.score, null);
+    assert.equal(v.critique, '');
+    assert.deepEqual(v.suggestions, []);
+    assert.equal(calls[0].questions.q.type, 'noul');
+  });
+
+  it('choice answer -> toVerdict maps to needs_revision (pass derived false)', async () => {
+    const { jevProvider } = jevStub({ type: 'choice', choice: 'billing', probabilities: {}, confidence: 0.9 });
+    const v = await new Evaluator({ jevProvider }).evaluate('route it', 'a ticket', {
+      jev: {
+        question: { type: 'choice', instructions: 'route', criteria: { billing: 'x', technical: 'y' } },
+        toVerdict: (a) => (a.choice === 'billing' ? 'needs_revision' : 'satisfied'),
+      },
+    });
+    assert.equal(v.status, 'needs_revision');
+    assert.equal(v.pass, false);
+  });
+
+  it('score answer -> toVerdict maps to failed, critique falls back to the contract string', async () => {
+    const { jevProvider } = jevStub({ type: 'score', score: 0, legend: {}, probabilities: {}, confidence: 0.9 });
+    const v = await new Evaluator({ jevProvider }).evaluate('rate it', 'meh', {
+      jev: {
+        question: { type: 'score', instructions: 'rate', criteria: ['low', 'mid', 'high'] },
+        toVerdict: () => 'failed',
+      },
+      contract: 'MUST be high quality',
+    });
+    assert.equal(v.status, 'failed');
+    assert.equal(v.pass, false);
+    assert.equal(v.score, null);
+    assert.equal(v.critique, 'MUST be high quality');
+  });
+
+  it('per-call opts.jevProvider overrides the constructor jevProvider', async () => {
+    const ctorStub = jevStub({ type: 'noul', noul: 0.1 });
+    const callStub = jevStub({ type: 'noul', noul: 0.9 });
+    const v = await new Evaluator({ jevProvider: ctorStub.jevProvider }).evaluate('g', 'r', {
+      jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: (a) => (a.noul >= 0.5 ? 'satisfied' : 'failed') },
+    }, { jevProvider: callStub.jevProvider });
+    assert.equal(v.status, 'satisfied', 'the per-call override provider answered, not the constructor one');
+    assert.equal(ctorStub.calls.length, 0);
+    assert.equal(callStub.calls.length, 1);
+  });
+
+  it('throws ValidationError (type named, value NOT leaked) when toVerdict returns a non-status', async () => {
+    const { jevProvider } = jevStub({ type: 'noul', noul: 0.5 });
+    await assert.rejects(
+      () => new Evaluator({ jevProvider }).evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => ({ secret: 'DO_NOT_LEAK_9931' }) },
+      }),
+      (e) => e instanceof ValidationError && /must return .*got an object/.test(e.message) && !/DO_NOT_LEAK_9931/.test(e.message),
+    );
+  });
+  it('throws ValidationError when toVerdict returns a boolean (not a status string)', async () => {
+    const { jevProvider } = jevStub({ type: 'noul', noul: 0.5 });
+    await assert.rejects(
+      () => new Evaluator({ jevProvider }).evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => true },
+      }),
+      (e) => e instanceof ValidationError && /got a boolean/.test(e.message),
+    );
+  });
+  it('throws ValidationError when toVerdict returns an unrecognized string (e.g. "yes")', async () => {
+    const { jevProvider } = jevStub({ type: 'noul', noul: 0.5 });
+    await assert.rejects(
+      () => new Evaluator({ jevProvider }).evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => 'yes' },
+      }),
+      (e) => e instanceof ValidationError && /got a string/.test(e.message),
+    );
+  });
+  it('throws ValidationError when jev criteria has no toVerdict function', async () => {
+    const { jevProvider } = jevStub({ type: 'noul', noul: 0.5 });
+    await assert.rejects(
+      () => new Evaluator({ jevProvider }).evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' } },
+      }),
+      ValidationError,
+    );
+  });
+
+  it('forwards onLlmResult RE-TAGGED kind:"evaluate" (not classify)', async () => {
+    const { jevProvider } = jevStub({ type: 'noul', noul: 0.9 }, { inputTokens: 42, outputTokens: 3 });
+    const seen = [];
+    await new Evaluator({ jevProvider }).evaluate('g', 'r', {
+      jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => 'satisfied' },
+    }, { onLlmResult: (p) => seen.push(p) });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].kind, 'evaluate');
+    assert.deepEqual(seen[0].usage, { inputTokens: 42, outputTokens: 3 });
+    assert.equal(seen[0].model, 'jev-1.13.0');
+  });
+
+  it('propagates a HaltError thrown by classify()\'s onLlmResult hook, clean (never swallowed)', async () => {
+    const jevProvider = {
+      async classify(state, questions, opts) {
+        // Mirrors the real JevProvider: awaits the hook with no try/catch, so a HaltError propagates.
+        if (typeof opts.onLlmResult === 'function') {
+          await opts.onLlmResult({ usage: { inputTokens: 1, outputTokens: 1 }, model: 'jev-1.13.0' });
+        }
+        return { model: 'jev-1.13.0', answers: { q: { type: 'noul', noul: 0.9 } } };
+      },
+    };
+    await assert.rejects(
+      () => new Evaluator({ jevProvider }).evaluate('g', 'r', {
+        jev: { question: { type: 'noul', instructions: 'x' }, toVerdict: () => 'satisfied' },
+      }, { onLlmResult: () => { throw new HaltError('budget', { rule: 'maxCostUsd' }); } }),
+      (err) => err instanceof HaltError && err.rule === 'maxCostUsd',
+    );
   });
 });
 

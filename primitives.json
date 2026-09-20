@@ -175,7 +175,7 @@
     {
       "name": "Evaluator",
       "category": "evaluation",
-      "when": "you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, or with a tool-running critic that exercises the live artifact",
+      "when": "you need to judge an output against a goal or contract — deterministically (predicate), by LLM rubric, with a tool-running critic that exercises the live artifact, or by a cheap calibrated classifier (jev)",
       "import": "import { Evaluator } from 'bare-agent'",
       "signature": "new Evaluator(options?: EvaluatorOptions)",
       "fails": "never throws for a bad grade — returns a Verdict {status: satisfied|needs_revision|failed}; a provider HaltError propagates clean. Judge tokens forward via onLlmResult.",
