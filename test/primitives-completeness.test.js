@@ -32,7 +32,7 @@ const EXCLUDED = new Set([
   'BareAgentError', 'ProviderError', 'ToolError', 'TimeoutError',
   'ValidationError', 'CircuitOpenError', 'HaltError',
   // Provider short-aliases: same class already manifested under `<X>Provider`.
-  'Anthropic', 'OpenAI', 'Gemini', 'Ollama', 'CLIPipe', 'Fallback',
+  'Anthropic', 'OpenAI', 'Gemini', 'Ollama', 'CLIPipe', 'Fallback', 'Jev',
   // Calibration test-harness surface: `calibrate` is the primitive; these are its fixtures/helpers.
   'CALIBRATION_CASES', 'INJECTION_BATTERY', 'scoreCase', 'gradeRun', 'constantHonored',
   // Neutral-unit converters: the SEAMS (unitAssembler/unitTrimmer/harvestKey) are the primitives.
