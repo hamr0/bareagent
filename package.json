@@ -102,7 +102,8 @@
     "build:types": "tsc",
     "build:primitives": "node scripts/gen-primitives.mjs",
     "check:primitives": "node scripts/gen-primitives.mjs --check",
-    "prepublishOnly": "npm run build:primitives && npm run build:types"
+    "prepublishOnly": "npm run build:primitives && npm run build:types",
+    "check:lockfile": "node scripts/check-lockfile.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
