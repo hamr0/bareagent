@@ -36,6 +36,9 @@ const CLASSIFY_PATH = '/v1/systemone';
 const DEFAULT_MODEL = 'jev-latest';
 const QUESTION_TYPES = new Set(['noul', 'choice', 'score']);
 const JEV_USAGE_KEYS = ['input_tokens', 'output_tokens'];
+// Reserved key hardening uses to carry the preamble on an object-shaped `instructions` — a
+// caller-supplied key of the same name would silently overwrite the preamble on spread.
+const HARDENING_KEY = '__hardening__';
 
 // Injection hardening (default on): prepended to each question's `instructions` before the
 // request is sent, so an attack embedded in `state` (untrusted) can't hijack the classifier's
@@ -73,7 +76,7 @@ class JevProvider {
    * @param {number} [options.deadlineMs] - Total call-duration deadline (ms); 0 disables (default).
    * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [options.rates] - Per-1K-token USD rates for authoritative pricing (Jev: `{ in: 0.042/1000, out: 0 }`).
    * @param {boolean} [options.exposeErrorBody=false] - Include the raw error body on a ProviderError (default off).
-   * @param {boolean} [options.harden=true] - Prepend a defensive preamble to each question's instructions, treating `state` as untrusted data and resisting embedded role/label-override attempts. Overridable per-call via `opts.harden`.
+   * @param {boolean} [options.harden=true] - Wrap each question's instructions with a defensive preamble (prefixed for a string, prepended as element 0 for an array, or added under a reserved key for an object), treating `state` as untrusted data and resisting embedded role/label-override attempts. Overridable per-call via `opts.harden`.
    */
   constructor(options = {}) {
     this.apiKey = options.apiKey;
@@ -89,7 +92,7 @@ class JevProvider {
   /**
    * Classify `state` against one or more typed `questions`. See the class doc for the primitive tags.
    * @param {string|object|any[]} state - The shared input all questions judge (Jev's `state`).
-   * @param {Record<string, {type: 'noul'|'choice'|'score', instructions: string, criteria?: any}>} questions - Keyed questions; each judged independently against `state`.
+   * @param {Record<string, {type: 'noul'|'choice'|'score', instructions: string|object|any[], criteria?: any}>} questions - Keyed questions; each judged independently against `state`.
    * @param {object} [opts]
    * @param {string} [opts.model] - Override the model for this call.
    * @param {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [opts.rates] - Override rates for this call.
@@ -139,7 +142,14 @@ class JevProvider {
       const q = questions[id];
       if (!isPlainObject(q)) throw invalid(`question "${id}" must be an object`);
       if (!QUESTION_TYPES.has(q.type)) throw invalid(`question "${id}" has invalid type`, { type: q.type });
-      if (typeof q.instructions !== 'string' || !q.instructions) throw invalid(`question "${id}" missing instructions`);
+      const ins = q.instructions;
+      const insValid = (typeof ins === 'string' && ins.length > 0) ||
+        (Array.isArray(ins) && ins.length > 0) ||
+        (isPlainObject(ins) && Object.keys(ins).length > 0);
+      if (!insValid) throw invalid(`question "${id}" missing instructions`);
+      if (isPlainObject(q.instructions) && Object.prototype.hasOwnProperty.call(q.instructions, HARDENING_KEY)) {
+        throw invalid(`question "${id}" may not use reserved instructions key`, { key: HARDENING_KEY });
+      }
       if (q.type === 'choice') {
         if (!isPlainObject(q.criteria) || Object.keys(q.criteria).length < 2) {
           throw invalid(`choice "${id}" needs a criteria object of >=2 {key: description}`);
@@ -156,16 +166,29 @@ class JevProvider {
   }
 
   /**
-   * Build a hardened COPY of `questions` (new object, new nested question objects) with
-   * {@link HARDENING_PREAMBLE} prepended to each `instructions` string. Never mutates the
-   * caller's `questions` argument or its nested objects. @param {Record<string, any>} questions @returns {Record<string, any>}
+   * Build a hardened COPY of `questions` (new object, new nested question objects, new
+   * nested instructions containers) with {@link HARDENING_PREAMBLE} woven into each
+   * `instructions`, shape-aware so a structured form is wrapped rather than stringified:
+   * a string gets the preamble prefixed, an array gets it prepended as element 0, and an
+   * object gets it added under the reserved {@link HARDENING_KEY}. Never mutates the
+   * caller's `questions` argument or its nested objects/arrays.
+   * @param {Record<string, any>} questions @returns {Record<string, any>}
    */
   _hardenQuestions(questions) {
     /** @type {Record<string, any>} */
     const hardened = {};
     for (const id of Object.keys(questions)) {
       const q = questions[id];
-      hardened[id] = { ...q, instructions: HARDENING_PREAMBLE + q.instructions };
+      const ins = q.instructions;
+      let hardenedIns;
+      if (typeof ins === 'string') {
+        hardenedIns = HARDENING_PREAMBLE + ins;
+      } else if (Array.isArray(ins)) {
+        hardenedIns = [HARDENING_PREAMBLE, ...ins];
+      } else {
+        hardenedIns = { [HARDENING_KEY]: HARDENING_PREAMBLE, ...ins };
+      }
+      hardened[id] = { ...q, instructions: hardenedIns };
     }
     return hardened;
   }
