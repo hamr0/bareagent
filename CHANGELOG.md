@@ -2,6 +2,30 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.46.4] - 2026-09-21
+
+### Fixed
+
+- **Primitives completeness test resolves exports via package name, not
+  hardcoded src paths** — the test enumerated public exports by requiring
+  hardcoded src barrel paths (`./index.js`, `./src/providers.js`, …), bypassing
+  `package.json` `"exports"`. A broken exports map — a subpath whose target
+  file is missing or renamed — was NOT caught: a consumer's
+  `require('bare-agent/providers')` could break while the test stayed green
+  (the src file still existed). The entry points are now derived from
+  `package.json` `"exports"` and resolved through the package name (Node
+  self-referencing), so the test exercises the same resolution a real consumer
+  does; a dedicated test now asserts every export subpath resolves, and the
+  hand-maintained barrel-path list is removed. Testing-only change — no
+  runtime/library behavior change.
+
+### Docs
+
+- **Parked Agent-as-MCP exploration log** — added a design-discussion log
+  (`docs/logs/agent-as-mcp-exploration.md`) recording a considered-and-parked
+  idea; nothing built. The interesting part is harness work, not protocol
+  work, and the local case is already covered by `spawn`/`recurse`.
+
 ## [0.46.3] - 2026-09-20
 
 ### Docs
