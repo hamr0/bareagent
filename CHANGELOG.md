@@ -2,6 +2,34 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.46.5] - 2026-09-21
+
+### Tests
+
+- **Primitives completeness test resolves DATA exports (`primitives.json`,
+  `package.json`) through the package name too** — the v0.46.4 fix resolved
+  CODE export subpaths through the package name but filtered out the two
+  DATA exports (no code symbols to enumerate), so a broken exports-map entry
+  for `./primitives.json` (target renamed/missing) stayed uncaught: a
+  consumer's `require('bare-agent/primitives.json')` could break while the
+  existing manifest tests kept passing, since they read the file via a root
+  path instead of through the package's exports map. Added a dedicated test
+  that requires each data export specifier through the package name and
+  asserts the loaded `primitives.json` has the real `{package, primitives}`
+  shape with a non-empty array, plus a mandatory fixed-key assertion for
+  `exports['./primitives.json']` and `exports['./package.json']` (a
+  derived-keys loop alone can't catch a renamed exports key). Mutation-proved
+  against three red cases. Testing-only — no runtime/library behavior change.
+
+### Docs
+
+- **README "For AI agents" primitives.json quick-menu** — added an
+  agent-facing entry point pointing at `primitives.json` as the
+  machine-readable menu for tool-calling automation, linking on to
+  `bareagent.context.md` and the docs for depth.
+- **Docs index rebuild** — refreshed `docs/index.md` (logs 1→2 rows, decisions
+  log entry for Jev) to reflect the current doc set.
+
 ## [0.46.4] - 2026-09-21
 
 ### Fixed
