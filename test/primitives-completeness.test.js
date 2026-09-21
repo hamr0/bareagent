@@ -31,6 +31,14 @@ const SELF_REF_SPECIFIERS = EXPORT_KEYS.map(
   (k) => (k === '.' ? pkg.name : pkg.name + k.slice(1))
 );
 
+// The DATA exports the JS loop above deliberately skips (their contents are
+// not code symbols to enumerate) — derived from package.json "exports", not
+// a second hardcoded list, so a new data export is picked up automatically.
+const DATA_EXPORT_KEYS = Object.keys(pkg.exports).filter(
+  (k) => k === './package.json' || k === './primitives.json'
+);
+const DATA_SELF_REF_SPECIFIERS = DATA_EXPORT_KEYS.map((k) => pkg.name + k.slice(1));
+
 // Deliberate exclusions — WHY each is out (see the PRD decision + session notes):
 const EXCLUDED = new Set([
   // Bare error classes: you catch them, you don't construct them as a capability —
@@ -80,6 +88,39 @@ test('every package.json export subpath resolves through the package name', () =
   assert.deepStrictEqual(failures, [],
     `These package.json "exports" subpaths do not resolve via the package name — ` +
     `the exports map is broken for a real consumer even though the src file may exist:\n  ${failures.join('\n  ')}`);
+});
+
+test('data exports resolve through the package name and load', () => {
+  // The JS enumeration loop above filters OUT './package.json' and
+  // './primitives.json' (they carry no code symbols to enumerate) — which
+  // means a broken exports-map mapping for either one goes uncaught while
+  // the manifest tests below stay green, since THEY read primitives.json via
+  // a root path (`require(path.join(ROOT, 'primitives.json'))`), never
+  // through the exports map. A real consumer, though, does
+  // `require('bare-agent/primitives.json')` — resolved via the package name,
+  // exactly like the code subpaths above. This test closes that gap.
+  const failures = [];
+  for (let i = 0; i < DATA_EXPORT_KEYS.length; i++) {
+    try {
+      require(DATA_SELF_REF_SPECIFIERS[i]);
+    } catch (e) {
+      failures.push(
+        `${DATA_EXPORT_KEYS[i]} (require('${DATA_SELF_REF_SPECIFIERS[i]}')): ${e.message} — ` +
+        `does not resolve via the package name — exports map broken for a real consumer`
+      );
+    }
+  }
+  assert.deepStrictEqual(failures, []);
+  // No shape assertion here: self-referencing resolves to the SAME cached
+  // object the root-path require returns (Node keys require-cache by resolved
+  // absolute path), so `manifest is well-formed` / `manifest shape is exactly
+  // {package, primitives}` already cover the content. The renamed-key case is
+  // owned by the config-guard test below (a keys-derived loop can't catch it).
+});
+
+test('data export config: package.json and primitives.json map to themselves', () => {
+  assert.strictEqual(pkg.exports['./package.json'], './package.json');
+  assert.strictEqual(pkg.exports['./primitives.json'], './primitives.json');
 });
 
 test('exclusion allow-list has no stale entries', () => {
