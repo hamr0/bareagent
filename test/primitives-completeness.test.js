@@ -19,11 +19,17 @@ const { execFileSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const manifest = require(path.join(ROOT, 'primitives.json'));
 const manifested = new Set(manifest.primitives.map((p) => p.name));
+const pkg = require(path.join(ROOT, 'package.json'));
 
-// Every public entry point. Keep in sync with package.json "exports".
-const BARRELS = ['./index.js', './src/providers.js', './src/stores.js',
-  './src/transports.js', './src/tools.js', './src/mcp.js',
-  './src/bareguard-adapter.js', './src/errors.js'];
+// Every public entry point, DERIVED from package.json "exports" (no hand-sync
+// needed — resolved through the package name so a broken exports map target
+// is caught here too, not just a broken src path).
+const EXPORT_KEYS = Object.keys(pkg.exports).filter(
+  (k) => k !== './package.json' && k !== './primitives.json'
+);
+const SELF_REF_SPECIFIERS = EXPORT_KEYS.map(
+  (k) => (k === '.' ? pkg.name : pkg.name + k.slice(1))
+);
 
 // Deliberate exclusions — WHY each is out (see the PRD decision + session notes):
 const EXCLUDED = new Set([
@@ -43,9 +49,8 @@ const EXCLUDED = new Set([
 
 function allExports() {
   const names = new Set();
-  for (const b of BARRELS) {
-    let mod;
-    try { mod = require(path.join(ROOT, b)); } catch { continue; }
+  for (const specifier of SELF_REF_SPECIFIERS) {
+    const mod = require(specifier);
     for (const n of Object.keys(mod)) names.add(n);
   }
   return names;
@@ -57,6 +62,24 @@ test('every public export is manifested or explicitly excluded', () => {
     `These exports are neither in primitives.json nor on the exclusion allow-list. ` +
     `Add @when/@fails/@example to each (and run \`npm run build:primitives\`), ` +
     `or add it to EXCLUDED here with a reason:\n  ${missing.join('\n  ')}`);
+});
+
+test('every package.json export subpath resolves through the package name', () => {
+  // Self-referencing (`require('bare-agent/x')` from inside the package) resolves
+  // via this package's OWN "exports" — Node never consults node_modules for it —
+  // so there is no shadowing-install risk to guard against; it always exercises
+  // the working tree's exports map, which is exactly what a broken map breaks.
+  const failures = [];
+  for (let i = 0; i < EXPORT_KEYS.length; i++) {
+    try {
+      require(SELF_REF_SPECIFIERS[i]);
+    } catch (e) {
+      failures.push(`${EXPORT_KEYS[i]} (require('${SELF_REF_SPECIFIERS[i]}')): ${e.message}`);
+    }
+  }
+  assert.deepStrictEqual(failures, [],
+    `These package.json "exports" subpaths do not resolve via the package name — ` +
+    `the exports map is broken for a real consumer even though the src file may exist:\n  ${failures.join('\n  ')}`);
 });
 
 test('exclusion allow-list has no stale entries', () => {
