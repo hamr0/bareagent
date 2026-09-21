@@ -60,6 +60,27 @@ and show me the wiring code.
 
 ---
 
+## For AI agents — the menu
+
+Building tool-calling automation on top of bare-agent? Read **`primitives.json`** first. It's a compact, machine-readable menu of every building block — the fast path to *using* bare-agent without reading the docs: load it, pick a primitive, wire it. Each entry carries `when` to reach for it, its `import`, `signature`, `fails`, and a runnable `example`:
+
+```jsonc
+{
+  "name": "AnthropicProvider",
+  "category": "providers",
+  "when": "you want Claude models as the Loop's provider — native Messages API with opt-in prompt caching and thinking-block passthrough",
+  "import": "import { AnthropicProvider } from 'bare-agent/providers'",
+  "signature": "new AnthropicProvider(options?: AnthropicOptions)",
+  "fails": "…",
+  "example": "…"
+}
+// 51 entries across: providers · routing · retrieval · mcp · loop · memory · tools · skills · evaluation · hitl · resilience · governance · orchestration · …
+```
+
+Browse it on unpkg (`unpkg.com/bare-agent/primitives.json`) before you install, `require` it (`const menu = require('bare-agent/primitives.json')`), or point a tool at it. Generated from the source, so it never drifts.
+
+**Then go deeper:** `bareagent.context.md` (the complete contract — every option and the full API) and the rest of this README for the recipes.
+
 ## What's inside
 
 Every piece works alone — take what you need, ignore the rest. Two axes: **Act** (get work done) and **Verify** (check it, keep context clean), with **one gate** over both — plus **`recurse`**, an Act-side primitive big enough to earn its own spotlight below.
