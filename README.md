@@ -17,292 +17,62 @@
   <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
 </p>
 
-**Lightweight agent orchestration. Zero required deps — optional [bareguard](https://npmjs.com/package/bareguard) peer for single-gate governance.**
+**Lightweight agent primitives. Zero required deps — optional [bareguard](https://npmjs.com/package/bareguard) peer for one-gate governance.**
 
-Lightweight enough to understand completely. Complete enough to not reinvent wheels. Not a framework, not 50,000 lines of opinions — just composable building blocks for agents. The core imports nothing; when you want governance, wire bareguard and every tool call traverses one policy hook, one audit log, one budget cap.
+bare-agent started as primitives for building agents by hand: your code is the deterministic body, an LLM call sits in wherever you need judgment — the LangChain / CrewAI / AutoGen job, provider-agnostic, without a framework.
 
-## Quick start
+LLMs got good at wiring things themselves, so the same primitives are now offered as tool calls too: the model wires them up, bare-agent runs the loop, retries, budgets, and governance underneath. It's what [bareloop](https://github.com/hamr0/bareloop) and [fwdloop](https://github.com/hamr0/fwdloop) run on.
 
-```bash
-npm install bare-agent
-```
+Some things an LLM can't judge about its own work. Building a harness or an external arbiter? Every primitive is listed in `primitives.json` — when to use it, import, signature, failure modes, a runnable example — plus a decisive return-time `judge` and the Jev gut-check tier.
 
-**1. Give your AI assistant the integration guide**
+## Start here
 
-```
-Read bareagent.context.md from node_modules/bare-agent/bareagent.context.md
-```
+- **Building by hand** → `npm install bare-agent`, then hand your assistant `bareagent.context.md` (ships in the package — the complete contract).
+- **AI agent / tool-calling** → read `primitives.json` first (`unpkg.com/bare-agent/primitives.json` before you install, or `require('bare-agent/primitives.json')`); generated from source, never drifts.
+- **Harness / judge builder** → `primitives.json` + `judge` + Jev + wire bareguard.
 
-This single file contains component selection, wiring recipes, API signatures, and gotchas — everything an agent needs to use the library correctly.
+## Fast gut check — Jev
 
-**2. Describe what you want**
+An LLM call is slow, deliberate thinking (System 2). Jev, from TypeSafe, is the fast gut check (System 1): a classifier that returns a typed decision with a calibrated probability — roughly 200× faster and 400× cheaper than an LLM, per TypeSafe. bare-agent's `JevProvider` covers all three shapes — **yes/no**, **pick-one**, **score** — so your automation calls it like any other step: act when it's confident, escalate when it isn't. Injection-hardened by default; also usable as the `jev` check in the Evaluator.
 
-```
-I need an agent that:
-- Takes a user goal and breaks it into steps
-- Runs steps in parallel where possible
-- Retries failed steps twice
-- Streams progress as JSONL events
+## Break big tasks down — RLM
 
-Use bare-agent. The integration guide is in bareagent.context.md.
-```
-
-That's it. The context doc is structured for LLM consumption — your agent reads it once and knows how to wire every component.
-
-**Not sure what you need?** Paste this into any AI assistant:
-
-```
-I want to build an agent using bare-agent. Read the integration guide at
-node_modules/bare-agent/bareagent.context.md, then ask me up to 5 questions
-about what I need. Based on my answers, tell me which components to use
-and show me the wiring code.
-```
-
----
-
-## For AI agents — the menu
-
-Building tool-calling automation on top of bare-agent? Read **`primitives.json`** first. It's a compact, machine-readable menu of every building block — the fast path to *using* bare-agent without reading the docs: load it, pick a primitive, wire it. Each entry carries `when` to reach for it, its `import`, `signature`, `fails`, and a runnable `example`:
-
-```jsonc
-{
-  "name": "AnthropicProvider",
-  "category": "providers",
-  "when": "you want Claude models as the Loop's provider — native Messages API with opt-in prompt caching and thinking-block passthrough",
-  "import": "import { AnthropicProvider } from 'bare-agent/providers'",
-  "signature": "new AnthropicProvider(options?: AnthropicOptions)",
-  "fails": "…",
-  "example": "…"
-}
-// 51 entries across: providers · routing · retrieval · mcp · loop · memory · tools · skills · evaluation · hitl · resilience · governance · orchestration · …
-```
-
-Browse it on unpkg (`unpkg.com/bare-agent/primitives.json`) before you install, `require` it (`const menu = require('bare-agent/primitives.json')`), or point a tool at it. Generated from the source, so it never drifts.
-
-**Then go deeper:** `bareagent.context.md` (the complete contract — every option and the full API) and the rest of this README for the recipes.
+`recurse` brings Recursive Language Models (RLM) to your code in one call: split a hard task into smaller ones, run each in a fresh context window, check the result, and stitch it back together. The model decides when to split (or you force a fixed count), and over a large set of documents it picks the path by question shape — scan everything for "how many", search for a needle. Totals are counted by code, and a dead worker comes back `incomplete`, never a faked pass. Cost is open by design: run it under a budget cap (bareguard) or set `maxDepth: 1`.
 
 ## What's inside
 
-Every piece works alone — take what you need, ignore the rest. Two axes: **Act** (get work done) and **Verify** (check it, keep context clean), with **one gate** over both — plus **`recurse`**, an Act-side primitive big enough to earn its own spotlight below.
+Every piece works alone — take what you need, ignore the rest. No required deps — the core imports nothing.
 
-### Act — get work done
-
-| Component | What it does |
-|---|---|
-| **Loop** | Think → act → observe until done. Any LLM, your tools, per-run cost. Opt-in seams: `policy` (govern), `assemble` (context engineering), `trim` (bound the transcript) |
-| **Planner** | Break a goal into a step DAG. Cached |
-| **assessComplexity** | Rate a goal `simple`→`critical` from its text — no LLM. Gates whether to plan |
-| **runPlan** | Run plan steps in parallel waves. Dependency-aware, per-step retry |
-| **recurse** | RLM decompose→fan-out→verify→synthesize in one call. Model-driven (`spawn_child`) or forced fan-out (`count`); `retrieval:'scan'` answers "how many / all" over a corpus by scanning every slice and code-counting — never a faked pass (honest `{incomplete, missingSlices}`) |
-| **Memory** | Persist + recall across sessions via a swappable `Store` — zero-dep JSON, SQLite, or [litectx](https://npmjs.com/package/litectx) in a one-line swap |
-| **StateMachine** | Task lifecycle: `pending → running → done / failed / waiting / cancelled` |
-| **Scheduler** | Cron or relative triggers. Jobs survive restarts |
-| **Checkpoint** | Human approval gate — bring your own transport |
-| **Spawn** | Fork a child agent. One shared audit log + budget |
-| **Defer** | Queue an action for a waker to fire later. Governed when emitted *and* when it fires |
-| **Retry · CircuitBreaker · Fallback** | Resilience: backoff with jitter, fail-fast, provider failover |
-| **Stream · Errors** | Structured JSONL events; typed error hierarchy |
-| **Browsing · Mobile · Shell** | Hands: web ([barebrowse](https://npmjs.com/package/barebrowse)), Android + iOS ([baremobile](https://npmjs.com/package/baremobile)), cross-platform shell — library tools or token-thrifty CLI sessions |
-| **MCP Bridge** | Auto-discover MCP servers from your IDE configs; expose as tools (bulk or meta-tools) |
-
-### Verify — check the work, keep context clean *(the eval-assist suite)*
-
-| Component | What it does |
-|---|---|
-| **Evaluator + refine** | Judge output by `predicate` (no tokens), `rubric` (an isolated adversarial grader), `agentic` (a critic that exercises the live artifact), or `jev` (a cheap calibrated classifier tier). `refine` is the bounded generate→evaluate→regenerate loop |
-| **SkillRegistry** | Surface skills on demand: one meta-tool catalog; activating a skill injects its instructions and unlocks its tools |
-| **stash** | Compact finished work out of the live window (restorable), or auto-fold the middle under token pressure |
-
-### Recurse — break a hard task into a tree *(the RLM primitive)*
-
-`recurse(task, ctx, opts)` does **decompose → fan-out → verify → synthesize** in one call — Recursive Language Models as a single import, composed *around* the Loop (never a new engine). The default is **model-driven**: the worker is handed a `spawn_child` tool and decides whether to split, bounded by depth + bareguard (no second guard layer). Forced fan-out (`count` / `mode:'fanout'`) and data-driven width (`mode:'partition'`, measured from a corpus) are opt-in. Give workers a stance with `opts.persona` (prepended to every worker, carries down the tree, deliberately kept out of the isolated verifier), and tell them *where they are* with `opts.context` (a read-only paths/cwd blob threaded to every worker so a sliced child can locate its artifact — facts, not a stance). For a leaf that should self-correct, pass `opts.refineLeaf` (opt-in): a definite leaf becomes a bounded generate→sense→regenerate loop driven by *your* deterministic sensor (test/compile/lint — one that judges the *returned* result, never a worker side-effect it could game), feeding the gap back (with escalating temperature on models that accept it; on a temperature-fixed model like `claude-sonnet-5` the gap critique carries recovery, and the receipt records the effective temps). On a temperature-fixed model, `refineLeaf.rejectedBuffer` adds a second lever — it feeds the model's own prior *failed attempts* back verbatim ("write something structurally different"), the directed-diversity complement to temperature's random diversity (adaptive by default; the two are antagonistic, so it holds temperature flat when it engages). A *broken* arbiter — a sensor or a caller `evaluate` that throws or returns a malformed verdict — is named, never blamed on the model: the node stops at the first broken close and returns `{ incomplete, blocker: 'broken-sensor' | 'broken-verifier' }` with the model's last output preserved. The headline guarantee: **aggregation is code, never a model-stated number**, and a dead worker or exhausted guard returns an honest `{ incomplete, missingSlices }` — never a faked pass.
-
-Over a corpus, context reaches a worker as a **handle routed by question shape** (`opts.retrieval`):
-
-| `retrieval` | Use it for | How |
+| Area | Component | What it does |
 |---|---|---|
-| `'scan'` *(default over a corpus)* | "how many / all / count" | scans every slice, LLM-judges each, **code-counts** the union — the only path that can't silently undercount |
-| `'search'` | find a needle (few matches) | litectx `recall` handle tool, embeddings on — **cannot count** |
-| `'exact'` | rule / exact-term match | code-side AND-filter, embeddings off |
-| `'tools'` | mixed task (needle *and* count) | offers all three; the worker picks per sub-query by tool description |
+| Act | Loop | think → act → observe until done, any provider, opt-in policy/assemble/trim seams |
+| Act | Planner + runPlan | break a goal into a step DAG, run steps in parallel waves |
+| Act | assessComplexity | rate a goal from its text alone, no LLM — gates whether to plan |
+| Act | recurse | RLM in one call — decompose → fan-out → verify → synthesize (see above) |
+| Act | Memory | persist and recall across sessions — JSON, SQLite, or litectx in a one-line swap |
+| Act | StateMachine | task lifecycle: pending → running → done / failed / waiting / cancelled |
+| Act | Scheduler | cron or relative triggers, survives restarts |
+| Act | Checkpoint | human approval gate, bring your own transport |
+| Act | Spawn | fork a child agent, sharing one audit log and budget |
+| Act | Defer | queue an action for a waker to fire later, governed on emit and on fire |
+| Act | Retry · CircuitBreaker · Fallback | backoff with jitter, fail-fast, provider failover |
+| Act | Stream · Errors | structured JSONL events, typed error hierarchy |
+| Verify | Evaluator + refine | judge output by predicate, rubric, an agentic critic, or the Jev tier; refine loops generate → evaluate → regenerate |
+| Verify | judge | a decisive return-time check of the result against the original request |
+| Verify | remember | distill durable facts out of a finished run |
+| Verify | SkillRegistry | surface extra tools on demand instead of loading them all upfront |
+| Verify | stash | compact finished work out of the live context window, restorable |
+| Verify | JevProvider | fast, cheap, calibrated yes/no · pick-one · score decisions — the System-1 gate (see above) |
+| Govern | wireGate → bareguard | one policy, one audit log, one budget cap over every call; stops the spin on repeated denials or a stuck call |
+| Hands | Browsing · Mobile · Shell · MCP Bridge | barebrowse, baremobile, cross-platform shell, and auto-discovered MCP servers — all as tools |
+| Providers | OpenAI-compatible, Anthropic, Gemini, Ollama, CLIPipe, Fallback | swap freely, or bring your own with one `generate` method; CLIPipe runs the loop over a CLI subscription instead of the metered API |
 
-```js
-const { recurse } = require('bare-agent');
+## It tells you the truth
 
-// Honest count over a corpus: scans every slice, LLM-judges each, CODE-counts the union.
-const { result } = await recurse(
-  'How many of these support tickets are billing disputes?',
-  { provider },
-  { corpus: tickets /* {id,text}[] */, retrieval: 'scan' },
-);
-console.log(result.count, result.matchedIds);   // a code-derived count + the ids that back it
-```
-
-> **⚠️ Cost is open by design — wire a cap.** `recurse()` adds no intrinsic total-work limit. On the model-driven default a node can spawn up to ~100 children per level, each recursing to `maxDepth` (default 3), so **token / $ spend compounds and is bounded only by your gate** — not by recurse. Run it **with bareguard** (`ctx.policy`, which enforces depth/budget/call caps) **or with some token/USD cap** for any non-trivial or untrusted task; ungoverned, a weak model that over-decomposes *will* burn tokens. For a hard local brake without a gate, set `maxDepth: 1` (flat, no nesting). The forced modes (`mode:'fanout'` / `'partition'`) are bounded by a deterministic count + concurrency cap; the open path is the model-driven default.
-
-**Govern — one gate over both axes.** `wireGate(gate)` routes every LLM + tool call through one bareguard policy + audit + budget. Denied tools never reach the model; halts (turn / budget / content caps) exit cleanly. A plain deny stays advisory (the model can pivot to an allowed tool), but the Loop short-circuits a *spin* — `maxConsecutiveDenials` consecutive denials of the same action (default 3) stop the run with `error:'denied:<tool>'` instead of burning the budget to the cap; under `recurse` that surfaces as `{ incomplete, blocker:'governance-deny' }`. The same bound covers a tool that keeps *failing*: `maxIdenticalToolErrors` (default 3) stops a model re-sending a byte-identical call that cannot succeed, with `error:'stuck:<tool>'`. `require('bare-agent/bareguard')`
-
-**Providers:** OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, LM Studio), Anthropic, Gemini (native), Ollama, CLIPipe, Fallback — or bring your own (one `generate` method). All return the same shape; swap freely. Usage including prompt-cache tiers is normalized, so `result.metrics` reports honest cumulative tokens + cost — and `null`, never a silent `0`, for a model it couldn't price. A model that rejects a non-default `temperature` (e.g. `claude-sonnet-5`, OpenAI o1/gpt-5-class return a `400`) is handled gracefully — the provider drops the param and retries once rather than failing the call, surfacing `temperatureDropped` so a caller can report the effective value. **CLIPipe can drive a full agentic Loop — tools and turns — over a CLI *subscription* instead of the metered API.** Two modes, chosen by cost: `toolProtocol:'claude-mcp'` (v0.33.0, NATIVE — the CLI runs its own session and calls your tools over an MCP bridge; the gate, spin guards, and turn bound ride the provider, and it caches session-side — ~$0.006/turn) is the default for the Claude CLI, while `toolProtocol:'claude'` (v0.32.0, schema-validated emulation with the Loop keeping the cycle) stays right for a CLI with no MCP channel. A capable model is enforced upfront (sonnet-class+ for tools; Claude CLI for now).
-
-**The run tells you the truth about what happened on the wire.** Every provider reports **why** generation ended (`stopReason`, normalized across all of them and surfaced on **every** `Loop.run()` return), so a round the API **cut off at the token cap** can no longer masquerade as a finished answer: it returns `error: 'truncated:max_tokens'` with the partial text preserved, instead of a silent `error: null` (BA-6). Its tool calls are **refused, never executed** — a *complete* tool call always arrives tagged `tool_use`, so one riding a truncated round was cut off mid-generation with arguments missing, which is exactly how a truncated `shell_write` can zero a file. The same honesty now covers **every** non-clean terminal signal (BA-13): a safety `refusal` returns `error: 'refusal'` and a blown context window returns `error: 'context_exceeded'` (both were previously laundered into an empty success), while a resumable `pause_turn` makes the loop resume rather than terminate. `error` is the sole success signal; a bound firing preserves the model's work rather than discarding it (BA-5).
-
-**Thinking blocks survive the round-trip.** `claude-sonnet-5` and Opus 4.7+ run adaptive thinking **by default** — they return `thinking` blocks whether or not you ask — and Anthropic's contract is that those blocks come back **unchanged, signature included**, when a tool-use conversation continues. bare-agent used to drop every one, silently (the API returns 200 either way). They now ride the transcript on `Message.providerBlocks` and are replayed verbatim, with no flag to set. `new Anthropic({ thinking })` is a separate opt-in for pinning the mode or reaching `display`/`effort` — it does *not* enable thinking, which is already on. **This is a protocol/data-loss fix, not a capability one: a head-to-head with thinking fully preserved produced no better outcomes, and we say so rather than sell it (BA-7).**
-
-**Anthropic tool loops: turn on transcript caching.** Anthropic does **not** auto-cache, so by default a tool loop re-buys its entire growing transcript at full input price *every round*. `new Anthropic({ cacheMessages: true })` rolls a cache breakpoint forward each round — measured **$0.0753 → $0.0110 per round (6.8× cheaper)** in steady state on `claude-sonnet-5`; the 1.25× cache write is paid once. Caching pays for **re-sending, not growing** (fresh content still costs full price to write), and a destructive `trim` fold that rewrites the transcript *prefix* invalidates it — fold the middle, keep the head.
-
-**Tools:** Any function is a tool — REST, MCP, CLI, shell. Built-in web + mobile (optional).
-
-**Cross-language:** Run as a subprocess; talk JSONL over stdin/stdout from Python, Go, Rust, Ruby, or Java. Wrappers in [`contrib/`](contrib/README.md).
-
-**Deps:** none required — the core imports nothing. Optional peers: `bareguard >=0.9.0 <1.0.0` (governance), `better-sqlite3` (SQLite store); optional: `cron-parser`, `barebrowse`, `baremobile`, `wearehere`.
-
-This table is the map, not the manual — per-component wiring and API detail live in the [Integration Guide](bareagent.context.md) and [Usage Guide](docs/archive/usage-guide.md).
-
----
-
-## Recipes
-
-### Wire bareguard into Loop
-
-```js
-const { Gate } = require('bareguard');
-const { Loop, wireGate, defaultActionTranslator } = require('bare-agent');
-
-const gate = new Gate({
-  budget: { maxCostUsd: 0.50 },
-  limits: { maxToolRounds: 20 },                // bareguard 0.4.2+ — N tool rounds, LLM rounds bypass
-  audit:  { path: './audit.jsonl' },
-});
-await gate.init();
-
-const { policy, onLlmResult, onToolResult, filterTools } = wireGate(gate, {
-  // Optional: translate tool names → bareguard primitive types for bash/fs/net rules.
-  // bareguard 0.4.1+ reads args.command / args.path verbatim, so args passes through.
-  actionTranslator: (toolName, args, ctx) => {
-    if (toolName === 'shell_exec') return { type: 'bash', args, _ctx: ctx };
-    if (toolName === 'shell_read') return { type: 'read', args, _ctx: ctx };
-    if (toolName === 'shell_write') return { type: 'write', args, _ctx: ctx }; // gate by fs.writeScope
-    if (toolName === 'shell_edit')  return { type: 'edit',  args, _ctx: ctx }; // same fs.writeScope as write
-    return defaultActionTranslator(toolName, args, ctx);
-  },
-});
-const tools = await filterTools(myTools);      // drop tools denied by static policy
-
-const loop = new Loop({ provider, policy, onLlmResult, onToolResult });
-await loop.run([{ role: 'user', content: 'go' }], tools, { ctx: { userId: 42 } });
-```
-
-`onLlmResult` + `onToolResult` are what make `budget.maxCostUsd` actually cover token-heavy workloads — without them, budget only sees tool cost. `ctx` flows through to `gate.record` as `_ctx` for per-principal accounting.
-
-### Per-principal bypass (owner / admin role)
-
-Wrap the gate policy when a principal is trusted unconditionally:
-
-```js
-const { policy: gatePolicy } = wireGate(gate);
-
-const policy = async (toolName, args, ctx) => {
-  if (ctx?.role === 'owner') return true;       // bypass gate entirely
-  return gatePolicy(toolName, args, ctx);
-};
-
-new Loop({ provider, policy, onLlmResult, onToolResult });
-```
-
-Bypassing the gate also bypasses audit and budget — only do this for principals you trust unconditionally. For partial trust, use ctx-aware rules inside bareguard instead.
-
-### Custom deny strings (localize / strip prefix)
-
-```js
-const { policy } = wireGate(gate, {
-  formatDeny: (decision) => `Sorry — ${decision.reason || 'not allowed'}`,
-});
-```
-
-Halt-severity decisions bypass `formatDeny` (they throw `HaltError` and exit the loop without ever reaching the LLM).
-
-### Catch halts in your app
-
-```js
-const result = await loop.run(msgs, tools);
-if (result.error?.startsWith('halt:')) {
-  // budget cap, turn cap, or gate terminated. Inspect rule:
-  const rule = result.error.slice('halt:'.length);
-  // tell the user, schedule retry, escalate, etc.
-}
-```
-
-Halts also fire `loop:error` on the stream (`source: 'halt'`) and the `onError` callback (with a `HaltError` instance).
-
----
-
-## Examples
-
-Runnable scripts in [`examples/`](examples/) — each is self-contained and the file's top docstring documents flags and required env vars.
-
-| File | What it shows |
-|---|---|
-| [`with-bareguard.mjs`](examples/with-bareguard.mjs) | End-to-end Loop + bareguard wiring: budget cap, fs scope, bash allowlist, audit log, humanChannel. The canonical governed-loop reference. |
-| [`mcp-bridge-poc.js`](examples/mcp-bridge-poc.js) | Auto-discover MCP servers from your IDE configs and expose them as bareagent tools. First run writes `.mcp-bridge.json` (edit to deny tools). |
-| [`mcp-bridge-concurrent.js`](examples/mcp-bridge-concurrent.js) | Soak test: fan out concurrent `barebrowse_browse` calls against real domains (Amazon, Wikipedia, GitHub, a dead host) and verify resilience. |
-| [`orchestrator/`](examples/orchestrator/) | Multi-agent dispatch via `spawn`. Three configs, one system prompt — no orchestrator class, no role types. Roles are JSON files. |
-| [`wake.sh`](examples/wake.sh) + [`wake.md`](examples/wake.md) | Reference cron + jq script for firing deferred actions. The runtime half of `createDeferTool` — bareagent emits, `wake.sh` fires. |
-| [`replay-job.js`](examples/replay-job.js) | Supervised replay POC: record a browser task once with the LLM driving, then replay against fresh snapshots with the LLM as locator-only. Falls back to full reasoning when the locator misses, and patches the trace. |
-| [`litectx-as-store.mjs`](examples/litectx-as-store.mjs) | Mount [litectx](https://npmjs.com/package/litectx) as the `Memory` `Store` — one-line swap from `JsonFileStore` to ranked, graph-aware recall; the host code never changes (RT-3). |
-| [`litectx-mcp-child.mjs`](examples/litectx-mcp-child.mjs) | Give a spawned child agent litectx's reasoning verbs as MCP tools, read-only on its own db, via `liteCtxMcpBridgeConfig` + `cfg.mcp` (RT-4). |
-
----
-
-## Cross-language usage
-
-Not using Node.js? Spawn bare-agent as a subprocess from any language. Ready-made wrappers in [`contrib/`](contrib/README.md) for Python, Go, Rust, Ruby, and Java — copy one file, no package registry needed.
-
-```python
-# Python — 3 lines to run an agent
-from bareagent import BareAgent
-
-agent = BareAgent(provider="openai", model="gpt-4o-mini")
-result = agent.run("What is the capital of France?")
-print(result["text"])  # → "The capital of France is Paris."
-agent.close()
-```
-
-```go
-// Go — same pattern
-agent, _ := bareagent.New("anthropic", "claude-haiku-4-5-20251001", "")
-result, _ := agent.Run("What is the capital of France?")
-fmt.Println(result.Text)
-agent.Close()
-```
-
-```ruby
-# Ruby — same pattern
-agent = BareAgent.new(provider: "ollama", model: "llama3.2")
-result = agent.run("What is the capital of France?")
-puts result["text"]
-agent.close
-```
-
-All wrappers support optional event streaming for intermediate results. See [`contrib/README.md`](contrib/README.md) for Rust, Java, and full protocol reference.
-
----
-
-## Production-validated
-
-| Component | Aurora (SOAR2) | Multis (assistant) |
-|---|:---:|:---:|
-| Loop | ✓ | ✓ |
-| Planner | ✓ | ✓ |
-| runPlan | ✓ | — |
-| Retry | ✓ | ✓ |
-| CircuitBreaker | — | ✓ |
-| Scheduler | — | ✓ |
-| Checkpoint | — | ✓ |
-| CLIPipe | ✓ | — |
-
-Aurora replaced ~400 lines of hand-rolled orchestration with ~60 lines of bare-agent wiring — zero workarounds, zero framework plumbing, 100% domain logic.
-
-For wiring recipes and API details, see the **[Integration Guide](bareagent.context.md)** (LLM-optimized). For the full human guide — usage patterns, composition examples, and what bare-agent deliberately doesn't build in (with recipes to do it yourself), see the **[Usage Guide](docs/archive/usage-guide.md)**. For error reference, see **[Error Guide](docs/product/errors.md)**. For release history, see **[CHANGELOG](CHANGELOG.md)**.
+- A cut-off, refused, or over-context answer is an error, not a success — and its half-written tool calls never run.
+- A cost it can't price is `null`, never a silent `$0`.
+- A dead worker or broken check returns `incomplete`, never a faked pass — and counts are done by code, not by the model.
+- Stuck loops stop: repeated denials or the same failing call end the run cleanly instead of burning the budget.
 
 ## The bare ecosystem
 
@@ -330,6 +100,13 @@ mix and match, each module works standalone.
 - **Agentic workflows** — multi-step tasks where an AI plans, browses, and acts across web and mobile
 
 **Why this exists:** Most automation stacks ship 200MB of opinions before you write a line of code. These don't. Install, import, go.
+
+## Docs
+
+- **Integration Guide** (`bareagent.context.md`) — the complete contract: every option, the full API, wiring recipes. Ships in the package.
+- **Primitives manifest** (`primitives.json`) — every primitive as machine-readable JSON. Ships in the package, generated from source.
+- **[Error Guide](docs/product/errors.md)** — what each error means and how to react to it.
+- **[CHANGELOG](CHANGELOG.md)** — release history. Not on Node? See [`contrib/`](contrib/README.md) for wrappers in Python, Go, Rust, Ruby, and Java.
 
 ## License
 
