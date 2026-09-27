@@ -33,7 +33,7 @@ Some things an LLM can't judge about its own work. Building a harness or an exte
 
 ## Fast gut check — Jev
 
-An LLM call is slow, deliberate thinking — System 2. Jev is the fast, cheap gut check — System 1: a single-shot classifier (TypeSafe's Jev) that returns a *typed* decision (yes/no, pick-one, or a score) with a *calibrated* probability, so your code sets the threshold — act on its own when confident, escalate to an LLM or a human when not — and combines decisions in plain code, no prompting. TypeSafe reports ~194× faster and ~445× cheaper than an LLM on System-1 workflow tasks (their example: $0.000081 in 0.114s vs. $0.013880 in 8.566s), at $42 per billion input tokens — vendor-published numbers, not ours. What we did measure: it's injection-hardened by default (we found and closed a live leak), ships with its own calibration harness, and a tier is only admitted once it passes. Available as `JevProvider`, or as the `jev` criteria type in the Evaluator.
+An LLM call is slow, deliberate thinking (System 2). Jev, from TypeSafe, is the fast gut check (System 1): a classifier that returns a typed decision with a calibrated probability — roughly 200× faster and 400× cheaper than an LLM, per TypeSafe. bare-agent's `JevProvider` covers all three shapes — **yes/no**, **pick-one**, **score** — so your automation calls it like any other step: act when it's confident, escalate when it isn't. Injection-hardened by default; also usable as the `jev` check in the Evaluator.
 
 ## What's inside
 
