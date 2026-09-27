@@ -2,6 +2,17 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.46.6] - 2026-09-27
+
+### Docs
+
+- **README streamlined (336→113 lines)** — rewritten around the pitch (hand-wired
+  → tool calls → harness/judge), a "Start here" doors section, a Jev System-1
+  section covering all three question shapes, an RLM (recurse) section, and a
+  one-line component map; runnable code moved to `bareagent.context.md`.
+- **`bareagent.context.md`** — restored the `formatDeny` and owner-bypass
+  recipes dropped in the README streamline.
+
 ## [0.46.5] - 2026-09-21
 
 ### Tests
