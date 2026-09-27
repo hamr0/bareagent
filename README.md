@@ -35,6 +35,10 @@ Some things an LLM can't judge about its own work. Building a harness or an exte
 
 An LLM call is slow, deliberate thinking (System 2). Jev, from TypeSafe, is the fast gut check (System 1): a classifier that returns a typed decision with a calibrated probability — roughly 200× faster and 400× cheaper than an LLM, per TypeSafe. bare-agent's `JevProvider` covers all three shapes — **yes/no**, **pick-one**, **score** — so your automation calls it like any other step: act when it's confident, escalate when it isn't. Injection-hardened by default; also usable as the `jev` check in the Evaluator.
 
+## Break big tasks down — RLM
+
+`recurse` brings Recursive Language Models (RLM) to your code in one call: split a hard task into smaller ones, run each in a fresh context window, check the result, and stitch it back together. The model decides when to split (or you force a fixed count), and over a large set of documents it picks the path by question shape — scan everything for "how many", search for a needle. Totals are counted by code, and a dead worker comes back `incomplete`, never a faked pass. Cost is open by design: run it under a budget cap (bareguard) or set `maxDepth: 1`.
+
 ## What's inside
 
 Every piece works alone — take what you need, ignore the rest. No required deps — the core imports nothing.
@@ -44,7 +48,7 @@ Every piece works alone — take what you need, ignore the rest. No required dep
 | Act | Loop | think → act → observe until done, any provider, opt-in policy/assemble/trim seams |
 | Act | Planner + runPlan | break a goal into a step DAG, run steps in parallel waves |
 | Act | assessComplexity | rate a goal from its text alone, no LLM — gates whether to plan |
-| Act | recurse | decompose → fan-out → verify → synthesize in one call; cost is open by design — run it under a budget cap / bareguard, or set `maxDepth: 1` |
+| Act | recurse | RLM in one call — decompose → fan-out → verify → synthesize (see above) |
 | Act | Memory | persist and recall across sessions — JSON, SQLite, or litectx in a one-line swap |
 | Act | StateMachine | task lifecycle: pending → running → done / failed / waiting / cancelled |
 | Act | Scheduler | cron or relative triggers, survives restarts |
