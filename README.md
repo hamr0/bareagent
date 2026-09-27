@@ -33,7 +33,7 @@ Some things an LLM can't judge about its own work. Building a harness or an exte
 
 ## Fast gut check — Jev
 
-An LLM call is slow, deliberate thinking — System 2. Jev is the fast, cheap gut check — System 1: a single-shot classifier (TypeSafe's Jev) that answers yes/no, picks one option, or scores something, roughly 100–1000× cheaper than an LLM judge for a classification-shaped decision. Put it in front of an LLM decision to filter the easy cases, or use it instead of one entirely. It's injection-hardened by default and ships with its own calibration harness, so a tier is only admitted once it passes. Available as `JevProvider`, or as the `jev` criteria type in the Evaluator.
+An LLM call is slow, deliberate thinking — System 2. Jev is the fast, cheap gut check — System 1: a single-shot classifier (TypeSafe's Jev) that returns a *typed* decision (yes/no, pick-one, or a score) with a *calibrated* probability, so your code sets the threshold — act on its own when confident, escalate to an LLM or a human when not — and combines decisions in plain code, no prompting. TypeSafe reports ~194× faster and ~445× cheaper than an LLM on System-1 workflow tasks (their example: $0.000081 in 0.114s vs. $0.013880 in 8.566s), at $42 per billion input tokens — vendor-published numbers, not ours. What we did measure: it's injection-hardened by default (we found and closed a live leak), ships with its own calibration harness, and a tier is only admitted once it passes. Available as `JevProvider`, or as the `jev` criteria type in the Evaluator.
 
 ## What's inside
 
@@ -58,6 +58,7 @@ Every piece works alone — take what you need, ignore the rest. No required dep
 | Verify | remember | distill durable facts out of a finished run |
 | Verify | SkillRegistry | surface extra tools on demand instead of loading them all upfront |
 | Verify | stash | compact finished work out of the live context window, restorable |
+| Verify | JevProvider | fast, cheap, calibrated yes/no · pick-one · score decisions — the System-1 gate (see above) |
 | Govern | wireGate → bareguard | one policy, one audit log, one budget cap over every call; stops the spin on repeated denials or a stuck call |
 | Hands | Browsing · Mobile · Shell · MCP Bridge | barebrowse, baremobile, cross-platform shell, and auto-discovered MCP servers — all as tools |
 | Providers | OpenAI-compatible, Anthropic, Gemini, Ollama, CLIPipe, Fallback | swap freely, or bring your own with one `generate` method; CLIPipe runs the loop over a CLI subscription instead of the metered API |

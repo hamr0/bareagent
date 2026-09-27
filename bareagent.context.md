@@ -572,7 +572,34 @@ await loop.run(messages, tools, {
 });
 ```
 
-For routing rules that don't fit bareguard's primitives (e.g. "owner can do anything; user can only read"), you can layer a custom closure on top of `wireGate(gate).policy` — but the cleaner pattern is one source of truth: encode the rules as bareguard primitives and let the gate evaluate them.
+For routing rules that don't fit bareguard's primitives (e.g. "owner can do anything; user can only read"), you can layer a custom closure on top of `wireGate(gate).policy` — but the cleaner pattern is one source of truth: encode the rules as bareguard primitives and let the gate evaluate them. The recipe below is exactly that kind of closure, for the specific "owner bypasses everything" case.
+
+### Per-principal bypass (owner / admin role)
+
+Wrap the gate policy when a principal is trusted unconditionally:
+
+```js
+const { policy: gatePolicy } = wireGate(gate);
+
+const policy = async (toolName, args, ctx) => {
+  if (ctx?.role === 'owner') return true;       // bypass gate entirely
+  return gatePolicy(toolName, args, ctx);
+};
+
+new Loop({ provider, policy, onLlmResult, onToolResult });
+```
+
+Bypassing the gate also bypasses audit and budget — only do this for principals you trust unconditionally. For partial trust, use ctx-aware rules inside bareguard instead.
+
+### Custom deny strings (localize / strip prefix)
+
+```js
+const { policy } = wireGate(gate, {
+  formatDeny: (decision) => `Sorry — ${decision.reason || 'not allowed'}`,
+});
+```
+
+Halt-severity decisions bypass `formatDeny` (they throw `HaltError` and exit the loop without ever reaching the LLM).
 
 ### Catalog pre-filter (omit denied tools from the LLM's view)
 
