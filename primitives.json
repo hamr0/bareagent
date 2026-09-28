@@ -364,10 +364,10 @@
     {
       "name": "resolveToolPath",
       "category": "tools",
-      "when": "you need the SAME absolute path bareguard's fs primitive will canonicalize at gate-check",
+      "when": "you gate shell file tools — canonicalize the tool's path once with this, put it in the action you pass to `gate.check`, so the gate judges exactly the path the tool opens",
       "import": "import { resolveToolPath } from 'bare-agent/tools'",
       "signature": "resolveToolPath(p: string) => string",
-      "fails": "throws when `p` is not a non-empty string, and when `p` starts with `~` and no home",
+      "fails": "throws on a non-string or empty path, and on a `~` path when no home directory can be determined — never turns `~/x` into `/x` or an empty path into cwd",
       "example": "const resolved = resolveToolPath('~/notes.txt');"
     },
     {

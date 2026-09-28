@@ -140,11 +140,8 @@ function expandHome(p, homedirFn = os.homedir) {
  * TYPE/category of the bad value (`describeBadPath`), never the value itself.
  * @param {string} p
  * @returns {string}
- * @when you need the SAME absolute path bareguard's fs primitive will canonicalize at gate-check
- *   time (>=0.19.0) — canonicalize once with this before `gate.check`, then open exactly that string.
- * @fails throws when `p` is not a non-empty string, and when `p` starts with `~` and no home
- *   directory can be determined (`os.homedir()` returns empty or throws) — never turns `~/x` into
- *   `/x`, and never turns a missing/empty path into `process.cwd()`.
+ * @when you gate shell file tools — canonicalize the tool's path once with this, put it in the action you pass to `gate.check`, so the gate judges exactly the path the tool opens
+ * @fails throws on a non-string or empty path, and on a `~` path when no home directory can be determined — never turns `~/x` into `/x` or an empty path into cwd
  * @example
  *   const resolved = resolveToolPath('~/notes.txt');
  */
