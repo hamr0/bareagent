@@ -324,6 +324,51 @@ test('any line inside @example starting with "@" is a hard error, regardless of 
   }
 });
 
+test('an indented line starting with "@" outside @example is a hard error, not silently folded into the prior tag', () => {
+  const cases = [
+    {
+      bodyLines: [
+        '@when this description stays on one line',
+        '   @category prose',
+        '@fails never',
+        '@example',
+        'foo()',
+      ],
+      word: '@category',
+    },
+    {
+      bodyLines: [
+        '@when this description stays on one line',
+        '@fails never',
+        '@param {number} x',
+        '   @returns {string}',
+        '@example',
+        'foo()',
+      ],
+      word: '@returns',
+    },
+    {
+      bodyLines: [
+        '@when this description stays on one line',
+        '@fails never',
+        '\t@type {x}',
+        '@example',
+        'foo()',
+      ],
+      word: '@type',
+    },
+  ];
+  for (const { bodyLines, word } of cases) {
+    withTmpDir('prim-gen-indent-', (dir) => {
+      writeFixturePkgRaw(dir, bodyLines);
+      assertGeneratorRejects(
+        dir,
+        new RegExp(`an indented line starting with "@" \\("${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\)`),
+      );
+    });
+  }
+});
+
 test('a multi-line @example with no @-led lines (incl. a "// @param x" comment and an indented line) is kept whole', () => {
   withTmpDir('prim-gen-ex-multiline-last-', (dir) => {
     writeFixturePkg(dir, {

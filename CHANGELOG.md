@@ -28,7 +28,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   an example. Also new: a **duplicate
   catalog-name hard error** — two `@when` blocks resolving to the same `name` (e.g. two
   classes each with an unnamed `add` method) is now a loud, non-zero-exit rejection
-  instead of a silent two-entries-one-name collision. See `docs/wiki/decisions-log.md`
+  instead of a silent two-entries-one-name collision. Outside `@example`, a line starting
+  with `@` is either a tag at the normal position (right after ` * `) or itself a hard
+  error — an indented `@`-led line (a wrapped continuation that happens to start with
+  `@`) is no longer silently folded into the prior tag's body. See `docs/wiki/decisions-log.md`
   § "shared primitives.json generator core" for the full design, the union-of-rules audit,
   and verification results. `primitives.json` is byte-identical to the prior committed
   manifest in both bare-agent and litectx; one bare-agent source JSDoc block

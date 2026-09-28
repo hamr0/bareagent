@@ -126,6 +126,12 @@ function parseBlock(block) {
   // non-whitespace character is `@` is a HARD ERROR — no KNOWN_TAGS lookup,
   // no exception for spacing/case/alias/unknown-word. Recorded in `problems`
   // below; the block is rejected either way, so nothing is silently written.
+  //
+  // Outside @example, a line starting with "@" is either a tag at the normal
+  // position (right after " * ", so trimEnd — not trim — still matches it)
+  // or a hard error: an indented "@" (e.g. wrapped continuation prose that
+  // happens to start with @) is never silently folded into the prior tag's
+  // body.
   const segments = [];
   const problems = [];
   for (const raw of inner.split('\n').map(strip)) {
@@ -137,8 +143,9 @@ function parseBlock(block) {
       segments[segments.length - 1].body.push(raw);
       continue;
     }
-    const tag = raw.trim().match(/^@(\w+)\s*(.*)$/);
+    const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
     if (tag) segments.push({ tag: tag[1], rest: tag[2], body: [] });
+    else if (raw.trim().startsWith('@')) problems.push(`an indented line starting with "@" ("${raw.trim().split(/\s/)[0]}") — a tag must start right after " * "; any other line must not start with "@"`);
     else if (segments.length) segments[segments.length - 1].body.push(raw);
   }
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
