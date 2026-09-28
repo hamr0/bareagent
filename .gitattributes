@@ -1,0 +1,10 @@
+# scripts/primitives-core.mjs and test/primitives-core.test.mjs are vendored
+# byte-identically into bareguard and litectx, pinned by a SHA-256 hash
+# (scripts/primitives-core.hashes.json). A Windows checkout that translates
+# LF -> CRLF would change every byte's line ending without changing content —
+# the pin test already normalizes CRLF->LF before hashing (belt-and-
+# suspenders), but forcing LF at checkout time on these two files avoids the
+# translation happening at all. See docs/product/prd.md § "Primitives manifest".
+scripts/primitives-core.mjs text eol=lf
+test/primitives-core.test.mjs text eol=lf
+scripts/primitives-core.hashes.json text eol=lf

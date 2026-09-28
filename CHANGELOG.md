@@ -6,6 +6,21 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ### Added
 
+- **Shared `primitives.json` generator core** (`scripts/primitives-core.mjs`) — replaces
+  the per-repo, independently-drifted `scripts/gen-primitives.mjs` copies in bare-agent,
+  bareguard, and litectx with ONE canonical core vendored byte-identically across all
+  three, each with a tiny `primitives.config.mjs` for the genuinely repo-specific bits
+  (category inference; an optional class-method `receivers` name map). `gen-primitives.mjs`
+  is now a 5-line per-repo entry point; `build:primitives`/`check:primitives` are
+  unchanged. Fixes a real bug two of the three repos' pre-shared generators shared: an
+  open `@example` body closed on ANY `@word`-shaped line (a decorator, a typo), silently
+  truncating the code sample — now only a known JSDoc tag closes it. A per-repo
+  `test/primitives-core.test.mjs` (also vendored) pins both files' SHA-256 against
+  `scripts/primitives-core.hashes.json` and fails loudly on drift. See
+  `docs/wiki/decisions-log.md` § "shared primitives.json generator core" for the full
+  design and verification writeup. Regenerated `primitives.json` is byte-identical to the
+  prior committed manifest — no primitive's catalog entry changed.
+
 - **`createShellTools({ noFollowSymlinks: true })`** — opt-in refusal for `shell_read`,
   `shell_write`, `shell_edit`, and `shell_grep` when a path's FINAL component is a symlink
   (file, dir, or dangling). Refuses via a thrown error (`err.code:'ELOOP'`) instead of

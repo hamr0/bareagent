@@ -324,6 +324,19 @@ failure behavior is documented in prose today (`@throws` is sparse — ~94 tags,
 concentrated in providers; `recurse` has one), so a `@fails` convention is added
 and authored per primitive.
 
+**Shared generator core (unreleased, all three repos).** The generator that was
+per-repo (`scripts/gen-primitives.mjs`, independently drifted in bareagent,
+bareguard, litectx) is now ONE canonical core (`scripts/primitives-core.mjs`,
+bareagent is the canonical copy) vendored byte-identically into the other two,
+each with its own tiny `primitives.config.mjs` (`inferCategory`, optional
+`receivers`/`sourceRoots`); `gen-primitives.mjs` is a 5-line per-repo entry that
+loads the config and calls the core. A per-repo `test/primitives-core.test.mjs`
+(also vendored, `.mjs` so it parses under both bareagent's CommonJS and the
+other two repos' `"type":"module"`) pins both files' SHA-256 against
+`scripts/primitives-core.hashes.json`, failing loudly on any drift. See the
+Decisions Log entry "shared primitives.json generator core" for the full
+rationale, the union-of-rules audit, and verification results.
+
 **As built (bareagent reference, v0.44.1).** 49 primitives. The generator
 (`scripts/gen-primitives.mjs`) scans `src/` and `tools/`; four tags beyond the
 core design earned their place under contact with the real surface: `@name`
