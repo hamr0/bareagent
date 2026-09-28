@@ -21,13 +21,11 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   known tags); and **all three** (bareguard, litectx, and bare-agent's own pre-core copy)
   closed `@example` on a KNOWN JSDoc tag and silently re-applied it as a real tag,
   truncating the example with zero warning. `@example` is now STRICT: it must be the last
-  tag in a block — once open, a known tag appearing after it is a HARD ERROR (non-zero
-  exit, nothing written, names the offending tag, tells the author to move `@example` to
-  the end of the block) rather than either silently reopening as a tag or silently
-  becoming swallowed content; the loud-strict choice over "everything after `@example` is
-  content" is deliberate — the latter would let a real trailing tag (e.g. bareguard's
-  `addToGates`, whose real `@param`/`@returns`/`@throws` follow `@example` in source)
-  silently degrade `signature`/`fails` to garbage with exit 0. Also new: a **duplicate
+  tag in a block. Once open, a line starting with `@` is a HARD ERROR (non-zero exit,
+  nothing written, names the offending line, tells the author to move `@example` to the
+  end of the block or write the line as a `//`-prefixed comment) — regardless of spacing,
+  case, alias, or whether the word is a known tag; there is no `KNOWN_TAGS` lookup inside
+  an example. Also new: a **duplicate
   catalog-name hard error** — two `@when` blocks resolving to the same `name` (e.g. two
   classes each with an unnamed `add` method) is now a loud, non-zero-exit rejection
   instead of a silent two-entries-one-name collision. See `docs/wiki/decisions-log.md`

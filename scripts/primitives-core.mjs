@@ -23,27 +23,12 @@
 //     a body spanning more than one non-empty line fails loudly (RULE B).
 //   * An unknown `@tag` inside a `@when` block fails, with an alias hint
 //     (return/arg/argument/exception/prop) (RULE C).
-//   * `@example` MUST be the LAST tag in a block (RULE D, strict). Once open,
-//     a KNOWN_TAGS line is a HARD ERROR — non-zero exit, nothing written,
-//     naming the offending tag and telling the author to move `@example` to
-//     the end of the block (or prefix the line inside the example, e.g.
-//     `// @type`, if it's meant as content). Anything else (a decorator, a
-//     typo, any other `@word`-shaped line in a code sample) is unambiguous
-//     example CONTENT, kept verbatim. No outcome is ever silent: a real tag
-//     is never swallowed into an example (that would silently corrupt a
-//     derived `signature`/`fails` with zero warning — see bareguard's
-//     `addToGates`, which has `@param`/`@returns`/`@throws` genuinely AFTER
-//     `@example` in its actual source and would otherwise degrade to a
-//     garbage signature with exit 0), and an example is never silently
-//     truncated either. RULE D closes two DISTINCT, separately-verified holes
-//     in the three repos' pre-shared copies: litectx's `mode`-based parser
-//     closed `@example` on ANY `@word` line, including a non-tag decorator
-//     (bareguard did NOT have this one — verified by running bareguard's own
-//     pre-shared generator against a decorator fixture); and ALL THREE
-//     (including bare-agent's own pre-core copy) closed `@example` on a
-//     KNOWN_TAGS line and silently re-applied it as a real tag, truncating
-//     the example with zero warning (verified by running all three repos'
-//     old generators against a fixture with a known tag inside `@example`).
+//   * `@example` MUST be the LAST tag in a block (RULE D, strict). Once its
+//     body is open, ANY line whose first non-whitespace character is `@` is a
+//     HARD ERROR — non-zero exit, nothing written — regardless of spacing,
+//     case, or whether the word is a known tag; there is no KNOWN_TAGS lookup
+//     inside an example. Move `@example` to the end, or write the line as a
+//     `//`-prefixed comment if it's meant as content.
 //   * Class methods (litectx's LiteCtx/ScopedView verbs, bareguard's
 //     Gate#add/#rwxTools/#readAudit) are a resolvable symbol kind: the
 //     enclosing class is found via a LINE-ANCHORED class-declaration scan (a
@@ -137,34 +122,24 @@ function parseBlock(block) {
   // @word all used to need their own case; this one rule covers all of them).
   //
   // The one deliberate exception is @example (RULE D, strict): @example must
-  // be the LAST tag in a block. Once its body is open, NOTHING closes it —
-  // a line that merely LOOKS like a tag (a decorator, a typo, any other
-  // `@word`-shaped line in a code sample) is unambiguous example CONTENT. A
-  // line that IS a real KNOWN_TAGS tag is a HARD ERROR instead of silently
-  // reopening as a tag (which would corrupt a derived field with zero
-  // warning) or silently becoming content (which would silently swallow a
-  // real, intended tag — e.g. bareguard's `addToGates`, whose real
-  // `@param`/`@returns`/`@throws` genuinely follow `@example` in source and
-  // must therefore error, not vanish). Recorded in `problems` below, once per
-  // occurrence; the block is rejected either way, so the swallowed content
-  // itself is discarded, never written.
+  // be the LAST tag in a block. Once its body is open, ANY line whose first
+  // non-whitespace character is `@` is a HARD ERROR — no KNOWN_TAGS lookup,
+  // no exception for spacing/case/alias/unknown-word. Recorded in `problems`
+  // below; the block is rejected either way, so nothing is silently written.
   const segments = [];
   const problems = [];
   for (const raw of inner.split('\n').map(strip)) {
-    const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
     const openExample = segments.length && segments[segments.length - 1].tag === 'example';
     if (openExample) {
-      if (tag && KNOWN_TAGS.has(tag[1])) {
-        problems.push(`@${tag[1]} appears after @example — @example must be the last tag: move @example to the end of the block (or prefix the line inside the example, e.g. "// @${tag[1]}")`);
+      if (raw.trim().startsWith('@')) {
+        problems.push(`a line starting with "@" inside @example ("${raw.trim().split(/\s/)[0]}") — @example must be the last tag in the block and its lines must not start with "@": move @example to the end, or write the line as "// ${raw.trim().split(/\s/)[0]} ..."`);
       }
       segments[segments.length - 1].body.push(raw);
       continue;
     }
-    if (tag) {
-      segments.push({ tag: tag[1], rest: tag[2], body: [] });
-    } else if (segments.length) {
-      segments[segments.length - 1].body.push(raw);
-    }
+    const tag = raw.trim().match(/^@(\w+)\s*(.*)$/);
+    if (tag) segments.push({ tag: tag[1], rest: tag[2], body: [] });
+    else if (segments.length) segments[segments.length - 1].body.push(raw);
   }
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
   let type = null, sigOverride = null;

@@ -14,12 +14,11 @@
 //   RULE A — a tag's body is every line up to the next tag/end of comment.
 //   RULE B — @when/@fails/@category/@name/@signature must stay single-line.
 //   RULE C — an unknown @tag inside a @when block fails, with alias hints.
-//   RULE D (strict) — @example MUST be the last tag in a block. Once open, a
-//            KNOWN_TAGS line is a HARD ERROR (never silently reopened as a
-//            tag, never silently swallowed as content); anything else (a
-//            decorator, a typo, any other `@word`-shaped line) is
-//            unambiguous example content, kept whole to the end of the
-//            comment, however many lines.
+//   RULE D (strict) — @example MUST be the last tag in a block. Once open,
+//            ANY line whose first non-whitespace character is `@` is a HARD
+//            ERROR, regardless of spacing/case/alias/known-tag-or-not; every
+//            other line is unambiguous example content, kept whole to the
+//            end of the comment, however many lines.
 //   Duplicate catalog names — two @when blocks resolving to the same
 //            `name` (e.g. two unnamed same-named methods on different
 //            classes) is a HARD ERROR, never a silent last-write-wins
@@ -300,46 +299,43 @@ test('an unknown tag with a known alias hints the correct tag', () => {
 // RULE D (strict) — @example MUST be the last tag in a block
 // ---------------------------------------------------------------------------
 
-test('a KNOWN_TAGS tag after @example is a hard error naming the offending tag and telling the author to move @example', () => {
-  withTmpDir('prim-gen-ex-known-after-', (dir) => {
-    writeFixturePkg(dir, {
-      whenLine: '@when this description stays on one line',
-      exampleBlock: ' * @example\n * foo()\n * @category custom-category\n',
+test('any line inside @example starting with "@" is a hard error, regardless of spacing/case/known-tag/unknown-tag', () => {
+  const cases = [
+    { line: ' * @param x\n', word: '@param' },
+    { line: ' *    @param x\n', word: '@param' }, // extra star indentation
+    { line: ' * @return {number}\n', word: '@return' },
+    { line: ' * @Param x\n', word: '@Param' },
+    { line: ' * @type {string}\n', word: '@type' },
+    { line: ' * @example\n', word: '@example' },
+    { line: ' * @decorator\n', word: '@decorator' },
+    { line: ' * @fails oops\n', word: '@fails' },
+  ];
+  for (const { line, word } of cases) {
+    withTmpDir('prim-gen-ex-atline-', (dir) => {
+      writeFixturePkg(dir, {
+        whenLine: '@when this description stays on one line',
+        exampleBlock: ` * @example\n * foo(1)\n${line}`,
+      });
+      assertGeneratorRejects(
+        dir,
+        new RegExp(`a line starting with "@" inside @example \\("${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\)`),
+      );
     });
-    assertGeneratorRejects(
-      dir,
-      /foo: @category appears after @example — @example must be the last tag: move @example to the end of the block/,
-    );
-  });
+  }
 });
 
-test('an @example line starting with an unknown @tag is kept as content, not truncated', () => {
-  withTmpDir('prim-gen-ex-decorator-', (dir) => {
-    writeFixturePkg(dir, {
-      whenLine: '@when this description stays on one line',
-      exampleBlock: ' * @example\n * // usage:\n * @decorator\n * foo()\n',
-    });
-    execFileSync(process.execPath, [GEN_SCRIPT], { cwd: dir, stdio: 'pipe' });
-    const out = JSON.parse(fs.readFileSync(path.join(dir, 'primitives.json'), 'utf8'));
-    assert.strictEqual(out.primitives.length, 1);
-    assert.match(out.primitives[0].example, /\/\/ usage:/);
-    assert.match(out.primitives[0].example, /@decorator/);
-    assert.match(out.primitives[0].example, /foo\(\)/);
-  });
-});
-
-test('@example as the genuinely last tag keeps every line, however many, whole', () => {
+test('a multi-line @example with no @-led lines (incl. a "// @param x" comment and an indented line) is kept whole', () => {
   withTmpDir('prim-gen-ex-multiline-last-', (dir) => {
     writeFixturePkg(dir, {
       whenLine: '@when this description stays on one line',
-      exampleBlock: ' * @example\n * const t = new Tool({\n * // @type {string}\n *   name: "x" })\n * add(1)\n',
+      exampleBlock: ' * @example\n * foo(1)\n * // @param x this is a comment, not a tag\n *   indented line\n',
     });
     execFileSync(process.execPath, [GEN_SCRIPT], { cwd: dir, stdio: 'pipe' });
     const out = JSON.parse(fs.readFileSync(path.join(dir, 'primitives.json'), 'utf8'));
     assert.strictEqual(out.primitives.length, 1);
     assert.strictEqual(
       out.primitives[0].example,
-      'const t = new Tool({\n// @type {string}\n  name: "x" })\nadd(1)',
+      'foo(1)\n// @param x this is a comment, not a tag\n  indented line',
     );
   });
 });
