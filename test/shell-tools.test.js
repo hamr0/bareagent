@@ -94,6 +94,84 @@ describe('createShellTools', () => {
       assert.notEqual(result, '');
       assert.match(result, /Name:/);
     });
+
+    // /proc/kallsyms: stat.size reports 0 but the real content is ~20MB — the OTHER half of the
+    // regression (the first fix read the whole 20MB into memory via fh.readFile() and only
+    // truncated it down to the cap AFTER the fact). readBounded must never read past cap+1 bytes,
+    // so this should return quickly with the new "file size unknown" message, not "more bytes not
+    // shown: <huge N>" (which would prove the whole file was read first).
+    it('reads /proc/kallsyms (stat.size lies, real content ~20MB) — bounded, not read-then-truncated', { skip: process.platform !== 'linux' }, async () => {
+      const { tools } = createShellTools();
+      const result = await findTool(tools, 'shell_read').execute({ path: '/proc/kallsyms', maxBytes: 4096 });
+      assert.equal(Buffer.byteLength(result, 'utf8') <= 4096 + 100, true, 'result must not balloon to anything near 20MB');
+      assert.match(result, /\[truncated at 4096 bytes: file size unknown\]/);
+    });
+
+    // /dev/zero: no EOF at all. The pre-fix `fh.readFile('utf8')` grew without bound and OOM'd the
+    // whole process (observed: FATAL heap OOM, exit 134) — killing the agent, not just the call.
+    // Run in a CHILD process with a small heap cap so a regression crashes/times out the CHILD,
+    // never this test runner, and the test can observe that failure cleanly.
+    describe('/dev/zero (child-process guarded — no EOF, would OOM pre-fix)', { skip: process.platform !== 'linux' }, () => {
+      const { execFile } = require('node:child_process');
+      const shellJsPath = path.join(__dirname, '..', 'tools', 'shell.js');
+
+      /** @param {'read'|'edit'} mode */
+      function runInChild(mode) {
+        const script = `
+          const { createShellTools } = require(${JSON.stringify(shellJsPath)});
+          const { tools } = createShellTools();
+          const mode = process.argv[1];
+          (async () => {
+            try {
+              let result;
+              if (mode === 'read') {
+                result = await tools.find(t => t.name === 'shell_read').execute({ path: '/dev/zero', maxBytes: 4096 });
+              } else {
+                result = await tools.find(t => t.name === 'shell_edit').execute({ path: '/dev/zero', oldText: 'x', newText: 'y' });
+              }
+              process.stdout.write(JSON.stringify({ ok: true, result }));
+            } catch (err) {
+              process.stdout.write(JSON.stringify({ ok: false, error: err && err.message }));
+            }
+          })();
+        `;
+        return new Promise((resolve, reject) => {
+          execFile(
+            process.execPath,
+            ['--max-old-space-size=128', '-e', script, '--', mode],
+            { timeout: 10_000, maxBuffer: 10 * 1024 * 1024 },
+            (err, stdout, stderr) => {
+              if (err) {
+                err.stdout = stdout;
+                err.stderr = stderr;
+                reject(err);
+                return;
+              }
+              resolve(JSON.parse(stdout));
+            },
+          );
+        });
+      }
+
+      it('shell_read on /dev/zero with maxBytes 4096 returns quickly: exactly 4096 NULs + unknown-size message', async () => {
+        const t0 = Date.now();
+        const out = await runInChild('read');
+        const elapsed = Date.now() - t0;
+        assert.equal(out.ok, true, `child must not crash/error; got: ${JSON.stringify(out)}`);
+        const marker = '\n\n[truncated at 4096 bytes: file size unknown]';
+        assert.ok(out.result.endsWith(marker), `expected the unknown-size marker; got tail: ${JSON.stringify(out.result.slice(-80))}`);
+        const dataPart = out.result.slice(0, out.result.length - marker.length);
+        assert.equal(Buffer.byteLength(dataPart, 'utf8'), 4096);
+        assert.equal(dataPart, '\u0000'.repeat(4096), 'expected exactly 4096 NUL bytes');
+        assert.ok(elapsed < 9000, `expected a quick bounded read, took ${elapsed}ms`);
+      });
+
+      it('shell_edit on /dev/zero throws the cap error and does not hang/OOM', async () => {
+        const out = await runInChild('edit');
+        assert.equal(out.ok, false, `expected editFile to throw the cap error; got: ${JSON.stringify(out)}`);
+        assert.match(out.error, /shell_edit: file is larger than the \d+-byte cap \(pass maxBytes to raise it\) — no change made/);
+      });
+    });
   });
 
   describe('shell_grep', () => {

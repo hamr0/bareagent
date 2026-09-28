@@ -251,6 +251,40 @@ async function assertDirStillMatchesHandle(toolName, resolvedPath, handleStat) {
   }
 }
 
+const READ_BOUNDED_CHUNK_SIZE = 64 * 1024;
+
+/**
+ * Read from an open file handle in chunks, stopping at EOF or once `limit + 1` bytes have been
+ * read — NEVER more, regardless of what `stat.size` claims. This is the fix for a real OOM: a
+ * device file like `/dev/zero` has no EOF at all, so an unbounded `fh.readFile()` grows without
+ * bound until the process dies (observed: `shell_read({path:'/dev/zero'})` killed the whole agent
+ * with a FATAL heap OOM, exit 134). A `stat.size`-lying file (e.g. `/proc/kallsyms`, `size:0` but
+ * actually ~20MB) is a lesser version of the same problem — fully read then discarded down to the
+ * cap. `readBounded` reads AT MOST `limit + 1` bytes either way: the `+1` exists only so the caller
+ * can distinguish "exactly `limit` bytes, then real EOF" (`hitLimit:false`) from "there was more"
+ * (`hitLimit:true`) without a second read.
+ *
+ * Reads at `position: null` (the fd's own advancing cursor, not a caller-tracked offset) — this is
+ * what makes it correct uniformly across regular files, procfs/sysfs (offset-readable despite a
+ * lying size), and character devices (which generally ignore any offset argument regardless).
+ * @param {import('node:fs/promises').FileHandle} fh
+ * @param {number} limit
+ * @returns {Promise<{buf: Buffer, hitLimit: boolean}>}
+ */
+async function readBounded(fh, limit) {
+  const chunks = [];
+  let total = 0;
+  while (total <= limit) {
+    const wantBytes = Math.min(READ_BOUNDED_CHUNK_SIZE, limit + 1 - total);
+    const chunk = Buffer.alloc(wantBytes);
+    const { bytesRead } = await fh.read(chunk, 0, wantBytes, null);
+    if (bytesRead === 0) break; // real EOF
+    chunks.push(bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  return { buf: Buffer.concat(chunks, total), hitLimit: total > limit };
+}
+
 /**
  * @param {string} rawPath
  * @param {number} [maxBytes]
@@ -281,19 +315,18 @@ async function readEntry(rawPath, maxBytes, options = {}) {
       await fh.read(buf, 0, cap, 0);
       return buf.toString('utf8') + `\n\n[truncated: ${stat.size - cap} more bytes not shown]`;
     }
-    // Read through the handle until EOF rather than trusting stat.size for the byte count: procfs/
-    // sysfs files (e.g. /proc/self/status) commonly report stat.size === 0 while still having real
-    // content (the kernel generates it on read, not on stat) — a size-based Buffer.alloc(stat.size)
-    // silently returned "" for every such file. This is what shell_grep's own reads already do.
-    const content = await fh.readFile('utf8');
-    const bytes = Buffer.byteLength(content, 'utf8');
-    if (bytes > cap) {
-      // A stat-size-lied file (reported <= cap, e.g. 0) turned out to actually exceed the cap once
-      // fully read — truncate the same way the size-known branch above does, computed post-hoc.
-      return Buffer.from(content, 'utf8').subarray(0, cap).toString('utf8')
-        + `\n\n[truncated: ${bytes - cap} more bytes not shown]`;
+    // stat.size is <= cap here, but NOT trustworthy: procfs/sysfs files (e.g. /proc/self/status,
+    // /proc/kallsyms) commonly report a size that has nothing to do with their real content, and a
+    // device file like /dev/zero has no EOF at all. readBounded caps the read at cap+1 bytes no
+    // matter what — never the unbounded `fh.readFile()` this module used to call here (that OOM'd
+    // the whole process on /dev/zero, exit 134).
+    const { buf, hitLimit } = await readBounded(fh, cap);
+    if (hitLimit) {
+      // We only know we read cap+1+ bytes, not the real total (stat.size lied) — never invent a
+      // "more bytes not shown" count for a size we don't actually know.
+      return buf.subarray(0, cap).toString('utf8') + `\n\n[truncated at ${cap} bytes: file size unknown]`;
     }
-    return content;
+    return buf.toString('utf8');
   } finally {
     await fh.close().catch(() => {});
   }
@@ -366,7 +399,9 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }, o
  *     guard, so a model that repeats the byte-identical wrong anchor is bounded only by maxTurns/budget, not
  *     short-circuited. A widened anchor is a different call and recovers naturally; the exact-repeat spin is
  *     the rare degenerate case. This matches the ask's "refusal, not a throw" contract.)
- *   - fs-layer errors (missing file, a directory) and BA-4 param-guard violations THROW at the tool boundary.
+ *   - fs-layer errors (missing file, a directory), BA-4 param-guard violations, and a SOURCE file larger
+ *     than the `maxBytes` cap (read bounded via `readBounded`, never fully loaded to find out) THROW at
+ *     the tool boundary, before any edit is computed — no change made.
  *
  * BA-4 param guards (guarded from birth this time — cf. `shell_write` zeroing files on an absent arg):
  * `oldText` a required NON-EMPTY string, `newText` a required string — both THROW when absent/wrong-type (an
@@ -404,6 +439,8 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }, options =
   }
 
   const resolved = resolveToolPath(rawPath);
+  // Hoisted above the read (previously computed only after) — readBounded needs a limit up front.
+  const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
 
   // The read (and, when noFollowSymlinks is on, the symlink refusal) happens BEFORE any temp file
   // or rename — a refusal must leave both the target and a would-be link's target untouched.
@@ -413,10 +450,16 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }, options =
   const fh = await openFile('shell_edit', resolved, fsConstants.O_RDONLY, undefined, options);
   try {
     stat = await fh.stat();
-    // Read through the handle until EOF rather than trusting stat.size for the byte count — see the
-    // matching comment in readEntry (procfs/sysfs files report stat.size === 0 with real content).
-    // `stat` itself is still kept, for the mode preserved on the rewritten temp file below.
-    content = await fh.readFile('utf8');
+    // Bounded read, same reasoning as readEntry: stat.size is untrustworthy (procfs/sysfs) and a
+    // device file like /dev/zero has no EOF at all — an unbounded fh.readFile() here OOM'd the
+    // whole process (exit 134). `stat` is still kept, for the mode preserved on the rewritten temp
+    // file below. Capped at the SAME cap the patched-result size is checked against below — a file
+    // already at or over the cap can never produce an in-cap edit anyway.
+    const { buf, hitLimit } = await readBounded(fh, cap);
+    if (hitLimit) {
+      throw new Error(`shell_edit: file is larger than the ${cap}-byte cap (pass maxBytes to raise it) — no change made`);
+    }
+    content = buf.toString('utf8');
   } finally {
     await fh.close().catch(() => {});
   }
@@ -435,7 +478,7 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }, options =
   const idx = content.indexOf(oldText);
   const patched = content.slice(0, idx) + newText + content.slice(idx + oldText.length);
 
-  const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
+  // `cap` was hoisted above the read (readBounded needed it); reused here unchanged.
   const bytes = Buffer.byteLength(patched, 'utf8');
   if (bytes > cap) {
     throw new Error(`shell_edit result is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);

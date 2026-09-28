@@ -56,22 +56,40 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `openFile` helper instead of duplicated flag-on/flag-off code paths. `noFollowSymlinks`
   off is still a plain `fs.open` (unaffected by that flag either way), but `shell_read`
   and `shell_edit`'s content reads changed shape regardless of the flag as part of the
-  procfs/sysfs fix below — see that entry for the one observable difference this
+  procfs/sysfs + OOM fix below — see that entry for the one observable difference this
   refactor's read path carries.
+- **`shell_edit` now refuses (throws) a file it reads that is larger than the `maxBytes`
+  cap, even if the intended edit would have shrunk the RESULT back under the cap.**
+  `shell_edit: file is larger than the <cap>-byte cap (pass maxBytes to raise it) — no
+  change made.` This is a direct tradeoff of the OOM fix above: `readBounded` stops at
+  `cap + 1` bytes on the READ side, before any edit is computed, so it can no longer tell
+  "the source is huge" from "the source is huge but this specific edit would have made it
+  small" — it refuses both, rather than risk reading an unbounded/huge file to find out.
+  Raise `maxBytes` if you legitimately need to edit a large file.
 
 ### Fixed
 
-- **`shell_read`/`shell_edit` no longer read back empty content from procfs/sysfs files
-  (regression introduced by the `noFollowSymlinks` open-handle refactor, both with the
-  flag ON and OFF).** Both switched to a `Buffer.alloc(stat.size)` + fixed-size read,
-  but files like `/proc/self/status` report `stat.size === 0` while still having real
-  content (the kernel generates it on read, not on stat) — so `shell_read` silently
-  returned `""` and `shell_edit` always reported `"oldText not found"`, regardless of
-  the actual file content. Both now read through the open handle until EOF
-  (`fh.readFile('utf8')`, matching what `shell_grep`'s own reads already did) when the
-  reported size is at or under the cap; the known-large-file fixed-size truncation path
-  is unchanged. Evidence: `statSync('/proc/self/status').size === 0` vs.
-  `readFileSync(...).length` ~1500+.
+- **`shell_read`/`shell_edit` no longer read back empty content from procfs/sysfs files,
+  AND no longer risk an out-of-memory crash of the whole process on a file with no EOF.**
+  Two related bugs, one fix: (1) `stat.size`-based reads returned `""` for files like
+  `/proc/self/status`, which report `stat.size === 0` while having real content (the
+  kernel generates it on read, not on stat) — this bug PREDATES the `noFollowSymlinks`
+  work; the originally-released `fs.readFile()`/`Buffer.alloc(stat.size)` code in 0.46.6
+  had the exact same problem. (2) An intermediate fix read through the handle to EOF
+  (`fh.readFile('utf8')`) to solve (1), but that is UNBOUNDED — a device file with no EOF
+  at all, e.g. `/dev/zero`, made it grow without bound until the process died with a
+  FATAL heap OOM (exit 134), taking the whole agent down, not just the one call; and a
+  stat-lying-but-finite file like `/proc/kallsyms` (`size:0`, real content ~20MB) was
+  fully read into memory and only truncated down to the cap afterward. Both `shell_read`
+  and `shell_edit` now read through a new shared `readBounded` helper that reads in 64KB
+  chunks and NEVER reads more than `cap + 1` bytes, regardless of what `stat.size` claims
+  or whether the source ever reaches EOF. `shell_read` on a stat-lying file within the cap
+  gets a new, honest message — `[truncated at <cap> bytes: file size unknown]` — instead
+  of inventing a byte count it doesn't have; the known-large-file (`stat.size > cap`)
+  fixed-size truncation path and its `[truncated: N more bytes not shown]` message are
+  unchanged. Evidence: `statSync('/proc/self/status').size === 0` vs.
+  `readFileSync(...).length` ~1500+; `/dev/zero` reproducibly OOM-killed a bare
+  `fs.readFile()` call in both the 0.46.6-released code and the intermediate fix above.
 - **`~`-prefixed paths no longer silently collapse to a root/cwd-relative path when no
   home directory can be determined.** The previous `process.env.HOME ||
   process.env.USERPROFILE || ''` fallback turned `~/x` into plain `x` (then
