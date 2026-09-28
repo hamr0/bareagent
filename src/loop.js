@@ -455,7 +455,7 @@ class Loop {
    *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
    *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: {name: string|undefined, error: string}, temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: {name: string|undefined, error: string, rawArguments?: string, rawTruncated?: true}, temperatureDropped?: boolean}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -1328,7 +1328,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: {name: string|undefined, error: string}, temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: {name: string|undefined, error: string, rawArguments?: string, rawTruncated?: true}, temperatureDropped?: boolean}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });

@@ -796,6 +796,7 @@ describe('createShellTools', () => {
       const { tools } = createShellTools();
       const gate = new Gate({
         audit: { path: auditPath },
+        fs: { readScope: [TMP] }, // bareguard >=0.19: file actions deny by default without a scope
         humanChannel: async () => false,
       });
       const { policy, wrapTools } = wireGate(gate);
@@ -805,8 +806,8 @@ describe('createShellTools', () => {
 
       await new Promise(r => setTimeout(r, 50));
       const lines = fs.readFileSync(auditPath, 'utf8').trim().split('\n').map(l => JSON.parse(l));
-      // bareguard writes one entry per phase (gate + record); both carry action.type
-      const recordEntry = lines.find(l => l.phase === 'record' && l.action?.type === 'shell_read');
+      // bareguard writes one entry per phase (gate + record); identity is action.tool ?? action.type
+      const recordEntry = lines.find(l => l.phase === 'record' && (l.action?.tool ?? l.action?.type) === 'shell_read');
       assert.ok(recordEntry, `expected shell_read record entry in audit; got: ${JSON.stringify(lines)}`);
       assert.match(recordEntry.result?.result || '', /hello world/);
       fs.unlinkSync(auditPath);

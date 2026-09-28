@@ -258,6 +258,270 @@ describe('Real bareguard 0.2 Gate + Loop end-to-end', () => {
   });
 });
 
+// The C2 fix: the DEFAULT actionTranslator now maps `createShellTools`' six primitives into
+// bareguard's fs/bash primitive shapes, so fs.readScope/writeScope and bash.allow activate without
+// a caller writing their own translator (examples/with-bareguard.mjs used to hand-write exactly
+// this). Requires bareguard >=0.19.0 — 0.15 ignores `action.tool` entirely, so a tool-name allowlist
+// combined with this shape would deny everything (see CHANGELOG).
+describe('Default actionTranslator maps shell tools to fs/bash primitives (bareguard >=0.19, "C2" fix)', () => {
+  it('shell_read denies outside readScope, allows inside', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ fs: { readScope: ['/tmp'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.equal(await policy('shell_read', { path: '/tmp/x' }, null), true);
+    const denied = await policy('shell_read', { path: '/etc/passwd' }, null);
+    assert.match(denied, /\[deny: fs\.readScope\]/);
+  });
+
+  it('shell_write/shell_edit deny outside writeScope, allow inside', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ fs: { writeScope: ['/tmp'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.equal(await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null), true);
+    assert.equal(await policy('shell_edit', { path: '/tmp/x', oldText: 'a', newText: 'b' }, null), true);
+    assert.match(await policy('shell_write', { path: '/etc/passwd', content: 'hi' }, null), /\[deny: fs\.writeScope\]/);
+  });
+
+  it('a relative or ~-prefixed path is canonicalized before the gate sees it', async () => {
+    const { Gate } = await loadBareguard();
+    const os = require('node:os');
+    const gate = new Gate({ fs: { readScope: [os.homedir()] }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    // ~/somefile resolves under the homedir, which IS in scope.
+    assert.equal(await policy('shell_read', { path: '~/somefile' }, null), true);
+  });
+
+  // The task-B gap this closes: a REAL per-call action (not filterTools' discovery-time
+  // call, which no longer exists — filterTools is identity-only now) with args:{} (no
+  // `path` key at all) used to normalize to `path:undefined`, which bareguard's fs
+  // primitive treats as "not a file action" and SKIPS scope checking — silently ALLOWING
+  // a malformed real call even with a properly configured scope. safeToolPath now
+  // normalizes every missing/malformed path to `''` uniformly, which fs.invalidPath
+  // denies unconditionally.
+  it('a real call with a missing `path` key denies via fs.invalidPath, never silently allows (even with scope configured)', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({
+      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.match(await policy('shell_read', {}, null), /\[deny: fs\.invalidPath\]/);
+    assert.match(await policy('shell_write', { content: 'hi' }, null), /\[deny: fs\.invalidPath\]/);
+    // args undefined entirely (e.g. a malformed tool call) must deny the same way.
+    assert.match(await policy('shell_read', undefined, null), /\[deny: fs\.invalidPath\]/);
+  });
+
+  // The bash-side mirror of the same question: does a missing/malformed argv/command
+  // silently bypass bash.allow the same way? Measured: NO — bareguard's bashCheck reads
+  // `cmd ?? ""`, so an absent cmd is already treated as the empty string internally and
+  // denied by bash.allow (no prefix in bash.allow matches ""), never skipped. No
+  // translator change was needed for shell_run/shell_exec.
+  it('shell_run/shell_exec with a missing/malformed argv or command deny via bash.allow, never silently allow', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ bash: { allow: ['ls'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.match(await policy('shell_run', {}, null), /\[deny: bash\.allow\]/);
+    assert.match(await policy('shell_run', { argv: 'not-an-array' }, null), /\[deny: bash\.allow\]/);
+    assert.match(await policy('shell_exec', {}, null), /\[deny: bash\.allow\]/);
+    // A non-string command is a distinct, even louder deny (bash.invalidCmd) — checked
+    // for completeness, not the missing-arg case above.
+    assert.match(await policy('shell_exec', { command: 123 }, null), /\[deny: bash\.invalidCmd\]/);
+  });
+
+  it('no fs config at all denies by default (fs.readScope.unset) — a shell file tool is NOT silently ungated', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    const denied = await policy('shell_read', { path: '/tmp/x' }, null);
+    assert.match(denied, /\[deny: fs\.readScope\.unset\]/);
+  });
+
+  it('a tool-name allowlist still matches the shell tool despite `type` now being the fs primitive', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({
+      tools: { allowlist: ['shell_read'] },
+      // Both scopes configured so the fs check itself would allow shell_write — isolates the
+      // assertion to the allowlist's own exclusive-identity denial, not an unset-scope denial.
+      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.equal(await policy('shell_read', { path: '/tmp/x' }, null), true);
+    // shell_write isn't in the allowlist — exclusive identity denies it even though a real
+    // shell_write to /tmp/x would otherwise be within writeScope.
+    const denied = await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null);
+    assert.match(denied, /\[deny: tools\.allowlist/);
+  });
+
+  it('a non-shell tool keeps the pre-0.19 tool-named shape (type === tool === name)', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+    assert.equal(await policy('get_weather', { city: 'Berlin' }, null), true);
+  });
+
+  it('filterTools probes IDENTITY ONLY (never a path-less fs shape): a properly-scoped shell tool stays visible', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({
+      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const { filterTools } = wireGate(gate);
+    const tools = [
+      { name: 'shell_read', execute: async () => 'ok' },
+      { name: 'shell_write', execute: async () => 'ok' },
+    ];
+    const filtered = await filterTools(tools);
+    assert.deepEqual(filtered.map(t => t.name), ['shell_read', 'shell_write']);
+  });
+
+  it('filterTools + a tool-name allowlist: only the allowlisted shell tool survives', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({
+      tools: { allowlist: ['shell_read'] },
+      fs: { readScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const { filterTools } = wireGate(gate);
+    const tools = [
+      { name: 'shell_read', execute: async () => 'ok' },
+      { name: 'shell_write', execute: async () => 'ok' },
+    ];
+    const filtered = await filterTools(tools);
+    assert.deepEqual(filtered.map(t => t.name), ['shell_read']);
+  });
+
+  it('filterTools + a tool-name denylist: the denylisted shell tool is hidden', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({
+      tools: { denylist: ['shell_write'] },
+      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const { filterTools } = wireGate(gate);
+    const tools = [
+      { name: 'shell_read', execute: async () => 'ok' },
+      { name: 'shell_write', execute: async () => 'ok' },
+    ];
+    const filtered = await filterTools(tools);
+    assert.deepEqual(filtered.map(t => t.name), ['shell_read']);
+  });
+
+  // The core fix under task A: bareguard 0.19.0's fs primitive SKIPS its scope check
+  // entirely on a path-less action (measured — not a documented contract; bareguard
+  // flagged it may tighten to a deny in a future release). Probing the real translated
+  // shape (`path:undefined`) at discovery time would therefore make an UNCONFIGURED
+  // scope look allowed — silently offering a shell file tool every real call to it
+  // then denies. filterTools must judge identity only (tools.allowlist/denylist) and
+  // leave scope enforcement to `policy` on the real call, which denies loudly.
+  it('filterTools with NO fs config at all still offers the shell file tools; the real call is denied', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { filterTools, policy } = wireGate(gate);
+    const tools = [
+      { name: 'shell_read', execute: async () => 'ok' },
+      { name: 'shell_write', execute: async () => 'ok' },
+    ];
+    const filtered = await filterTools(tools);
+    // Offered — filterTools never hides a tool just because scope happens to be unset.
+    assert.deepEqual(filtered.map(t => t.name), ['shell_read', 'shell_write']);
+    // But an actual call is denied loudly (fs.readScope.unset / fs.writeScope.unset),
+    // never silently allowed — the Loop's deny-streak guard bounds a model that retries.
+    assert.match(await policy('shell_read', { path: '/tmp/x' }, null), /\[deny: fs\.readScope\.unset\]/);
+    assert.match(await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null), /\[deny: fs\.writeScope\.unset\]/);
+  });
+
+  // MUTATION (real 0.19 Gate): reverting filterTools to probe the TRANSLATED shape
+  // (`translate(t.name, undefined, undefined)`, what task A's fix replaced) — reproduced
+  // inline here (not by mutating shipped source) via gate.allows directly. `safeToolPath`
+  // now ALWAYS normalizes a missing-args path to `''` (never `undefined`), so every shell
+  // file tool would be probed with `path:''` at discovery time — bareguard's `fs.invalidPath`
+  // denies an empty-string path UNCONDITIONALLY, regardless of scope config. Result: a
+  // fully-scoped, real bareguard 0.19 Gate would hide shell_read/shell_write from
+  // filterTools even though the shipped test above proves they should stay visible.
+  it('MUTATION (real 0.19 Gate): reverting filterTools to the translated shape hides properly-scoped shell tools', async () => {
+    const { Gate } = await loadBareguard();
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    const gate = new Gate({
+      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      humanChannel: async () => ({ decision: 'deny' }),
+    });
+    await gate.init();
+    const names = ['shell_read', 'shell_write', 'get_weather'];
+    const verdicts = await Promise.all(
+      names.map(n => gate.allows(defaultActionTranslator(n, undefined, null))),
+    );
+    assert.deepEqual(verdicts, [false, false, true],
+      'the pre-fix translated probe (path:"") gets shell_read/shell_write denied by fs.invalidPath even though both scopes are configured');
+  });
+
+  it('shell_run/shell_exec activate bash.allow via the mapped cmd', async () => {
+    const { Gate } = await loadBareguard();
+    const gate = new Gate({ bash: { allow: ['ls'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy } = wireGate(gate);
+
+    assert.equal(await policy('shell_run', { argv: ['ls', '-la'] }, null), true);
+    assert.match(await policy('shell_run', { argv: ['whoami'] }, null), /\[deny: bash/);
+    assert.equal(await policy('shell_exec', { command: 'ls -la' }, null), true);
+  });
+
+  it('end-to-end through a Loop: shell_write outside writeScope is denied and fed back, the model recovers', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({ fs: { writeScope: ['/tmp'] }, audit: { path: auditPath }, humanChannel: async () => ({ decision: 'deny' }) });
+    await gate.init();
+    const { policy, onLlmResult, onToolResult } = wireGate(gate);
+    const writeTool = {
+      name: 'shell_write',
+      description: 'write',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } },
+      execute: async () => { throw new Error('must never execute — the gate should have denied first'); },
+    };
+
+    let round = 0;
+    const provider = {
+      model: 'gpt-4o-mini',
+      name: 'mock',
+      async generate() {
+        round++;
+        // Round 1: try to write outside writeScope — the gate must deny it before execute() runs.
+        if (round === 1) {
+          return { text: '', toolCalls: [{ id: 'c1', name: 'shell_write', arguments: { path: '/etc/passwd', content: 'x' } }], usage: { inputTokens: 1, outputTokens: 1 } };
+        }
+        return { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+
+    const result = await new Loop({ provider, policy, onLlmResult, onToolResult })
+      .run([{ role: 'user', content: 'go' }], [writeTool]);
+    assert.equal(result.error, null);
+    // The deny string reached the transcript as a tool result — the model saw it and moved on.
+    const toolMsg = result.msgs.find(m => m.role === 'tool');
+    assert.match(String(toolMsg?.content), /\[deny: fs\.writeScope\]/);
+    fs.unlinkSync(auditPath);
+  });
+});
+
 // The cross-repo meter→gate round-trip neither side could write alone until
 // bareguard 0.9.0 shipped the consume contract (eval-assist PRD §3.7/§3.8).
 // Chain under test: meter prices the round → emits {costUsd, pricing} → wireGate

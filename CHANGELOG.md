@@ -2,6 +2,76 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### BREAKING
+
+- **`bareguard` peerDependency/devDependency floor raised to `>=0.19.0 <1.0.0`** (was
+  `>=0.9.0 <1.0.0`). Required by the default `actionTranslator` change below — 0.15 and
+  earlier ignore `action.tool` entirely, so a tool-name `tools.allowlist`/`tools.denylist`
+  combined with the new default shape would deny every shell file/bash action. **Upgrade
+  action:** bump your installed `bareguard` to `>=0.19.0` before upgrading this package. If
+  your `Gate` config gates `shell_read`/`shell_grep`/`shell_write`/`shell_edit`, set BOTH
+  `fs.readScope` and `fs.writeScope` — as of bareguard 0.19, an unset scope now DENIES the
+  matching shell file action by default (`fs.readScope.unset` / `fs.writeScope.unset`)
+  instead of the primitive being silently inert. `bash.allow` behavior is unchanged.
+  Other upgrade notes: agent-supplied paths must be absolute (`resolveToolPath` already
+  canonicalizes `~` and relative paths before the gate ever sees them — bareguard itself
+  never canonicalizes and rejects a non-absolute or `~`-prefixed path outright via
+  `fs.invalidPath`); the older `fs.resolveSymlinks` config key is gone on bareguard 0.19
+  (symlink resolution is on by default, unconditionally, with no opt-out — a config still
+  setting that key has it silently ignored); `shell_run`'s mapped `cmd` is its `argv`
+  joined with spaces, so `bash.allow`/`bash.deny` patterns see an argument containing a
+  space differently from how it actually runs (a known, documented limitation — not
+  changed by this release).
+
+### Changed
+
+- **`wireGate`'s default `actionTranslator` now maps `createShellTools`' six primitives to
+  bareguard's `fs`/`bash` action shapes** (the "C2" fix) — `shell_read`/`shell_grep` →
+  `{type:'read', tool, path: resolveToolPath(args.path), args, _ctx}`, `shell_write` →
+  `{type:'write', ...}`, `shell_edit` → `{type:'edit', ...}`, `shell_run` → `{type:'bash',
+  tool, cmd: args.argv.join(' '), args, _ctx}`, `shell_exec` → `{type:'bash', tool, cmd:
+  args.command, args, _ctx}`; every other tool still gets the pre-existing `{type:
+  toolName, tool: toolName, args, _ctx}` shape. Before this, `fs.readScope`/`fs.writeScope`/
+  `bash.allow` never activated unless the adopter hand-wrote an `actionTranslator` (see
+  the previous `examples/with-bareguard.mjs`, now simplified to drop it). `tool` is set on
+  EVERY branch — bareguard 0.19's action identity for `tools.allowlist`/`tools.denylist` is
+  `action.tool ?? action.type`, so a tool-name allowlist keeps matching even though `type`
+  is now a primitive name, not the literal tool name. A malformed or missing `path` never
+  crashes the translator and never silently allows: a present-but-unresolvable path
+  (non-string, empty, unresolvable `~`) normalizes to `''` (bareguard denies via
+  `fs.invalidPath` regardless of scope config); a genuinely absent path (no `path` key at
+  all) is left `undefined`, matching bareguard's own designed behavior of skipping fs
+  scope checking for a path-less action.
+- **`filterTools` probes tool IDENTITY ONLY** (`{type: name, tool: name}`) — never the
+  `actionTranslator`'s translated per-type shape. No real `args` exist yet at discovery
+  time, so a shell file tool would be probed with `path: undefined`; measured against a
+  real bareguard 0.19 Gate, a path-less `read`/`write`/`edit` action SKIPS the fs scope
+  check entirely (not a deny), which would silently OFFER a shell file tool even with NO
+  `fs.readScope`/`writeScope` configured at all — every real call to it then denied by
+  `policy`. bareguard has flagged that a path-less file action may instead DENY in a
+  future release, which would flip the failure mode to silently HIDING a properly-scoped
+  tool. Neither reading is safe to probe on, so `filterTools` only reflects
+  `tools.allowlist`/`tools.denylist` (matched on `action.tool ?? action.type`, which the
+  identity-only probe carries correctly) and leaves scope enforcement to `policy` on the
+  real call, where an unset scope denies loudly (`fs.readScope.unset` /
+  `fs.writeScope.unset`) rather than being silently hidden or silently offered.
+- `examples/with-bareguard.mjs` no longer hand-writes an `actionTranslator` — the default
+  now covers it. `fs.writeScope` added to its Gate config alongside `readScope` (both are
+  required under bareguard 0.19's deny-by-default-when-unset fs primitive).
+
+### Added
+
+- **`exposeMalformedArgs` constructor option** on `OpenAIProvider` and `OllamaProvider`
+  (default `false`, independent of `exposeErrorBody`) — when a tool call's
+  `function.arguments` JSON fails to parse (BA-27), the resulting `malformedToolCall`
+  marker also carries `rawArguments`: the raw arguments string VERBATIM, capped at 500
+  characters, with `rawTruncated: true` added only when the raw string was longer (omitted,
+  not `false`, when it wasn't). Only a STRING raw value is ever exposed — a non-string
+  `function.arguments` is never surfaced this way. Rides through `Loop.run()`'s
+  `malformedToolCall` unchanged, same as the rest of the marker.
+
 ## [0.47.0] - 2026-09-28
 
 ### Added

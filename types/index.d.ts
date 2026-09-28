@@ -142,8 +142,13 @@ export interface GenerateResult {
    * tool call" and retries; `usage`/`model` still flow so the round is metered. The JSON is NEVER
    * repaired. Absent on a clean round. OpenAI-compatible + Ollama string-arguments only; Anthropic
    * arrives pre-parsed and cannot hit this.
+   *
+   * `rawArguments`/`rawTruncated` (BA-27 follow-up) are present only when the provider was
+   * constructed with `exposeMalformedArgs: true` (default off, mirrors `exposeErrorBody`) AND the
+   * raw `function.arguments` was a string: the raw value verbatim, capped at 500 chars, with
+   * `rawTruncated: true` added only when it was longer.
    */
-  malformedToolCall?: { name: string | undefined; error: string };
+  malformedToolCall?: { name: string | undefined; error: string; rawArguments?: string; rawTruncated?: true };
   /**
    * BA-7 — provider-native content blocks the normalized `{text, toolCalls}` shape cannot express
    * (Anthropic `thinking` / `redacted_thinking`), captured opaquely so the Loop can put them on the

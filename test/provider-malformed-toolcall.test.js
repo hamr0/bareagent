@@ -205,3 +205,119 @@ describe('BA-27: a 200 with no `choices` throws a diagnosable ProviderError (Ope
     }
   });
 });
+
+// BA-27 follow-up (fwdloop) — exposeMalformedArgs: an opt-in raw-arguments string on the marker,
+// independent of exposeErrorBody. Off by default (no new key on the marker); on, the raw
+// `function.arguments` string rides verbatim, capped at 500 chars with a visible `rawTruncated` flag.
+const BAD_ARGS_LONG = '{"x":"' + 'a'.repeat(600) + '"}}'; // invalid JSON (extra brace), > 500 chars
+
+describe('BA-27 follow-up: exposeMalformedArgs (OpenAI)', () => {
+  it('off by default: no rawArguments key on the marker', async () => {
+    const s = await serve(openaiBody(BAD_ARGS));
+    try {
+      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
+      const r = await p.generate(MSGS, TOOLS);
+      assert.ok(!('rawArguments' in r.malformedToolCall), 'no rawArguments key when the option is off');
+      assert.ok(!('rawTruncated' in r.malformedToolCall));
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('on + short bad args: rawArguments carries the verbatim string, no rawTruncated key', async () => {
+    const s = await serve(openaiBody(BAD_ARGS));
+    try {
+      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+      const r = await p.generate(MSGS, TOOLS);
+      assert.equal(r.malformedToolCall.rawArguments, BAD_ARGS, 'verbatim, untruncated');
+      assert.ok(!('rawTruncated' in r.malformedToolCall), 'omitted (not merely false) when not truncated');
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('on + 600-char bad args: rawArguments capped at 500 chars, rawTruncated:true', async () => {
+    const s = await serve(openaiBody(BAD_ARGS_LONG));
+    try {
+      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+      const r = await p.generate(MSGS, TOOLS);
+      assert.equal(r.malformedToolCall.rawArguments.length, 500);
+      assert.equal(r.malformedToolCall.rawArguments, BAD_ARGS_LONG.slice(0, 500));
+      assert.equal(r.malformedToolCall.rawTruncated, true);
+    } finally {
+      s.server.close();
+    }
+  });
+});
+
+describe('BA-27 follow-up: exposeMalformedArgs (Ollama)', () => {
+  it('off by default: no rawArguments key on the marker', async () => {
+    const s = await serve({
+      model: 'qwen',
+      message: { content: '', tool_calls: [{ function: { name: 'find', arguments: BAD_ARGS } }] },
+      done_reason: 'stop',
+      prompt_eval_count: 10, eval_count: 5,
+    });
+    try {
+      const p = new OllamaProvider({ url: s.url, timeoutMs: 0 });
+      const r = await p.generate(MSGS, TOOLS);
+      assert.ok(!('rawArguments' in r.malformedToolCall));
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('on: rawArguments carries the verbatim string, capped + flagged past 500 chars', async () => {
+    const s = await serve({
+      model: 'qwen',
+      message: { content: '', tool_calls: [{ function: { name: 'find', arguments: BAD_ARGS_LONG } }] },
+      done_reason: 'stop',
+      prompt_eval_count: 10, eval_count: 5,
+    });
+    try {
+      const p = new OllamaProvider({ url: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+      const r = await p.generate(MSGS, TOOLS);
+      assert.equal(r.malformedToolCall.rawArguments, BAD_ARGS_LONG.slice(0, 500));
+      assert.equal(r.malformedToolCall.rawTruncated, true);
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('non-string raw arguments are never exposed, even with the option on', async () => {
+    // A malformed OBJECT case doesn't occur naturally (JSON.parse only runs on a string), but the
+    // guard itself — "only a string is exposed" — is a direct, independently-testable contract. Force
+    // mapOne to throw on a well-formed object so the catch path runs with non-string tc.function.arguments.
+    const { parseToolCalls } = require('../src/provider-toolcalls');
+    const { malformedToolCall } = parseToolCalls(
+      [{ id: 'c1', function: { name: 'find', arguments: { already: 'an object' } } }],
+      () => { throw new Error('forced'); },
+      { exposeMalformedArgs: true },
+    );
+    assert.ok(!('rawArguments' in malformedToolCall), 'non-string raw arguments are never exposed');
+  });
+});
+
+describe('BA-27 follow-up: exposeMalformedArgs rides through Loop.run() unchanged', () => {
+  it('run().malformedToolCall carries rawArguments when the provider option is on', async () => {
+    const s = await serve(openaiBody(BAD_ARGS));
+    try {
+      const provider = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+      const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'hi' }], LOOP_TOOLS);
+      assert.equal(result.malformedToolCall.rawArguments, BAD_ARGS);
+    } finally {
+      s.server.close();
+    }
+  });
+
+  it('run().malformedToolCall has no rawArguments key when the provider option is off', async () => {
+    const s = await serve(openaiBody(BAD_ARGS));
+    try {
+      const provider = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0 });
+      const result = await new Loop({ provider, throwOnError: false }).run([{ role: 'user', content: 'hi' }], LOOP_TOOLS);
+      assert.ok(!('rawArguments' in result.malformedToolCall));
+    } finally {
+      s.server.close();
+    }
+  });
+});

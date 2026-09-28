@@ -72,6 +72,11 @@ function isLoopbackHost(hostname) {
  *   OpenAI GPT-5 models 400 on `max_tokens` ("Unsupported parameter … Use 'max_completion_tokens'").
  *   Set `true` for an OpenAI-compatible server that only understands the legacy key (e.g. some
  *   self-hosted / proxy endpoints). No model-name sniffing — the caller declares the dialect.
+ * @property {boolean} [exposeMalformedArgs=false] - BA-27 follow-up: when a tool call's `function.arguments`
+ *   JSON fails to parse, also attach the raw string (verbatim, capped at 500 chars, `rawTruncated:true`
+ *   when longer) to `malformedToolCall.rawArguments`. Off by default, independent of `exposeErrorBody` —
+ *   the raw blob is model-generated, not an upstream error body, but the same "don't leak an unbounded
+ *   unexpected string into logs by default" reasoning applies. See `src/provider-toolcalls.js`.
  */
 
 class OpenAIProvider {
@@ -93,6 +98,8 @@ class OpenAIProvider {
     this.deadlineMs = options.deadlineMs;
     // BA-24 (fwdloop): use the legacy `max_tokens` key. Default false ⇒ `max_completion_tokens` (GPT-5-safe).
     this.legacyMaxTokens = options.legacyMaxTokens === true;
+    // BA-27 follow-up: expose the raw malformed tool-call arguments string. Off by default.
+    this.exposeMalformedArgs = options.exposeMalformedArgs === true;
   }
 
   /**
@@ -161,7 +168,7 @@ class OpenAIProvider {
       id: tc.id,
       name: tc.function.name,
       arguments: JSON.parse(tc.function.arguments),
-    }));
+    }), { exposeMalformedArgs: this.exposeMalformedArgs });
 
     return {
       text: msg.content || '',
