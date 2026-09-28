@@ -11,8 +11,9 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   (file, dir, or dangling). Refuses via a thrown error (`err.code:'ELOOP'`) instead of
   silently following the link — a dangling-symlink write no longer creates the link's
   target. Scope is the final path component only; a symlinked PARENT directory is
-  unaffected (that containment case is bareguard's `fs.resolveSymlinks` job, not this
-  flag's — see `resolveToolPath` below). Uses the native `O_NOFOLLOW` open flag (atomic) on linux/macOS;
+  unaffected (bareguard's own resolved-path containment check for that is planned for an
+  upcoming release, not yet published — see `resolveToolPath` below). Uses the native
+  `O_NOFOLLOW` open flag (atomic) on linux/macOS;
   falls back to a documented non-atomic `lstat`-then-open check on Windows, where
   `O_NOFOLLOW` doesn't exist. `shell_grep` refuses only a symlinked ROOT path loudly — a
   file that turns into a symlink mid-walk is skipped silently, matching the existing
@@ -30,8 +31,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `~`/`~/…`, then `path.resolve` against `process.cwd()`. Idempotent
   (`resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)`). Exists so an adopter's
   `actionTranslator` can canonicalize `args.path` the SAME way before `gate.check` —
-  bareguard's `fs` primitive (>=0.19.0) checks the path it's given without canonicalizing
-  it, so a `~`-prefixed or relative path would be judged in a different form than the
+  bareguard's `fs` primitive checks the path it's given without canonicalizing it today,
+  so a `~`-prefixed or relative path would be judged in a different form than the
   absolute path the tool actually opens. `examples/with-bareguard.mjs` updated to use it.
 
 ### Changed
@@ -52,11 +53,25 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   handling) also now guards a non-string input directly, with its own type-only message.
 - Internal: every file-open site in `tools/shell.js` (`shell_read`, `shell_write`,
   `shell_edit`, and `shell_grep`'s root + per-file reads) now goes through one shared
-  `openFile` helper instead of duplicated flag-on/flag-off code paths. No observable
-  behavior change with `noFollowSymlinks` off.
+  `openFile` helper instead of duplicated flag-on/flag-off code paths. `noFollowSymlinks`
+  off is still a plain `fs.open` (unaffected by that flag either way), but `shell_read`
+  and `shell_edit`'s content reads changed shape regardless of the flag as part of the
+  procfs/sysfs fix below — see that entry for the one observable difference this
+  refactor's read path carries.
 
 ### Fixed
 
+- **`shell_read`/`shell_edit` no longer read back empty content from procfs/sysfs files
+  (regression introduced by the `noFollowSymlinks` open-handle refactor, both with the
+  flag ON and OFF).** Both switched to a `Buffer.alloc(stat.size)` + fixed-size read,
+  but files like `/proc/self/status` report `stat.size === 0` while still having real
+  content (the kernel generates it on read, not on stat) — so `shell_read` silently
+  returned `""` and `shell_edit` always reported `"oldText not found"`, regardless of
+  the actual file content. Both now read through the open handle until EOF
+  (`fh.readFile('utf8')`, matching what `shell_grep`'s own reads already did) when the
+  reported size is at or under the cap; the known-large-file fixed-size truncation path
+  is unchanged. Evidence: `statSync('/proc/self/status').size === 0` vs.
+  `readFileSync(...).length` ~1500+.
 - **`~`-prefixed paths no longer silently collapse to a root/cwd-relative path when no
   home directory can be determined.** The previous `process.env.HOME ||
   process.env.USERPROFILE || ''` fallback turned `~/x` into plain `x` (then

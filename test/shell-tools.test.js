@@ -77,6 +77,23 @@ describe('createShellTools', () => {
         /ENOENT|no such file/
       );
     });
+
+    // Regression: procfs/sysfs files report stat.size === 0 (the kernel generates content on read,
+    // not on stat) while having real content — a stat.size-based Buffer.alloc silently returned "".
+    // Evidence: statSync('/proc/self/status').size === 0 but readFileSync(...).length ~1500+.
+    it('reads /proc/self/status (stat.size lies) — flag OFF', { skip: process.platform !== 'linux' }, async () => {
+      const { tools } = createShellTools();
+      const result = await findTool(tools, 'shell_read').execute({ path: '/proc/self/status' });
+      assert.notEqual(result, '', 'expected real /proc content, not the stat.size===0 empty-read regression');
+      assert.match(result, /Name:/);
+    });
+
+    it('reads /proc/self/status (stat.size lies) — flag ON (noFollowSymlinks)', { skip: process.platform !== 'linux' }, async () => {
+      const { tools } = createShellTools({ noFollowSymlinks: true });
+      const result = await findTool(tools, 'shell_read').execute({ path: '/proc/self/status' });
+      assert.notEqual(result, '');
+      assert.match(result, /Name:/);
+    });
   });
 
   describe('shell_grep', () => {
@@ -625,6 +642,26 @@ describe('createShellTools', () => {
       const edit = findTool(tools, 'shell_edit');
       await assert.rejects(() => edit.execute({ path: path.join(TMP, 'does-not-exist.txt'), oldText: 'x', newText: 'y' }));
       await assert.rejects(() => edit.execute({ path: TMP, oldText: 'x', newText: 'y' })); // a directory
+    });
+
+    // Regression companion to the shell_read /proc test: editFile used to read via
+    // Buffer.alloc(stat.size), so a size-0-reporting procfs file always came back "oldText not
+    // found" regardless of what oldText was — indistinguishable from a real miss. Anchor on ':',
+    // which occurs on nearly every "Key:\tValue" line of /proc/self/status, forcing the AMBIGUOUS
+    // ("occurs Nx") refusal path rather than a real write attempt — a side-effect-free way to prove
+    // the read found real (non-empty) content without touching a read-only procfs file.
+    it('reads /proc/self/status through editFile (stat.size lies) — flag OFF', { skip: process.platform !== 'linux' }, async () => {
+      const { tools } = createShellTools();
+      const result = await findTool(tools, 'shell_edit').execute({ path: '/proc/self/status', oldText: ':', newText: '=' });
+      assert.doesNotMatch(result, /oldText not found/, 'must not read back empty content');
+      assert.match(result, /oldText occurs \d+× in/);
+    });
+
+    it('reads /proc/self/status through editFile (stat.size lies) — flag ON (noFollowSymlinks)', { skip: process.platform !== 'linux' }, async () => {
+      const { tools } = createShellTools({ noFollowSymlinks: true });
+      const result = await findTool(tools, 'shell_edit').execute({ path: '/proc/self/status', oldText: ':', newText: '=' });
+      assert.doesNotMatch(result, /oldText not found/);
+      assert.match(result, /oldText occurs \d+× in/);
     });
   });
 

@@ -27,21 +27,26 @@
  * fences `write` gets `edit` fenced by the same scope with ZERO extra config. A write/edit tool alone is NOT
  * auto-gated — validated by poc/ba2-write-tool-gate.mjs (without the translator the out-of-scope write leaks).
  *
- * CAVEAT (applies to read AND write scopes): Parent-chain containment is bareguard's `fs.resolveSymlinks`
- * (>=0.19.0), checked at gate time on the absolute path you pass it. bare-agent canonicalizes the path
- * (`~` + resolve, via `resolveToolPath`) before the gate check and opens that same path. `noFollowSymlinks`
- * refuses a symlinked final component at open time. Together they narrow but do not close the
- * check-then-open window. Hardlinks are not covered by either.
+ * CAVEAT (applies to read AND write scopes): bareguard's `fs` primitive matches paths LEXICALLY TODAY
+ * (no symlink resolution) — a resolved-path (symlink) containment check is planned for an upcoming
+ * bareguard release, not yet published; until it ships, a symlinked PARENT directory is NOT contained
+ * even when the link itself sits inside an allowed scope. bare-agent canonicalizes the path (`~` +
+ * resolve, via `resolveToolPath`) before the gate check and opens that same path — this closes a
+ * DIFFERENT gap (the gate judging a `~`/relative path in a different form than the one the tool
+ * actually opens), not the lexical-match gap above. `noFollowSymlinks` refuses a symlinked FINAL path
+ * component at open time (opt-in, below). None of this covers hardlinks.
  *
  * OPT-IN SYMLINK REFUSAL: `createShellTools({ noFollowSymlinks: true })` closes the specific case above
  * where the symlink itself is the FINAL path component the tool opens (`shell_read`/`shell_write`/`shell_edit`
  * on the path directly, `shell_grep`'s root and per-file reads) — that open now refuses (throws, `ELOOP`)
- * instead of following the link, whether it points inside or outside any configured scope. Two things this
- * does NOT cover, by design: (1) a symlinked PARENT directory (e.g. `/scope/linked-dir/file.txt` where
- * `linked-dir` itself is the link) — that's the containment case above, still bareguard's `fs.resolveSymlinks`
- * job at policy-check time; and (2) on Windows, where `fs.constants.O_NOFOLLOW` doesn't exist, the check
- * falls back to a non-atomic `fs.lstat`-then-open — a symlink planted in the gap between the two calls
- * slips through. Default is `false` (identical behavior to before this option existed).
+ * instead of following the link, whether it points inside or outside any configured scope. Three things
+ * this does NOT cover, by design: (1) a symlinked PARENT directory (e.g. `/scope/linked-dir/file.txt`
+ * where `linked-dir` itself is the link) — that's the lexical-match gap above, unrelated to this flag;
+ * (2) on Windows, where `fs.constants.O_NOFOLLOW` doesn't exist, the check falls back to a non-atomic
+ * `fs.lstat`-then-open — a symlink planted in the gap between the two calls slips through; and (3) the
+ * `cwd` option of `shell_run`/`shell_exec` — it only gets `~` expansion, never `noFollowSymlinks` or
+ * `resolveToolPath`'s full canonicalization, so a symlinked `cwd` is followed. Default is `false`
+ * (identical behavior to before this option existed).
  *
  * DIRECTORY-LISTING RACE (narrowed, not closed): a directory listing (`shell_read` on a dir,
  * `shell_grep`'s root when it's a dir) opens by FD then still has to list by PATH — Node's
@@ -86,9 +91,9 @@ function describeBadPath(p) {
 }
 
 /**
- * Expand a leading `~`/`~/…` to the real home directory via `os.homedir()` — matching bareguard's
- * config-side `~` expansion (`fs.tildePath`), so the SAME string means the same absolute path on
- * both sides of a gate check. Throws a clear error rather than ever silently degrading `~/x` to `/x`:
+ * Expand a leading `~`/`~/…` to the real home directory via `os.homedir()` — matching how bareguard's
+ * own config-side `~` expansion works, so the SAME string means the same absolute path on both sides
+ * of a gate check. Throws a clear error rather than ever silently degrading `~/x` to `/x`:
  * the previous `process.env.HOME || process.env.USERPROFILE || ''` fallback did exactly that when
  * `HOME` was unset or empty — a `~`-rooted path would resolve to the FILESYSTEM ROOT, not "no home,"
  * an under-modeled-boundary bug (an ambiguous case rounding toward "works" instead of surfacing).
@@ -122,9 +127,8 @@ function expandHome(p, homedirFn = os.homedir) {
  * THE canonicalizer every shell file tool uses before opening a path — and the same canonicalization
  * an adopter should apply before `gate.check` so the string it judges is the string that gets opened
  * (see the top-of-file CAVEAT). Expands `~`/`~/…` via `os.homedir()` (throwing rather than silently
- * degrading — see `expandHome`), then resolves against `process.cwd()` — the same two-step bareguard's
- * own config-side path handling expects (`fs.tildePath` for `~`, `fs.relativePath` for a relative
- * path under `fs.resolveSymlinks`).
+ * degrading — see `expandHome`), then resolves against `process.cwd()` — matching how bareguard's own
+ * config-side path handling expects `~` and relative paths to be canonicalized before it judges them.
  *
  * Idempotent: `resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)` — an already-absolute,
  * already-`~`-free path passed back in is returned unchanged (`path.resolve` on an absolute path is
@@ -174,8 +178,8 @@ function symlinkRefusalError(toolName, resolvedPath) {
  * `shell_edit`, and `shell_grep`'s root check + per-file reads). With `noFollowSymlinks` off this
  * is a plain `fs.open` — the caller's `flags` decide read/write/create semantics, byte-identical to
  * this module's pre-existing behavior. With it on, refuses to follow a symlink at the FINAL path
- * component (opt-in — never covers a symlinked PARENT directory, which is bareguard's
- * `fs.resolveSymlinks` job at check time, not this library's).
+ * component (opt-in — never covers a symlinked PARENT directory; see the top-of-file CAVEAT for
+ * bareguard's resolved-path containment side of that, upcoming but not yet published).
  *
  * Two implementations when the flag is on, selected by whether the platform exposes `O_NOFOLLOW`
  * (present on linux/macOS, `undefined` on Windows):
@@ -271,13 +275,25 @@ async function readEntry(rawPath, maxBytes, options = {}) {
       return `dir ${resolved}\n${lines.join('\n')}`;
     }
     if (stat.size > cap) {
+      // Known-large regular file: stat.size is trustworthy here, so a fixed cap-byte read from
+      // offset 0 is the fast path — no need to read the whole thing just to discard the tail.
       const buf = Buffer.alloc(cap);
       await fh.read(buf, 0, cap, 0);
       return buf.toString('utf8') + `\n\n[truncated: ${stat.size - cap} more bytes not shown]`;
     }
-    const buf = Buffer.alloc(stat.size);
-    if (stat.size > 0) await fh.read(buf, 0, stat.size, 0);
-    return buf.toString('utf8');
+    // Read through the handle until EOF rather than trusting stat.size for the byte count: procfs/
+    // sysfs files (e.g. /proc/self/status) commonly report stat.size === 0 while still having real
+    // content (the kernel generates it on read, not on stat) — a size-based Buffer.alloc(stat.size)
+    // silently returned "" for every such file. This is what shell_grep's own reads already do.
+    const content = await fh.readFile('utf8');
+    const bytes = Buffer.byteLength(content, 'utf8');
+    if (bytes > cap) {
+      // A stat-size-lied file (reported <= cap, e.g. 0) turned out to actually exceed the cap once
+      // fully read — truncate the same way the size-known branch above does, computed post-hoc.
+      return Buffer.from(content, 'utf8').subarray(0, cap).toString('utf8')
+        + `\n\n[truncated: ${bytes - cap} more bytes not shown]`;
+    }
+    return content;
   } finally {
     await fh.close().catch(() => {});
   }
@@ -397,9 +413,10 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }, options =
   const fh = await openFile('shell_edit', resolved, fsConstants.O_RDONLY, undefined, options);
   try {
     stat = await fh.stat();
-    const buf = Buffer.alloc(stat.size);
-    if (stat.size > 0) await fh.read(buf, 0, stat.size, 0);
-    content = buf.toString('utf8');
+    // Read through the handle until EOF rather than trusting stat.size for the byte count — see the
+    // matching comment in readEntry (procfs/sysfs files report stat.size === 0 with real content).
+    // `stat` itself is still kept, for the mode preserved on the rewritten temp file below.
+    content = await fh.readFile('utf8');
   } finally {
     await fh.close().catch(() => {});
   }
@@ -765,13 +782,17 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   identical to the pre-existing behavior when omitted): when `true`, `shell_read`, `shell_write`,
  *   `shell_edit`, and `shell_grep` refuse to open a path whose FINAL path component is a symlink
  *   (file, dir, or dangling) — THROWN, `err.code:'ELOOP'`, never a silently-followed link. Scope is
- *   the final component ONLY — a symlinked PARENT directory is NOT refused (that's bareguard's
- *   `fs.resolveSymlinks` job at policy-check time, a lexical-path concern this option can't cover).
- *   On Windows (`fs.constants.O_NOFOLLOW` is undefined there) the guard falls back to a non-atomic
- *   `fs.lstat`-then-open check — a symlink planted in the gap between the two calls slips through;
- *   this is a documented platform limitation, not a bug. Set per `createShellTools()` instance, not
- *   module-global — safe to mix a `noFollowSymlinks:true` toolset for one agent alongside a default
- *   toolset for another in the same process.
+ *   the final component ONLY — a symlinked PARENT directory is NOT refused (bareguard's own
+ *   resolved-path containment check for that is planned for an upcoming release, not yet published;
+ *   until then the gate matches paths lexically, so a symlinked parent dir is not contained there
+ *   either — see the top-of-file CAVEAT). The `cwd` option of `shell_run`/`shell_exec` is a separate,
+ *   NARROWER gap: it only gets `~` expansion, never this flag or `resolveToolPath`'s full
+ *   canonicalization, so a symlinked `cwd` is always followed. On Windows (`fs.constants.O_NOFOLLOW`
+ *   is undefined there) the guard falls back to a non-atomic `fs.lstat`-then-open check — a symlink
+ *   planted in the gap between the two calls slips through; this is a documented platform limitation,
+ *   not a bug. Set per `createShellTools()` instance, not module-global — safe to mix a
+ *   `noFollowSymlinks:true` toolset for one agent alongside a default toolset for another in the same
+ *   process.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
  * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
