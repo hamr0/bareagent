@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { createShellTools } = require('../tools/shell');
+const { createShellTools, resolveToolPath, _expandHome } = require('../tools/shell');
 const { Loop } = require('../src/loop');
 const { Gate } = require('bareguard');
 const { wireGate } = require('../src/bareguard-adapter');
@@ -695,6 +695,457 @@ describe('createShellTools', () => {
       assert.ok(recordEntry, `expected shell_read record entry in audit; got: ${JSON.stringify(lines)}`);
       assert.match(recordEntry.result?.result || '', /hello world/);
       fs.unlinkSync(auditPath);
+    });
+  });
+
+  describe('noFollowSymlinks', () => {
+    // A separate area outside TMP, so "outside" symlink targets are unambiguous.
+    const OUTSIDE = path.join(os.tmpdir(), `bareagent-shell-outside-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const LINKS = path.join(TMP, 'links');
+
+    before(() => {
+      fs.mkdirSync(OUTSIDE, { recursive: true });
+      fs.mkdirSync(LINKS, { recursive: true });
+      fs.writeFileSync(path.join(OUTSIDE, 'secret.txt'), 'outside secret content\n');
+      fs.mkdirSync(path.join(OUTSIDE, 'secretdir'), { recursive: true });
+      fs.writeFileSync(path.join(OUTSIDE, 'secretdir', 'inner.txt'), 'inner secret\n');
+
+      // link -> file outside
+      fs.symlinkSync(path.join(OUTSIDE, 'secret.txt'), path.join(LINKS, 'file-link.txt'));
+      // link -> dir outside
+      fs.symlinkSync(path.join(OUTSIDE, 'secretdir'), path.join(LINKS, 'dir-link'));
+      // dangling link (target never exists)
+      fs.symlinkSync(path.join(OUTSIDE, 'does-not-exist.txt'), path.join(LINKS, 'dangling-link.txt'));
+      // link -> an existing writable file (for the write-refusal-preserves-content case)
+      fs.writeFileSync(path.join(OUTSIDE, 'writable.txt'), 'original content\n');
+      fs.symlinkSync(path.join(OUTSIDE, 'writable.txt'), path.join(LINKS, 'writable-link.txt'));
+      // a real regular file/dir inside LINKS, for the "normal path still works" cases
+      fs.writeFileSync(path.join(LINKS, 'real.txt'), 'real file content\n');
+      fs.mkdirSync(path.join(LINKS, 'realdir'), { recursive: true });
+      fs.writeFileSync(path.join(LINKS, 'realdir', 'child.txt'), 'child content\n');
+
+      // symlinked PARENT dir (the link is a middle path component, not the final one)
+      fs.mkdirSync(path.join(TMP, 'realparent'), { recursive: true });
+      fs.writeFileSync(path.join(TMP, 'realparent', 'leaf.txt'), 'leaf via real parent\n');
+      fs.symlinkSync(path.join(TMP, 'realparent'), path.join(TMP, 'parent-link'));
+    });
+
+    after(() => {
+      fs.rmSync(OUTSIDE, { recursive: true, force: true });
+    });
+
+    describe('shell_read', () => {
+      it('refuses a symlink to a file outside the dir', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const target = path.join(LINKS, 'file-link.txt');
+        await assert.rejects(
+          () => findTool(tools, 'shell_read').execute({ path: target }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            assert.match(err.message, /refusing to follow symlink/);
+            assert.match(err.message, new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+            return true;
+          },
+        );
+      });
+
+      it('refuses a symlink to a directory', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        await assert.rejects(
+          () => findTool(tools, 'shell_read').execute({ path: path.join(LINKS, 'dir-link') }),
+          /ELOOP|refusing to follow symlink/,
+        );
+      });
+
+      it('still reads a regular file, including the truncation path', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r1 = await findTool(tools, 'shell_read').execute({ path: path.join(LINKS, 'real.txt') });
+        assert.match(r1, /real file content/);
+
+        const big = path.join(LINKS, 'big-nofollow.txt');
+        fs.writeFileSync(big, 'y'.repeat(1000));
+        const r2 = await findTool(tools, 'shell_read').execute({ path: big, maxBytes: 100 });
+        assert.ok(r2.startsWith('y'.repeat(100)));
+        assert.match(r2, /\[truncated: 900 more bytes/);
+      });
+
+      it('still lists a regular directory', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r = await findTool(tools, 'shell_read').execute({ path: path.join(LINKS, 'realdir') });
+        assert.match(r, /^dir /);
+        assert.match(r, /file\tchild\.txt/);
+      });
+    });
+
+    describe('shell_write', () => {
+      it('refuses a write through a symlink to an existing file, leaving the target byte-unchanged', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const link = path.join(LINKS, 'writable-link.txt');
+        const targetPath = path.join(OUTSIDE, 'writable.txt');
+        const before = fs.readFileSync(targetPath, 'utf8');
+        await assert.rejects(
+          () => findTool(tools, 'shell_write').execute({ path: link, content: 'PWNED' }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            return true;
+          },
+        );
+        assert.equal(fs.readFileSync(targetPath, 'utf8'), before);
+      });
+
+      it('refuses a write to a dangling symlink, and the target is never created', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const link = path.join(LINKS, 'dangling-link.txt');
+        const wouldBeTarget = path.join(OUTSIDE, 'does-not-exist.txt');
+        await assert.rejects(
+          () => findTool(tools, 'shell_write').execute({ path: link, content: 'PWNED' }),
+          /ELOOP|refusing to follow symlink/,
+        );
+        assert.equal(fs.existsSync(wouldBeTarget), false);
+      });
+
+      it('refuses an append through a symlink', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const link = path.join(LINKS, 'writable-link.txt');
+        const targetPath = path.join(OUTSIDE, 'writable.txt');
+        const before = fs.readFileSync(targetPath, 'utf8');
+        await assert.rejects(
+          () => findTool(tools, 'shell_write').execute({ path: link, content: 'MORE', append: true }),
+          /ELOOP|refusing to follow symlink/,
+        );
+        assert.equal(fs.readFileSync(targetPath, 'utf8'), before);
+      });
+
+      it('still writes and appends to a normal path', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const p = path.join(LINKS, 'plain-write.txt');
+        await findTool(tools, 'shell_write').execute({ path: p, content: 'first\n' });
+        assert.equal(fs.readFileSync(p, 'utf8'), 'first\n');
+        await findTool(tools, 'shell_write').execute({ path: p, content: 'second\n', append: true });
+        assert.equal(fs.readFileSync(p, 'utf8'), 'first\nsecond\n');
+      });
+    });
+
+    describe('shell_edit', () => {
+      it('refuses editing a symlink, leaving both the link and its target unchanged', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const link = path.join(LINKS, 'writable-link.txt');
+        const targetPath = path.join(OUTSIDE, 'writable.txt');
+        const before = fs.readFileSync(targetPath, 'utf8');
+        await assert.rejects(
+          () => findTool(tools, 'shell_edit').execute({ path: link, oldText: 'original', newText: 'PWNED' }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            return true;
+          },
+        );
+        assert.equal(fs.readFileSync(targetPath, 'utf8'), before);
+        assert.ok(fs.lstatSync(link).isSymbolicLink(), 'the link itself must still be a link');
+      });
+    });
+
+    describe('shell_grep', () => {
+      it('refuses a symlinked root path (directory)', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        await assert.rejects(
+          () => findTool(tools, 'shell_grep').execute({ pattern: 'secret', path: path.join(LINKS, 'dir-link') }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            assert.match(err.message, /refusing to follow symlink/);
+            return true;
+          },
+        );
+      });
+
+      // A FILE-type symlink root is never a directory, so it can never reach the dev+ino recheck
+      // (that only fires for a directory root) — this isolates the O_NOFOLLOW-open mechanism itself,
+      // distinct from the dir-link case above which a mismatch check can also incidentally catch.
+      it('refuses a symlinked root path (file)', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        await assert.rejects(
+          () => findTool(tools, 'shell_grep').execute({ pattern: 'secret', path: path.join(LINKS, 'file-link.txt') }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            assert.match(err.message, /refusing to follow symlink/);
+            return true;
+          },
+        );
+      });
+
+      it('does not return content through a symlinked file reached during a directory walk', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r = await findTool(tools, 'shell_grep').execute({ pattern: 'secret', path: LINKS, flags: '' });
+        const fromOutside = r.hits.filter(h => h.file.startsWith(OUTSIDE));
+        assert.equal(fromOutside.length, 0, `expected no hits reached via the symlink; got: ${JSON.stringify(r.hits)}`);
+      });
+
+      it('still greps a normal directory', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r = await findTool(tools, 'shell_grep').execute({ pattern: 'real file content', path: LINKS });
+        assert.equal(r.hits.length, 1);
+        assert.equal(path.basename(r.hits[0].file), 'real.txt');
+      });
+    });
+
+    it('does NOT refuse a symlinked parent directory (final-component-only scope)', async () => {
+      const { tools } = createShellTools({ noFollowSymlinks: true });
+      const viaLink = path.join(TMP, 'parent-link', 'leaf.txt');
+      const r = await findTool(tools, 'shell_read').execute({ path: viaLink });
+      assert.match(r, /leaf via real parent/);
+    });
+
+    it('flag OFF (default) keeps following symlinks — proves the guard is opt-in', async () => {
+      const { tools } = createShellTools(); // no options — default noFollowSymlinks:false
+      const r = await findTool(tools, 'shell_read').execute({ path: path.join(LINKS, 'file-link.txt') });
+      assert.match(r, /outside secret content/);
+    });
+
+    describe('Windows fallback (_openFile lstat branch)', () => {
+      const { _openFile } = require('../tools/shell');
+      // Force the non-O_NOFOLLOW branch via an injectable constants override, without touching the
+      // real fs.constants global (which would affect every other test in this process).
+      const NO_NATIVE_NOFOLLOW = { constants: {} };
+
+      it('refuses when the path is a symlink', async () => {
+        const link = path.join(LINKS, 'file-link.txt');
+        await assert.rejects(
+          () => _openFile('shell_read', link, 0 /* O_RDONLY */, undefined, { noFollowSymlinks: true, ...NO_NATIVE_NOFOLLOW }),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            assert.match(err.message, /refusing to follow symlink/);
+            return true;
+          },
+        );
+      });
+
+      it('opens normally when the path is a real file (ENOENT-on-lstat-of-symlink-absence is not the case here)', async () => {
+        const real = path.join(LINKS, 'real.txt');
+        const fh = await _openFile('shell_read', real, 0 /* O_RDONLY */, undefined, { noFollowSymlinks: true, ...NO_NATIVE_NOFOLLOW });
+        try {
+          const buf = await fh.readFile();
+          assert.match(buf.toString('utf8'), /real file content/);
+        } finally {
+          await fh.close();
+        }
+      });
+
+      it('creates a new (non-symlink) file normally, same as the native path', async () => {
+        const p = path.join(LINKS, 'fallback-created.txt');
+        const fsNode = require('node:fs');
+        const flags = fsNode.constants.O_WRONLY | fsNode.constants.O_CREAT | fsNode.constants.O_TRUNC;
+        const fh = await _openFile('shell_write', p, flags, 0o666, { noFollowSymlinks: true, ...NO_NATIVE_NOFOLLOW });
+        try {
+          await fh.writeFile('via fallback', 'utf8');
+        } finally {
+          await fh.close();
+        }
+        assert.equal(fs.readFileSync(p, 'utf8'), 'via fallback');
+      });
+    });
+
+    describe('flag off uses the shared helper too (single code path)', () => {
+      it('_openFile with the flag off is a plain fs.open regardless of the constants override', async () => {
+        const { _openFile } = require('../tools/shell');
+        // Even a symlink opens fine when noFollowSymlinks is omitted/false — the constants override
+        // is irrelevant on this path, proving the flag (not the platform) selects the behavior.
+        const link = path.join(LINKS, 'file-link.txt');
+        const fh = await _openFile('shell_read', link, 0 /* O_RDONLY */, undefined, {});
+        try {
+          const buf = await fh.readFile();
+          assert.match(buf.toString('utf8'), /outside secret content/);
+        } finally {
+          await fh.close();
+        }
+      });
+    });
+
+    describe('directory-listing race guard (dev+ino recheck)', () => {
+      const { _assertDirStillMatchesHandle } = require('../tools/shell');
+
+      it('does not throw when the path still matches the handle (normal case)', async () => {
+        const dir = path.join(LINKS, 'realdir');
+        const realStat = fs.lstatSync(dir);
+        await assert.doesNotReject(() => _assertDirStillMatchesHandle('shell_read', dir, realStat));
+      });
+
+      it('refuses (ELOOP) when the path no longer matches the handle — simulated via an injected mismatched stat', async () => {
+        // A genuine TOCTOU race (swap the real directory for another between open and readdir) can't
+        // be forced deterministically without either a flaky timing hack or monkeypatching fs globally
+        // — both excluded. Instead we inject a fabricated "the handle we opened had THIS dev+ino"
+        // that deliberately does not match the directory's real current dev+ino, exercising exactly
+        // the mismatch branch a real swap would trigger, with no race and no global stubbing.
+        const dir = path.join(LINKS, 'realdir');
+        const fakeHandleStat = { dev: -1, ino: -1 };
+        await assert.rejects(
+          () => _assertDirStillMatchesHandle('shell_read', dir, /** @type {any} */ (fakeHandleStat)),
+          (err) => {
+            assert.equal(err.code, 'ELOOP');
+            assert.match(err.message, /refusing to follow symlink/);
+            return true;
+          },
+        );
+      });
+
+      it('refuses when the path has vanished since the handle was opened', async () => {
+        const gone = path.join(LINKS, 'never-existed-dir');
+        const fakeHandleStat = fs.lstatSync(LINKS); // any real stat; the path itself won't resolve
+        await assert.rejects(
+          () => _assertDirStillMatchesHandle('shell_read', gone, /** @type {any} */ (fakeHandleStat)),
+          /ELOOP|refusing to follow symlink/,
+        );
+      });
+
+      it('is wired into shell_read: a normal directory read still succeeds with the recheck engaged', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r = await findTool(tools, 'shell_read').execute({ path: path.join(LINKS, 'realdir') });
+        assert.match(r, /file\tchild\.txt/);
+      });
+
+      it('is wired into shell_grep root: a normal directory grep still succeeds with the recheck engaged', async () => {
+        const { tools } = createShellTools({ noFollowSymlinks: true });
+        const r = await findTool(tools, 'shell_grep').execute({ pattern: 'real file content', path: LINKS });
+        assert.equal(r.hits.length, 1);
+      });
+    });
+  });
+
+  describe('resolveToolPath', () => {
+    it('resolves a relative path against process.cwd()', () => {
+      const r = resolveToolPath('some-relative-file.txt');
+      assert.equal(r, path.resolve(process.cwd(), 'some-relative-file.txt'));
+    });
+
+    it('expands a leading ~ via os.homedir()', () => {
+      const r = resolveToolPath('~/notes.txt');
+      assert.equal(r, path.join(os.homedir(), 'notes.txt'));
+    });
+
+    it('leaves an already-absolute path resolved (normalizing . and ..)', () => {
+      const r = resolveToolPath(path.join(TMP, '..', path.basename(TMP), 'a.txt'));
+      assert.equal(r, path.join(TMP, 'a.txt'));
+    });
+
+    it('is idempotent: resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)', () => {
+      for (const input of ['relative/path.txt', '~/notes.txt', '/already/absolute.txt', TMP, '.']) {
+        const once = resolveToolPath(input);
+        const twice = resolveToolPath(once);
+        assert.equal(twice, once, `expected idempotence for input ${JSON.stringify(input)}`);
+      }
+    });
+
+    it('is the exact canonicalizer wired into shell_read/write/edit/grep (mechanical swap, not a new mechanism)', async () => {
+      // Every call site now calls resolveToolPath(rawPath) instead of the inline
+      // path.resolve(expandHome(rawPath)) — this end-to-end read proves the wiring still works.
+      const { tools } = createShellTools();
+      const abs = path.join(TMP, 'a.txt');
+      const r = await findTool(tools, 'shell_read').execute({ path: abs });
+      assert.match(r, /hello world/);
+    });
+
+    describe('bad-input guard (non-string / empty path)', () => {
+      // Before this guard: undefined/null crashed with a raw Node internal message
+      // ("paths[0] argument must be of type string"), 42 crashed with
+      // "p.startsWith is not a function", and "" silently resolved to process.cwd() — an ASSUMED
+      // default a gate would then judge and a tool would then read/list, for a model call that named
+      // no path at all. All four must now throw ONE clear, TYPE-only message (never the value).
+      for (const [label, value] of [['undefined', undefined], ['null', null], ['a number', 42]]) {
+        it(`throws a clear type-only error for ${label}`, () => {
+          assert.throws(
+            () => resolveToolPath(value),
+            (err) => {
+              assert.match(err.message, /^resolveToolPath: path must be a non-empty string \(got /);
+              return true;
+            },
+          );
+        });
+      }
+
+      it('throws for an empty string, instead of silently resolving to process.cwd()', () => {
+        assert.throws(
+          () => resolveToolPath(''),
+          (err) => {
+            assert.equal(err.message, 'resolveToolPath: path must be a non-empty string (got empty string)');
+            return true;
+          },
+        );
+      });
+
+      it('the error message never contains the actual value for a string-like bad input', () => {
+        // "a number" (42) is the string-like case: its message must name the TYPE ("number"), never
+        // the digits "42" — the repo rule is type-only, never the value, in any error/audit surface.
+        try {
+          resolveToolPath(42);
+          assert.fail('expected resolveToolPath(42) to throw');
+        } catch (/** @type {any} */ err) {
+          assert.doesNotMatch(err.message, /42/);
+          assert.match(err.message, /got number/);
+        }
+      });
+
+      it('shell_read with an empty path throws the same clean error, not a cwd read', async () => {
+        const { tools } = createShellTools();
+        await assert.rejects(
+          () => findTool(tools, 'shell_read').execute({ path: '' }),
+          /resolveToolPath: path must be a non-empty string \(got empty string\)/,
+        );
+      });
+
+      it('shell_grep with an empty path throws the same clean error, not a cwd search', async () => {
+        const { tools } = createShellTools();
+        await assert.rejects(
+          () => findTool(tools, 'shell_grep').execute({ pattern: 'x', path: '' }),
+          /resolveToolPath: path must be a non-empty string \(got empty string\)/,
+        );
+      });
+
+      it('expandHome itself still guards a non-string when called directly', () => {
+        assert.throws(
+          () => _expandHome(42),
+          (err) => {
+            assert.match(err.message, /^expandHome: path must be a string \(got number\)$/);
+            return true;
+          },
+        );
+        assert.throws(() => _expandHome(undefined), /got undefined/);
+        assert.throws(() => _expandHome(null), /got null/);
+      });
+    });
+
+    describe('empty/throwing home directory (via the internal _expandHome injection point)', () => {
+      // A genuine os.homedir() failure can't be forced deterministically without either mutating
+      // process.env (platform-dependent: os.homedir() on some platforms ignores HOME/USERPROFILE
+      // entirely, e.g. via getpwuid) or monkeypatching os.homedir globally (which would leak into
+      // every other test in this process). _expandHome's injectable homedirFn param — added for
+      // exactly this — lets the test drive the real throwing code path deterministically instead.
+      it('throws instead of silently degrading ~/x to /x when homedirFn returns an empty string', () => {
+        // This is the exact regression: the OLD fallback was
+        // `process.env.HOME || process.env.USERPROFILE || ''`, and with HOME="" that produced
+        // path.join('', 'x') === 'x' — a path.resolve() on that lands CWD-relative, not "no home."
+        // A caller asking for a HOME-rooted path never expects a cwd-relative or root-relative
+        // answer instead; the fix must throw, and this test proves it does NOT return that old value.
+        assert.throws(
+          () => _expandHome('~/x', () => ''),
+          /cannot expand ~: no home directory/,
+        );
+      });
+
+      it('throws when homedirFn itself throws', () => {
+        assert.throws(
+          () => _expandHome('~/x', () => { throw new Error('boom'); }),
+          /cannot expand ~: no home directory/,
+        );
+      });
+
+      it('does not invoke homedirFn at all for a non-~ path', () => {
+        let called = false;
+        const r = _expandHome('/already/absolute', () => { called = true; return '/home/whoever'; });
+        assert.equal(r, '/already/absolute');
+        assert.equal(called, false);
+      });
+
+      it('a bare "~" (no trailing slash) is also covered', () => {
+        assert.throws(() => _expandHome('~', () => ''), /cannot expand ~: no home directory/);
+      });
     });
   });
 });

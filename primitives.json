@@ -141,9 +141,9 @@
       "category": "tools",
       "when": "you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps",
       "import": "import { createShellTools } from 'bare-agent/tools'",
-      "signature": "createShellTools() => {tools: ToolDef[]}",
-      "fails": "never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, and shell_edit refuses a non-unique anchor as a tool result (file untouched).",
-      "example": "const { tools } = createShellTools();\nconst loop = new Loop({ provider, tools, policy });"
+      "signature": "createShellTools(options?: {noFollowSymlinks?: boolean}) => {tools: ToolDef[]}",
+      "fails": "never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.",
+      "example": "const { tools } = createShellTools();\nconst loop = new Loop({ provider, tools, policy });\nconst { tools: safeTools } = createShellTools({ noFollowSymlinks: true });"
     },
     {
       "name": "createSpawnTool",
@@ -360,6 +360,15 @@
       "signature": "remember(spans: Array<string | { content?: string, text?: string }>, options: RememberOptions) => Promise<RememberOutcome>",
       "fails": "skips empty spans and never fabricates; a provider HaltError propagates clean. Each pass forwards usage via onLlmResult; a fact counts once via ctx.recordMemoryOp.",
       "example": "const { facts } = await remember(spans, { provider, store });\nconsole.log(`consolidated ${facts.length} durable facts`);"
+    },
+    {
+      "name": "resolveToolPath",
+      "category": "tools",
+      "when": "you need the SAME absolute path bareguard's fs primitive will canonicalize at gate-check",
+      "import": "import { resolveToolPath } from 'bare-agent/tools'",
+      "signature": "resolveToolPath(p: string) => string",
+      "fails": "throws when `p` is not a non-empty string, and when `p` starts with `~` and no home",
+      "example": "const resolved = resolveToolPath('~/notes.txt');"
     },
     {
       "name": "Retry",

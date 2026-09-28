@@ -2,6 +2,68 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`createShellTools({ noFollowSymlinks: true })`** — opt-in refusal for `shell_read`,
+  `shell_write`, `shell_edit`, and `shell_grep` when a path's FINAL component is a symlink
+  (file, dir, or dangling). Refuses via a thrown error (`err.code:'ELOOP'`) instead of
+  silently following the link — a dangling-symlink write no longer creates the link's
+  target. Scope is the final path component only; a symlinked PARENT directory is
+  unaffected (that containment case is bareguard's `fs.resolveSymlinks` job, not this
+  flag's — see `resolveToolPath` below). Uses the native `O_NOFOLLOW` open flag (atomic) on linux/macOS;
+  falls back to a documented non-atomic `lstat`-then-open check on Windows, where
+  `O_NOFOLLOW` doesn't exist. `shell_grep` refuses only a symlinked ROOT path loudly — a
+  file that turns into a symlink mid-walk is skipped silently, matching the existing
+  read-error `continue` behavior. `shell_grep`'s root check is atomic (opens through the
+  same shared helper as the other tools, then fstats the handle) rather than a
+  look-then-open `lstat`. A directory listing (`shell_read` on a dir, `shell_grep`'s root
+  when it's a dir) additionally rechecks the path's `dev`+`ino` against the open handle
+  right after listing, narrowing (not closing) the window where a directory swapped in
+  between the open and the by-path listing could report a different directory's names.
+  Default `false`; identical behavior to before this option existed.
+
+- **`resolveToolPath(p)`** (exported from `tools/shell.js` and re-exported from
+  `bare-agent/tools`) — THE canonicalizer every shell file tool (`shell_read`,
+  `shell_write`, `shell_edit`, `shell_grep`) now applies before opening a path: expand
+  `~`/`~/…`, then `path.resolve` against `process.cwd()`. Idempotent
+  (`resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)`). Exists so an adopter's
+  `actionTranslator` can canonicalize `args.path` the SAME way before `gate.check` —
+  bareguard's `fs` primitive (>=0.19.0) checks the path it's given without canonicalizing
+  it, so a `~`-prefixed or relative path would be judged in a different form than the
+  absolute path the tool actually opens. `examples/with-bareguard.mjs` updated to use it.
+
+### Changed
+
+- **Home directory source is now `os.homedir()`**, matching bareguard's own `~`
+  expansion, instead of `process.env.HOME || process.env.USERPROFILE`.
+- **`shell_read`/`shell_grep` with an empty path now error instead of reading/searching
+  `process.cwd()`.** `resolveToolPath` now rejects a non-string or empty `path` up front
+  (thrown, before any expansion/resolution): `resolveToolPath: path must be a non-empty
+  string (got <type>)`, naming only the type/category of the bad value, never the value
+  itself. Before this, `undefined`/`null` crashed with a raw Node internal message,
+  a non-string like a number crashed with `p.startsWith is not a function`, and `""`
+  silently resolved to `process.cwd()` — an assumed default that a gate would then judge
+  and a tool would then read/list, for a model call that named no path at all. Every file
+  tool routes through `resolveToolPath`, so this closes the gap for `shell_read` and
+  `shell_grep` (`shell_write`/`shell_edit` already had their own earlier non-empty-path
+  guards, unchanged). `expandHome` (used directly by `shell_run`/`shell_exec`'s `cwd`
+  handling) also now guards a non-string input directly, with its own type-only message.
+- Internal: every file-open site in `tools/shell.js` (`shell_read`, `shell_write`,
+  `shell_edit`, and `shell_grep`'s root + per-file reads) now goes through one shared
+  `openFile` helper instead of duplicated flag-on/flag-off code paths. No observable
+  behavior change with `noFollowSymlinks` off.
+
+### Fixed
+
+- **`~`-prefixed paths no longer silently collapse to a root/cwd-relative path when no
+  home directory can be determined.** The previous `process.env.HOME ||
+  process.env.USERPROFILE || ''` fallback turned `~/x` into plain `x` (then
+  cwd-relative) when `HOME` was unset or empty — an ambiguous "no home" case rounding
+  toward "works" instead of surfacing. Expanding `~` now throws a clear error
+  (`cannot expand ~: no home directory`) in that case, never a silent wrong path.
+
 ## [0.46.6] - 2026-09-27
 
 ### Docs

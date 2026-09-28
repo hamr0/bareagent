@@ -19,26 +19,50 @@
  * `fs`/`bash` primitives — those need `action.type ∈ {read,write,edit,bash}` with `action.path`/`action.cmd`.
  * To gate `shell_write`/`shell_edit` by `fs.writeScope` (so a write outside the allowed root is denied BEFORE it
  * touches disk), translate it at the gate — see `examples/with-bareguard.mjs` for the `wireGate(gate, { actionTranslator })`
- * mapping (`shell_write` → `{ type:'write', path }`, `shell_edit` → `{ type:'edit', path }`, `shell_read`/`shell_grep`
- * → `{ type:'read', path }`, `shell_run`/`shell_exec` → `{ type:'bash', cmd }`). bareguard gates `edit` by
+ * mapping (`shell_write` → `{ type:'write', path: resolveToolPath(path) }`, `shell_edit` → `{ type:'edit', path: resolveToolPath(path) }`,
+ * `shell_read`/`shell_grep` → `{ type:'read', path: resolveToolPath(path) }`, `shell_run`/`shell_exec` → `{ type:'bash', cmd }`) —
+ * canonicalize with `resolveToolPath` (exported alongside `createShellTools`) before the gate check, so the string
+ * the gate judges is the string the tool actually opens (see the CAVEAT below). bareguard gates `edit` by
  * `fs.writeScope` identically to `write` (its FS primitive's `FS_TYPES` includes `edit`), so a consumer that
  * fences `write` gets `edit` fenced by the same scope with ZERO extra config. A write/edit tool alone is NOT
  * auto-gated — validated by poc/ba2-write-tool-gate.mjs (without the translator the out-of-scope write leaks).
  *
- * CAVEAT (applies to read AND write scopes): bareguard's `fs` primitive matches paths LEXICALLY (no
- * `realpath`/symlink resolution), so a symlink that lives INSIDE the allowed scope but points OUTSIDE it is
- * not caught — a `shell_write` through such a link can escape the scope. If untrusted input can create
- * symlinks under your scope, canonicalize (`fs.realpath`) before the gate, or keep the scope on a root with
- * no attacker-writable symlinks. This is bareguard's documented lexical-match contract, not specific to this tool.
+ * CAVEAT (applies to read AND write scopes): Parent-chain containment is bareguard's `fs.resolveSymlinks`
+ * (>=0.19.0), checked at gate time on the absolute path you pass it. bare-agent canonicalizes the path
+ * (`~` + resolve, via `resolveToolPath`) before the gate check and opens that same path. `noFollowSymlinks`
+ * refuses a symlinked final component at open time. Together they narrow but do not close the
+ * check-then-open window. Hardlinks are not covered by either.
+ *
+ * OPT-IN SYMLINK REFUSAL: `createShellTools({ noFollowSymlinks: true })` closes the specific case above
+ * where the symlink itself is the FINAL path component the tool opens (`shell_read`/`shell_write`/`shell_edit`
+ * on the path directly, `shell_grep`'s root and per-file reads) — that open now refuses (throws, `ELOOP`)
+ * instead of following the link, whether it points inside or outside any configured scope. Two things this
+ * does NOT cover, by design: (1) a symlinked PARENT directory (e.g. `/scope/linked-dir/file.txt` where
+ * `linked-dir` itself is the link) — that's the containment case above, still bareguard's `fs.resolveSymlinks`
+ * job at policy-check time; and (2) on Windows, where `fs.constants.O_NOFOLLOW` doesn't exist, the check
+ * falls back to a non-atomic `fs.lstat`-then-open — a symlink planted in the gap between the two calls
+ * slips through. Default is `false` (identical behavior to before this option existed).
+ *
+ * DIRECTORY-LISTING RACE (narrowed, not closed): a directory listing (`shell_read` on a dir,
+ * `shell_grep`'s root when it's a dir) opens by FD then still has to list by PATH — Node's
+ * `fs/promises` has no `fdopendir` — so a directory swapped in at that path between the open and the
+ * listing could report a DIFFERENT directory's NAMES (never contents; every content read goes through
+ * the already-open fd, never re-opened by path). With `noFollowSymlinks` on, a `dev`+`ino` recheck
+ * runs immediately after the listing and refuses (`ELOOP`) on a mismatch — this narrows the window to
+ * essentially nothing but does not close it: a swap-and-swap-back that lands on the original `dev`+
+ * `ino` before the recheck runs is undetectable by any check that must re-consult the path.
  */
 
 /** @typedef {import('../types').ToolDef} ToolDef */
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
+
+const fsConstants = fs.constants;
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;       // 256 KB
 const DEFAULT_WRITE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB — a sanity ceiling on a single write (LLM-authored)
@@ -48,45 +72,215 @@ const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_MAX_BUFFER = 1024 * 1024;     // 1 MB
 
 /**
- * @param {string} p
+ * Type-only description of a bad path arg for an error message — NEVER the value itself (repo rule:
+ * an unexpected value must never leak into an error/audit log, only its type/category). `p` here is
+ * untrusted, model-authored tool-call input, so this is the boundary that rule protects.
+ * @param {unknown} p
  * @returns {string}
  */
-function expandHome(p) {
+function describeBadPath(p) {
+  if (p === undefined) return 'undefined';
+  if (p === null) return 'null';
+  if (p === '') return 'empty string';
+  return typeof p;
+}
+
+/**
+ * Expand a leading `~`/`~/…` to the real home directory via `os.homedir()` — matching bareguard's
+ * config-side `~` expansion (`fs.tildePath`), so the SAME string means the same absolute path on
+ * both sides of a gate check. Throws a clear error rather than ever silently degrading `~/x` to `/x`:
+ * the previous `process.env.HOME || process.env.USERPROFILE || ''` fallback did exactly that when
+ * `HOME` was unset or empty — a `~`-rooted path would resolve to the FILESYSTEM ROOT, not "no home,"
+ * an under-modeled-boundary bug (an ambiguous case rounding toward "works" instead of surfacing).
+ * @param {string} p
+ * @param {() => string} [homedirFn] - Injectable override, used ONLY by tests to force the
+ *   empty/throwing-homedir case deterministically, without monkeypatching `os.homedir` globally
+ *   (which would affect every other test in this process). Production call sites never pass this.
+ * @returns {string}
+ */
+function expandHome(p, homedirFn = os.homedir) {
+  if (typeof p !== 'string') {
+    throw new Error(`expandHome: path must be a string (got ${describeBadPath(p)})`);
+  }
   if (!p) return p;
   if (p.startsWith('~/') || p === '~') {
-    const home = process.env.HOME || process.env.USERPROFILE || '';
+    let home;
+    try {
+      home = homedirFn();
+    } catch (/** @type {any} */ err) {
+      throw new Error(`cannot expand ~: no home directory (${err && err.message ? err.message : String(err)})`);
+    }
+    if (!home) {
+      throw new Error('cannot expand ~: no home directory');
+    }
     return path.join(home, p.slice(1));
   }
   return p;
 }
 
 /**
+ * THE canonicalizer every shell file tool uses before opening a path — and the same canonicalization
+ * an adopter should apply before `gate.check` so the string it judges is the string that gets opened
+ * (see the top-of-file CAVEAT). Expands `~`/`~/…` via `os.homedir()` (throwing rather than silently
+ * degrading — see `expandHome`), then resolves against `process.cwd()` — the same two-step bareguard's
+ * own config-side path handling expects (`fs.tildePath` for `~`, `fs.relativePath` for a relative
+ * path under `fs.resolveSymlinks`).
+ *
+ * Idempotent: `resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)` — an already-absolute,
+ * already-`~`-free path passed back in is returned unchanged (`path.resolve` on an absolute path is
+ * a no-op; there is no `~` left to expand).
+ * REJECTS a non-string or empty `p` outright (thrown, before any expansion/resolution runs) —
+ * every file tool routes through this function, so a model-authored call that omits `path` or sends
+ * `""` must not silently resolve to `process.cwd()` (an assumed default a gate would judge and a tool
+ * would then read/list, for input that named no path at all). The rejection message names only the
+ * TYPE/category of the bad value (`describeBadPath`), never the value itself.
+ * @param {string} p
+ * @returns {string}
+ * @when you need the SAME absolute path bareguard's fs primitive will canonicalize at gate-check
+ *   time (>=0.19.0) — canonicalize once with this before `gate.check`, then open exactly that string.
+ * @fails throws when `p` is not a non-empty string, and when `p` starts with `~` and no home
+ *   directory can be determined (`os.homedir()` returns empty or throws) — never turns `~/x` into
+ *   `/x`, and never turns a missing/empty path into `process.cwd()`.
+ * @example
+ *   const resolved = resolveToolPath('~/notes.txt');
+ */
+function resolveToolPath(p) {
+  if (typeof p !== 'string' || p.length === 0) {
+    throw new Error(`resolveToolPath: path must be a non-empty string (got ${describeBadPath(p)})`);
+  }
+  return path.resolve(expandHome(p));
+}
+
+/**
+ * Build the standard refusal thrown by every symlink-refusing site (BA-nofollow). Deliberately a
+ * plain `Error` (not a subclass) so it crosses the Loop's tool-error boundary like any other tool
+ * failure and feeds the BA-12 identical-error spin guard; `code:'ELOOP'` mirrors the kernel errno
+ * that `O_NOFOLLOW` itself raises, so callers can switch on ONE field regardless of which of the
+ * two code paths (native flag vs the Windows lstat fallback) produced it.
+ * @param {string} toolName
+ * @param {string} resolvedPath
+ * @returns {Error}
+ */
+function symlinkRefusalError(toolName, resolvedPath) {
+  const err = /** @type {any} */ (new Error(
+    `${toolName}: refusing to follow symlink at ${resolvedPath} (noFollowSymlinks is on)`,
+  ));
+  err.code = 'ELOOP';
+  return err;
+}
+
+/**
+ * ONE shared open path for every file-open site in this module (`shell_read`, `shell_write`,
+ * `shell_edit`, and `shell_grep`'s root check + per-file reads). With `noFollowSymlinks` off this
+ * is a plain `fs.open` — the caller's `flags` decide read/write/create semantics, byte-identical to
+ * this module's pre-existing behavior. With it on, refuses to follow a symlink at the FINAL path
+ * component (opt-in — never covers a symlinked PARENT directory, which is bareguard's
+ * `fs.resolveSymlinks` job at check time, not this library's).
+ *
+ * Two implementations when the flag is on, selected by whether the platform exposes `O_NOFOLLOW`
+ * (present on linux/macOS, `undefined` on Windows):
+ *   - Native: pass `O_NOFOLLOW` straight to the kernel via `fs.open`. Atomic — there is no window
+ *     between checking and opening. A symlink at the final component (file, dir, or DANGLING)
+ *     makes the open fail with `ELOOP` before anything is created or read, which we translate to
+ *     `symlinkRefusalError`. Any other error (ENOENT, EACCES, …) passes through unchanged.
+ *   - Fallback (`O_NOFOLLOW` undefined): `fs.lstat` the path first and refuse if it is a symlink,
+ *     then `fs.open` normally. This is NOT atomic — a symlink planted between the `lstat` and the
+ *     `open` slips through (TOCTOU) — documented as a known Windows limitation, not a bug: Windows
+ *     has no `O_NOFOLLOW`-equivalent open flag reachable from Node. `lstat` throwing `ENOENT` means
+ *     "nothing there yet," which is fine for a write/create call — the open below still runs and
+ *     either creates the file or throws its own ENOENT for a read.
+ * @param {string} toolName
+ * @param {string} resolvedPath
+ * @param {number} flags
+ * @param {number} [mode]
+ * @param {{noFollowSymlinks?: boolean, constants?: {O_NOFOLLOW?: number}}} [options] - `constants` is
+ *   an injectable override, used by tests to force the Windows fallback branch on a non-Windows CI
+ *   box without monkeypatching `fs.constants` globally.
+ */
+async function openFile(toolName, resolvedPath, flags, mode, options = {}) {
+  const { noFollowSymlinks = false, constants = fsConstants } = options;
+  if (!noFollowSymlinks) {
+    return fs.open(resolvedPath, flags, mode);
+  }
+  const oNoFollow = constants.O_NOFOLLOW;
+  if (typeof oNoFollow === 'number') {
+    try {
+      return await fs.open(resolvedPath, flags | oNoFollow, mode);
+    } catch (/** @type {any} */ err) {
+      if (err && err.code === 'ELOOP') throw symlinkRefusalError(toolName, resolvedPath);
+      throw err;
+    }
+  }
+  // Windows fallback: non-atomic lstat-then-open.
+  let lst = null;
+  try {
+    lst = await fs.lstat(resolvedPath);
+  } catch (/** @type {any} */ err) {
+    if (err && err.code !== 'ENOENT') throw err;
+  }
+  if (lst && lst.isSymbolicLink()) throw symlinkRefusalError(toolName, resolvedPath);
+  return fs.open(resolvedPath, flags, mode);
+}
+
+/**
+ * Narrows (does not close) the directory-listing race: after opening a directory by FD we still
+ * have to list it by PATH — Node's `fs/promises` exposes no `fdopendir` — so a directory or symlink
+ * swapped in at that path between the open and the `readdir` could make us list a DIFFERENT
+ * directory's NAMES. This never leaks file CONTENTS (every content read in this module goes through
+ * the already-open fd, never re-opened by path), only which names are reported for a listing.
+ *
+ * Re-`lstat`s the path right after the read and refuses (throws, `ELOOP`) unless its `dev`+`ino`
+ * still match the handle that was opened — catching both a swap-to-a-symlink (whose own inode won't
+ * match the real directory's) and a swap-to-a-different-real-directory (a different inode).
+ *
+ * RESIDUAL, documented not closed: a swap-and-swap-back that lands back on the original dev+ino
+ * before this check runs is undetectable — any check that must re-consult the path shares this
+ * limit. Only called when `noFollowSymlinks` is on; the recheck is inert otherwise.
+ * @param {string} toolName
+ * @param {string} resolvedPath
+ * @param {import('node:fs').Stats} handleStat
+ */
+async function assertDirStillMatchesHandle(toolName, resolvedPath, handleStat) {
+  const current = await fs.lstat(resolvedPath).catch(() => null);
+  if (!current || current.dev !== handleStat.dev || current.ino !== handleStat.ino) {
+    throw symlinkRefusalError(toolName, resolvedPath);
+  }
+}
+
+/**
  * @param {string} rawPath
  * @param {number} [maxBytes]
+ * @param {{noFollowSymlinks?: boolean}} [options]
  */
-async function readEntry(rawPath, maxBytes) {
-  const resolved = path.resolve(expandHome(rawPath));
-  const stat = await fs.stat(resolved);
-  if (stat.isDirectory()) {
-    const entries = await fs.readdir(resolved, { withFileTypes: true });
-    const lines = entries.map(e => {
-      const kind = e.isDirectory() ? 'dir' : e.isSymbolicLink() ? 'link' : 'file';
-      return `${kind}\t${e.name}`;
-    });
-    return `dir ${resolved}\n${lines.join('\n')}`;
-  }
+async function readEntry(rawPath, maxBytes, options = {}) {
+  const resolved = resolveToolPath(rawPath);
   const cap = maxBytes || DEFAULT_READ_MAX_BYTES;
-  if (stat.size > cap) {
-    const fh = await fs.open(resolved, 'r');
-    try {
+
+  const fh = await openFile('shell_read', resolved, fsConstants.O_RDONLY, undefined, options);
+  try {
+    const stat = await fh.stat();
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(resolved, { withFileTypes: true });
+      // Directory-listing race (item 3): the listing above still goes by PATH, not the fd we just
+      // opened (no fdopendir in fs/promises) — recheck right after, narrowing the swap window.
+      if (options.noFollowSymlinks) await assertDirStillMatchesHandle('shell_read', resolved, stat);
+      const lines = entries.map(e => {
+        const kind = e.isDirectory() ? 'dir' : e.isSymbolicLink() ? 'link' : 'file';
+        return `${kind}\t${e.name}`;
+      });
+      return `dir ${resolved}\n${lines.join('\n')}`;
+    }
+    if (stat.size > cap) {
       const buf = Buffer.alloc(cap);
       await fh.read(buf, 0, cap, 0);
       return buf.toString('utf8') + `\n\n[truncated: ${stat.size - cap} more bytes not shown]`;
-    } finally {
-      await fh.close();
     }
+    const buf = Buffer.alloc(stat.size);
+    if (stat.size > 0) await fh.read(buf, 0, stat.size, 0);
+    return buf.toString('utf8');
+  } finally {
+    await fh.close().catch(() => {});
   }
-  return fs.readFile(resolved, 'utf8');
 }
 
 /**
@@ -106,9 +300,10 @@ async function readEntry(rawPath, maxBytes) {
  * feeds this UNTRUSTED model-authored args (that is the boundary BA-4 was breached at, and where types buy
  * nothing).
  * @param {{path: string, content: string, append?: boolean, maxBytes?: number}} args
+ * @param {{noFollowSymlinks?: boolean}} [options]
  * @returns {Promise<string>}
  */
-async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
+async function writeFile({ path: rawPath, content, append = false, maxBytes }, options = {}) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw new Error('shell_write requires a non-empty "path" string');
   }
@@ -124,10 +319,20 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
   if (bytes > cap) {
     throw new Error(`shell_write content is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
   }
-  const resolved = path.resolve(expandHome(rawPath));
+  const resolved = resolveToolPath(rawPath);
   await fs.mkdir(path.dirname(resolved), { recursive: true });
-  if (append) await fs.appendFile(resolved, content, 'utf8');
-  else await fs.writeFile(resolved, content, 'utf8');
+
+  // O_TRUNC/O_APPEND + O_CREAT, mode 0o666 (subject to umask) — the same semantics `fs.writeFile`/
+  // `fs.appendFile` use under the hood. With `noFollowSymlinks` on, O_NOFOLLOW refuses at the kernel
+  // if the final component is a symlink (dangling or not) — the link's target is NEVER created or
+  // touched, because the open call fails before that.
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | (append ? fsConstants.O_APPEND : fsConstants.O_TRUNC);
+  const fh = await openFile('shell_write', resolved, flags, 0o666, options);
+  try {
+    await fh.writeFile(content, 'utf8');
+  } finally {
+    await fh.close().catch(() => {});
+  }
   return `${append ? 'appended' : 'wrote'} ${bytes} bytes to ${resolved}`;
 }
 
@@ -161,9 +366,10 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }) {
  * `newText` and would corrupt any edit whose replacement contains a `$`. We index + slice, so every byte of
  * `newText` lands verbatim.
  * @param {{path: string, oldText: string, newText: string, maxBytes?: number}} args
+ * @param {{noFollowSymlinks?: boolean}} [options]
  * @returns {Promise<string>}
  */
-async function editFile({ path: rawPath, oldText, newText, maxBytes }) {
+async function editFile({ path: rawPath, oldText, newText, maxBytes }, options = {}) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw new Error('shell_edit requires a non-empty "path" string');
   }
@@ -181,9 +387,22 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }) {
     );
   }
 
-  const resolved = path.resolve(expandHome(rawPath));
+  const resolved = resolveToolPath(rawPath);
+
+  // The read (and, when noFollowSymlinks is on, the symlink refusal) happens BEFORE any temp file
+  // or rename — a refusal must leave both the target and a would-be link's target untouched.
   // fs-layer errors (ENOENT for a missing file, EISDIR for a directory) throw — same surface as shell_read.
-  const content = await fs.readFile(resolved, 'utf8');
+  let content;
+  let stat;
+  const fh = await openFile('shell_edit', resolved, fsConstants.O_RDONLY, undefined, options);
+  try {
+    stat = await fh.stat();
+    const buf = Buffer.alloc(stat.size);
+    if (stat.size > 0) await fh.read(buf, 0, stat.size, 0);
+    content = buf.toString('utf8');
+  } finally {
+    await fh.close().catch(() => {});
+  }
 
   // Literal, non-overlapping occurrence count (split on a string does no regex interpretation).
   const occurrences = content.split(oldText).length - 1;
@@ -205,8 +424,8 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }) {
     throw new Error(`shell_edit result is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
   }
 
-  // Atomic replace: a sibling temp (same dir → same filesystem → rename is atomic) with the original's mode.
-  const stat = await fs.stat(resolved);
+  // Atomic replace: a sibling temp (same dir → same filesystem → rename is atomic) with the original's
+  // mode. `stat` is already the handle's stat from the read above — no second `fs.stat` call needed.
   const tmp = `${resolved}.shell_edit-${crypto.randomBytes(9).toString('hex')}.tmp`;
   try {
     // flag 'wx' (O_CREAT|O_EXCL) — never follow or clobber a pre-planted file/symlink at the temp path; a
@@ -226,11 +445,18 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }) {
   return `edited ${resolved}: 1 replacement (-${removed}/+${added} lines)`;
 }
 
-// Probe the first 1KB for NUL bytes to skip binary files in grep walks.
-/** @param {string} filePath */
-async function isProbablyText(filePath) {
+// Probe the first 1KB for NUL bytes to skip binary files in grep walks. Per-file grep opens go
+// through the shared `openFile` helper like every other open site; unlike read/write/edit, a
+// symlink refusal here is caught and swallowed (SILENT skip), not surfaced — per the design, only
+// the grep ROOT refusal (in `grepPath`) is a loud tool error. A file that turns into a link between
+// `readdir` and open is skipped like any other read error (ENOENT, EACCES, …) already is.
+/**
+ * @param {string} filePath
+ * @param {boolean} [noFollowSymlinks]
+ */
+async function isProbablyText(filePath, noFollowSymlinks = false) {
   try {
-    const fh = await fs.open(filePath, 'r');
+    const fh = await openFile('shell_grep', filePath, fsConstants.O_RDONLY, undefined, { noFollowSymlinks });
     try {
       const buf = Buffer.alloc(1024);
       const { bytesRead } = await fh.read(buf, 0, 1024, 0);
@@ -301,6 +527,9 @@ function looksCatastrophic(pattern) {
  * @property {number} [timeout] - Hard wall-clock ceiling in ms (default 5000). The match runs in a
  *   worker thread; on overrun the worker is terminated and the call rejects, so a pattern that slips
  *   past `looksCatastrophic` can no longer hang the host event loop.
+ * @property {boolean} [noFollowSymlinks] - When true, refuses a symlinked ROOT path (thrown, loud)
+ *   and skips (silently, like any other read error) a file that is or becomes a symlink during the
+ *   walk. Threaded into `workerData` so the worker thread's file reads honor it too.
  */
 
 /**
@@ -311,8 +540,8 @@ function looksCatastrophic(pattern) {
  * guarantee; a grounded bypass like `(a|a|a)*` passes it yet backtracks exponentially).
  * @param {GrepArgs} args
  */
-async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i' }) {
-  const resolved = path.resolve(expandHome(rawPath));
+async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false }) {
+  const resolved = resolveToolPath(rawPath);
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
   let re;
   try {
@@ -335,10 +564,15 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
 
   for (const file of files) {
     if (hits.length >= cap) break;
-    if (!(await isProbablyText(file))) continue;
+    if (!(await isProbablyText(file, noFollowSymlinks))) continue;
     let content;
     try {
-      content = await fs.readFile(file, 'utf8');
+      const fh = await openFile('shell_grep', file, fsConstants.O_RDONLY, undefined, { noFollowSymlinks });
+      try {
+        content = (await fh.readFile()).toString('utf8');
+      } finally {
+        await fh.close();
+      }
     } catch {
       continue;
     }
@@ -359,21 +593,50 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
  * Public grep entry. Fast-rejects obviously catastrophic patterns without paying for a worker,
  * then runs the search in a worker thread bounded by a hard timeout — so even a pattern that
  * defeats the static guard degrades to a bounded rejection instead of an event-loop hang.
+ *
+ * The ROOT symlink refusal (opt-in `noFollowSymlinks`) runs HERE, on the main thread, before the
+ * worker is even spawned — the ONLY loud/thrown refusal in the grep path (per-file skips during
+ * the walk happen inside the worker and stay silent, matching the existing read-error `continue`).
  * @param {GrepArgs} args
  */
-function grepPath(args) {
-  const { pattern, flags = 'i', timeout } = args;
+async function grepPath(args) {
+  const { pattern, flags = 'i', timeout, path: rawPath, noFollowSymlinks = false } = args;
   if (looksCatastrophic(pattern)) {
-    return Promise.reject(new Error(
+    throw new Error(
       `shell_grep: pattern rejected — nested unbounded quantifier (e.g. "(a+)+") risks catastrophic ` +
       `backtracking that would block the process. Simplify the regex.`,
-    ));
+    );
   }
   // Cheap up-front validation so a syntactically invalid regex fails clearly without a worker spin-up.
   try {
     new RegExp(pattern, flags);
   } catch (/** @type {any} */ err) {
-    return Promise.reject(new Error(`shell_grep: invalid regex — ${err.message}`));
+    throw new Error(`shell_grep: invalid regex — ${err.message}`);
+  }
+
+  if (noFollowSymlinks) {
+    // Atomic root check through the SAME shared helper every other open site uses (item 2) — O_RDONLY
+    // opens either a file or a directory on Linux/macOS, so one open covers both root shapes. A
+    // missing root is left to the worker's own "path not found" error (same message either flag
+    // state); any other open failure, including the ELOOP symlink refusal, surfaces here, loud, before
+    // the worker is spawned.
+    const resolvedRoot = resolveToolPath(rawPath);
+    let fh = null;
+    try {
+      fh = await openFile('shell_grep', resolvedRoot, fsConstants.O_RDONLY, undefined, { noFollowSymlinks: true });
+    } catch (/** @type {any} */ err) {
+      if (!(err && err.code === 'ENOENT')) throw err;
+    }
+    if (fh) {
+      try {
+        const stat = await fh.stat();
+        // Directory-listing race (item 3): the worker's own walk() re-reads this root by PATH, so
+        // recheck the root's identity here too, narrowing the swap window the same way shell_read does.
+        if (stat.isDirectory()) await assertDirStillMatchesHandle('shell_grep', resolvedRoot, stat);
+      } finally {
+        await fh.close().catch(() => {});
+      }
+    }
   }
 
   const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
@@ -495,17 +758,31 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
 }
 
 /**
- * Create the three shell tools. No options — configuration is per-call via tool args,
- * gating is the caller's responsibility via `new Loop({ policy })`.
+ * Create the six shell tools. Configuration is mostly per-call via tool args; gating is the
+ * caller's responsibility via `new Loop({ policy })`.
  *
+ * @param {{noFollowSymlinks?: boolean}} [options] - `noFollowSymlinks` (default `false`, byte-
+ *   identical to the pre-existing behavior when omitted): when `true`, `shell_read`, `shell_write`,
+ *   `shell_edit`, and `shell_grep` refuse to open a path whose FINAL path component is a symlink
+ *   (file, dir, or dangling) — THROWN, `err.code:'ELOOP'`, never a silently-followed link. Scope is
+ *   the final component ONLY — a symlinked PARENT directory is NOT refused (that's bareguard's
+ *   `fs.resolveSymlinks` job at policy-check time, a lexical-path concern this option can't cover).
+ *   On Windows (`fs.constants.O_NOFOLLOW` is undefined there) the guard falls back to a non-atomic
+ *   `fs.lstat`-then-open check — a symlink planted in the gap between the two calls slips through;
+ *   this is a documented platform limitation, not a bug. Set per `createShellTools()` instance, not
+ *   module-global — safe to mix a `noFollowSymlinks:true` toolset for one agent alongside a default
+ *   toolset for another in the same process.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
- * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, and shell_edit refuses a non-unique anchor as a tool result (file untouched).
+ * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
  * @example
  *   const { tools } = createShellTools();
  *   const loop = new Loop({ provider, tools, policy });
+ * @example
+ *   const { tools: safeTools } = createShellTools({ noFollowSymlinks: true });
  */
-function createShellTools() {
+function createShellTools(options = {}) {
+  const { noFollowSymlinks = false } = options;
   /** @type {ToolDef[]} */
   const tools = [
     {
@@ -519,7 +796,8 @@ function createShellTools() {
         },
         required: ['path'],
       },
-      execute: async (/** @type {{path: string, maxBytes?: number}} */ { path: p, maxBytes }) => readEntry(p, maxBytes),
+      execute: async (/** @type {{path: string, maxBytes?: number}} */ { path: p, maxBytes }) =>
+        readEntry(p, maxBytes, { noFollowSymlinks }),
     },
     {
       name: 'shell_grep',
@@ -535,7 +813,7 @@ function createShellTools() {
         },
         required: ['pattern', 'path'],
       },
-      execute: async (/** @type {GrepArgs} */ args) => grepPath(args),
+      execute: async (/** @type {GrepArgs} */ args) => grepPath({ ...args, noFollowSymlinks }),
     },
     {
       name: 'shell_write',
@@ -555,7 +833,7 @@ function createShellTools() {
       // The args are model-authored and UNTRUSTED — `content` may be absent (an output-token-capped
       // generation), so the boundary type stays loose and `writeFile` enforces the contract at runtime (BA-4).
       execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) =>
-        writeFile(/** @type {any} */ (args)),
+        writeFile(/** @type {any} */ (args), { noFollowSymlinks }),
     },
     {
       name: 'shell_edit',
@@ -579,7 +857,7 @@ function createShellTools() {
       // The args are model-authored and UNTRUSTED — oldText/newText may be absent (an output-token-capped
       // generation), so the boundary type stays loose and editFile enforces the BA-4 contract at runtime.
       execute: async (/** @type {{path: string, oldText?: string, newText?: string, maxBytes?: number}} */ args) =>
-        editFile(/** @type {any} */ (args)),
+        editFile(/** @type {any} */ (args), { noFollowSymlinks }),
     },
     {
       name: 'shell_run',
@@ -621,4 +899,13 @@ function createShellTools() {
   return { tools };
 }
 
-module.exports = { createShellTools, _grepCore, _writeFile: writeFile, _editFile: editFile };
+module.exports = {
+  createShellTools,
+  resolveToolPath,
+  _grepCore,
+  _writeFile: writeFile,
+  _editFile: editFile,
+  _openFile: openFile,
+  _assertDirStillMatchesHandle: assertDirStillMatchesHandle,
+  _expandHome: expandHome,
+};
