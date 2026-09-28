@@ -97,23 +97,32 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   toward "works" instead of surfacing. Expanding `~` now throws a clear error
   (`cannot expand ~: no home directory`) in that case, never a silent wrong path.
 - **`scripts/gen-primitives.mjs` no longer silently truncates a wrapped `@when`/`@fails`
-  tag.** `@when`/`@fails` are one-line catalog entries by design (the manifest reads only
-  the tag's first line), but `parseBlock` had no check for a continuation line — a tag
-  wrapped onto a second line was silently cut down to a sentence fragment, and
-  `npm run check:primitives` still reported "current" because it only compares the
-  generator's own (equally truncated) output against the committed file, never against
-  the source JSDoc. Caught on this branch before release, when `resolveToolPath`'s
-  wrapped `@when` shipped to `primitives.json` as a sentence fragment. `parseBlock` now
-  tracks whether a non-blank, non-tag line follows an unclosed `@when`/`@fails` and
-  reports it as a loud generation-time problem (`<name>: @when continues onto a second
-  line — keep @when/@fails on one line (the manifest reads only the first)`), failing
-  the generator (and thus `check:primitives`/CI) instead of shipping a truncated entry.
-  A blank line or the next `@tag` still closes a tag normally, with no problem reported.
-  A follow-up fix closed a related gap: a wrapped continuation line that itself starts
-  with `@word` (e.g. a typo) previously parsed as an unrelated new tag and the
-  truncation went unreported; an unknown-tag check inside any `@when` block now catches
-  it too (`<name>: unknown tag @<tag> — if this is a wrapped @when/@fails line, keep
-  them on one line; otherwise add the tag to KNOWN_TAGS`).
+  tag (present since 0.18.1, root-fixed here after two narrower attempts each left an
+  escape).** `@when`/`@fails` are one-line catalog entries by design (the manifest reads
+  only the tag's first line); `parseBlock` originally had no continuation check at all,
+  and a shape-by-shape "is the next line a continuation" fix still missed a
+  whitespace-only star line and a continuation that itself starts with `@word` (read as
+  an unrelated new tag and dropped) — both silently truncated a tag with `--check` still
+  reporting "current," since it only compares the generator's own (equally truncated)
+  output against the committed file, never against the source JSDoc. `parseBlock` is now
+  root-fixed to parse each JSDoc block the way JSDoc itself does: a tag's BODY is every
+  line from the tag through the line before the next tag (or the comment's end), with no
+  shape guessing. Two rules apply over that body: (A) `@when`/`@fails`, plus the other
+  hand-authored single-line fields `@category`/`@name`/`@signature` (their value is also
+  read from only the first line), fail the generator when their body has more than one
+  non-empty line (`<name>: @<tag> spans more than one line — keep @when/@fails on one
+  line (the manifest reads only the first)`, worded per-tag for the others); (B) any
+  `@tag` inside a `@when` block that isn't in the hand-maintained `KNOWN_TAGS` set fails
+  the generator too (`<name>: unknown tag @<tag> — if this is a wrapped @when/@fails
+  line, keep them on one line; otherwise add the tag to KNOWN_TAGS`), with a hint when
+  the tag matches a known JSDoc alias (`@return`/`@arg`/`@argument`/`@exception`/`@prop`
+  → `did you mean @returns`/`@param`/`@param`/`@throws`/`@property`). `@example` is
+  exempt from tag-boundary detection for its own body: while it's open, only a
+  `KNOWN_TAGS` line closes it, so example CONTENT that merely looks like a tag (a
+  decorator, an email) is kept verbatim instead of fracturing the sample; a genuine known
+  tag following `@example` still closes and applies normally. `primitives.json` is
+  unchanged (byte-identical) under the stricter parse. Matches the identical fix shipped
+  in bareguard's copy of this generator.
 
 ## [0.46.6] - 2026-09-27
 
