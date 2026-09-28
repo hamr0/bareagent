@@ -102,13 +102,18 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   wrapped onto a second line was silently cut down to a sentence fragment, and
   `npm run check:primitives` still reported "current" because it only compares the
   generator's own (equally truncated) output against the committed file, never against
-  the source JSDoc. This is exactly what happened to `resolveToolPath`'s `@when` in
-  0.46.6. `parseBlock` now tracks whether a non-blank, non-tag line follows an
-  unclosed `@when`/`@fails` and reports it as a loud generation-time problem (`<name>: @when
-  continues onto a second line — keep @when/@fails on one line (the manifest reads only
-  the first)`), failing the generator (and thus `check:primitives`/CI) instead of shipping
-  a truncated entry. A blank line or the next `@tag` still closes a tag normally, with no
-  problem reported.
+  the source JSDoc. Caught on this branch before release, when `resolveToolPath`'s
+  wrapped `@when` shipped to `primitives.json` as a sentence fragment. `parseBlock` now
+  tracks whether a non-blank, non-tag line follows an unclosed `@when`/`@fails` and
+  reports it as a loud generation-time problem (`<name>: @when continues onto a second
+  line — keep @when/@fails on one line (the manifest reads only the first)`), failing
+  the generator (and thus `check:primitives`/CI) instead of shipping a truncated entry.
+  A blank line or the next `@tag` still closes a tag normally, with no problem reported.
+  A follow-up fix closed a related gap: a wrapped continuation line that itself starts
+  with `@word` (e.g. a typo) previously parsed as an unrelated new tag and the
+  truncation went unreported; an unknown-tag check inside any `@when` block now catches
+  it too (`<name>: unknown tag @<tag> — if this is a wrapped @when/@fails line, keep
+  them on one line; otherwise add the tag to KNOWN_TAGS`).
 
 ## [0.46.6] - 2026-09-27
 

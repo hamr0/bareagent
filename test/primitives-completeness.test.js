@@ -189,6 +189,34 @@ test('a continued @when fails the generator loudly instead of silently truncatin
   }
 });
 
+test('a wrapped @when line that itself starts with an unknown @tag is flagged, not silently truncated', () => {
+  // The continuation check only fires for a non-tag line — a wrapped @when/@fails
+  // line that happens to start with `@word` (e.g. a typo) parses as a NEW tag
+  // instead, so the continuation set never sees it and the truncation goes
+  // unreported. An unknown-tag check inside an @when block closes that gap.
+  const genScript = path.join(ROOT, 'scripts', 'gen-primitives.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prim-gen-unk-'));
+  try {
+    writeFixturePkg(dir, { whenLine: '@when this description\n * @typo this is prose continuation' });
+    let err;
+    try {
+      execFileSync(process.execPath, [genScript], { cwd: dir, stdio: 'pipe' });
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, 'generator should exit non-zero on an unknown @tag inside a @when block');
+    assert.strictEqual(err.status, 1);
+    assert.match(
+      err.stderr.toString(),
+      /foo: unknown tag @typo — if this is a wrapped @when\/@fails line, keep them on one line; otherwise add the tag to KNOWN_TAGS/
+    );
+    // No primitives.json should have been written on a failed generation.
+    assert.strictEqual(fs.existsSync(path.join(dir, 'primitives.json')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a single-line @when generates cleanly', () => {
   const genScript = path.join(ROOT, 'scripts', 'gen-primitives.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prim-gen-ok-'));

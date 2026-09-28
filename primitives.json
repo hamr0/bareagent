@@ -373,7 +373,7 @@
     {
       "name": "Retry",
       "category": "resilience",
-      "when": "you want backoff-with-jitter around a flaky async call (a provider request, a plan step) — the retry seam Loop and runPlan wrap providers with",
+      "when": "you want backoff-with-jitter around a flaky async call (a provider request, a plan step) — the retry seam that Loop and runPlan wrap around providers",
       "import": "import { Retry } from 'bare-agent'",
       "signature": "new Retry(options?: RetryOptions)",
       "fails": "rethrows the last error once attempts are exhausted; by default only transient errors (429/5xx/ECONNRESET/ETIMEDOUT) are retried.",

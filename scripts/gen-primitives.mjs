@@ -30,6 +30,16 @@ function braced(s) {
   }
   return null;
 }
+// Tags parseBlock understands, plus the standard JSDoc tags this repo's @when
+// blocks actually use alongside them (property/throws/typedef — verified by
+// scanning every @when block in the scanned roots; see the header comment).
+// Only a block carrying @when is parsed at all, so an unrecognized tag there
+// is exactly the trap this set exists to catch: a generator that silently
+// ignores a tag it doesn't handle (see the wrapped-@when-line gap it closes).
+const KNOWN_TAGS = new Set([
+  'param', 'returns', 'type', 'signature', 'when', 'fails', 'category',
+  'name', 'example', 'property', 'throws', 'typedef',
+]);
 function parseBlock(block) {
   const inner = block.replace(/^\/\*\*/, '').replace(/\*\/\s*$/, '');
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
@@ -40,11 +50,17 @@ function parseBlock(block) {
   // joined or truncated. contState tracks "the previous tag was when/fails and
   // hasn't been closed yet"; a non-blank, non-tag line while it's set is a
   // continuation. A blank line or the next @tag closes it without a problem.
+  // Critically, a continuation line that itself LOOKS like a tag (e.g. a typo'd
+  // `@word`) must NOT be treated as a fresh, unrelated tag — it's caught below
+  // by the unknownTags check instead, so @when/@fails truncation is never silent.
   const continued = new Set(); let contState = null;
+  const unknownTags = [];
   for (const raw of inner.split('\n').map(strip)) {
     const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
     if (tag) {
-      mode = null; const [, name, rest] = tag;
+      const [, name, rest] = tag;
+      if (mode !== 'example' && !KNOWN_TAGS.has(name)) unknownTags.push(name);
+      mode = null;
       contState = null;
       if (name === 'param') {
         const b = braced(rest); const nm = b && b.rest.match(/^\s*(\[?)([\w.$]+)/);
@@ -72,7 +88,7 @@ function parseBlock(block) {
   const indents = example.filter(l => l.trim()).map(l => l.match(/^\s*/)[0].length);
   const pad = indents.length ? Math.min(...indents) : 0;
   if (pad) for (let i = 0; i < example.length; i++) example[i] = example[i].slice(pad);
-  return { params, returns, type, sigOverride, when, fails, category, primName, example: example.join('\n'), continued: [...continued] };
+  return { params, returns, type, sigOverride, when, fails, category, primName, example: example.join('\n'), continued: [...continued], unknownTags };
 }
 function symbolAfter(src, afterIdx) {
   const tail = src.slice(afterIdx);
@@ -172,6 +188,7 @@ for (const rel of jsFiles) {
     const name = p.primName || sym.name; // @name overrides an aliased export
     for (const req of ['when', 'fails', 'example']) if (!p[req]) problems.push(`${name}: missing @${req}`);
     for (const tag of p.continued) problems.push(`${name}: @${tag} continues onto a second line — keep @when/@fails on one line (the manifest reads only the first)`);
+    for (const tag of p.unknownTags) problems.push(`${name}: unknown tag @${tag} — if this is a wrapped @when/@fails line, keep them on one line; otherwise add the tag to KNOWN_TAGS`);
     const spec = imports.get(name);
     if (!spec) problems.push(`${name}: not found in any exports barrel (is it exported?)`);
     out.push({
