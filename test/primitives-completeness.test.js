@@ -145,6 +145,13 @@ test('manifest shape is exactly {package, primitives} — pins the no-version de
   assert.deepStrictEqual(Object.keys(manifest).sort(), ['package', 'primitives']);
 });
 
+
+// Generator-mechanics tests (tag continuation, unknown-tag rejection,
+// @example-boundary handling, class-method resolution, and the vendored-core
+// pin) live in test/primitives-core.test.js — shared byte-identically across
+// bare-agent, bareguard, and litectx. This file stays repo-specific: export
+// completeness, the exclusion allow-list, and manifest shape/content checks
+// against bare-agent's OWN real primitives.json.
 test('every @example is syntactically valid ESM', () => {
   // A copy-paste example that does not even parse is a confident wrong answer to
   // "how do I call this?". Syntax-only check (node --check) — never executes.

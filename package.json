@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.46.6",
+  "version": "0.47.0",
   "files": [
     "index.js",
     "index.d.ts",
@@ -95,7 +95,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/**/*.test.js",
+    "test": "node --test test/**/*.test.js test/**/*.test.mjs",
     "test:unit": "node --test \"test/!(integration*|*mcp*|spawn*).test.js\"",
     "typecheck": "tsc --noEmit",
     "prebuild:types": "node scripts/clean-types.js",

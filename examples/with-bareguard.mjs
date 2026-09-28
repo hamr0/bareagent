@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { Loop, wireGate } = require('bare-agent');
 const { OpenAI } = require('bare-agent/providers');
-const { createShellTools } = require('bare-agent/tools');
+const { createShellTools, resolveToolPath } = require('bare-agent/tools');
 
 // 1. Build the gate. Every primitive is optional with sensible defaults.
 const gate = new Gate({
@@ -50,18 +50,25 @@ await gate.init();
 //    primitives: those fire only on `action.type ∈ {bash, read, write, edit}` and read `action.cmd`/`action.path`.
 //    So to make the `bash.allow` + `fs.readScope` config above actually enforce, we MUST translate the shell
 //    tools into those primitive shapes — otherwise the caps are silently dead (relayfact F7/BA-3).
+//
+//    `path` below is `resolveToolPath(args.path)`, not the raw arg: bareguard's fs primitive checks the
+//    path you hand it WITHOUT canonicalizing it, so a `~`-prefixed or relative path would be judged
+//    against `fs.readScope`/`fs.writeScope` in a different form than the one the tool actually opens —
+//    gate string and opened string must be the SAME string. `resolveToolPath` is the one canonicalizer
+//    (expand `~` via os.homedir(), then path.resolve) every shell file tool already applies internally
+//    before opening; calling it here too means the gate sees exactly what gets opened.
 const actionTranslator = (toolName, args, ctx) => {
   switch (toolName) {
     // shell_run is argv (no shell); bareguard's bash.allow matches `cmd.startsWith(prefix)`, so join argv[0..].
     case 'shell_run':  return { type: 'bash', cmd: (args?.argv || []).join(' '), args, _ctx: ctx ?? null };
     case 'shell_exec': return { type: 'bash', cmd: args?.command, args, _ctx: ctx ?? null };
-    // shell_read / shell_grep are reads — gate them through fs.readScope.
+    // shell_read / shell_grep are reads — gate them through fs.readScope, on the canonicalized path.
     case 'shell_read':
-    case 'shell_grep': return { type: 'read', path: args?.path, args, _ctx: ctx ?? null };
+    case 'shell_grep': return { type: 'read', path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
     // shell_write is a write — gate it through fs.writeScope (add writeScope to the Gate config to enforce).
-    case 'shell_write': return { type: 'write', path: args?.path, args, _ctx: ctx ?? null };
+    case 'shell_write': return { type: 'write', path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
     // shell_edit is an anchored edit — bareguard gates {type:'edit'} by the SAME fs.writeScope as write.
-    case 'shell_edit':  return { type: 'edit',  path: args?.path, args, _ctx: ctx ?? null };
+    case 'shell_edit':  return { type: 'edit',  path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
     default:           return { type: toolName, args, _ctx: ctx ?? null };
   }
 };

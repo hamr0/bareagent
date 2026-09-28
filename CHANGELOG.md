@@ -2,6 +2,171 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.47.0] - 2026-09-28
+
+### Added
+
+- **Shared `primitives.json` generator core** (`scripts/primitives-core.mjs`) — replaces
+  the per-repo, independently-drifted `scripts/gen-primitives.mjs` copies in bare-agent,
+  bareguard, and litectx with ONE canonical core vendored byte-identically across all
+  three, each with a tiny `primitives.config.mjs` for the genuinely repo-specific bits
+  (category inference; an optional class-method `receivers` name map). `gen-primitives.mjs`
+  is now a 5-line per-repo entry point; `build:primitives`/`check:primitives` are
+  unchanged. A per-repo `test/primitives-core.test.mjs` (also vendored) pins both files'
+  SHA-256 against `scripts/primitives-core.hashes.json` and fails loudly on drift.
+  Fixes two real, separately-verified bugs (by actually running each repo's OLD generator
+  against a fixture, not by reading): **litectx's** pre-shared generator closed an open
+  `@example` body on ANY `@word`-shaped line (a decorator, a typo), silently truncating
+  the sample (verified NOT present in bareguard's old generator, which correctly gated on
+  known tags); and **all three** (bareguard, litectx, and bare-agent's own pre-core copy)
+  closed `@example` on a KNOWN JSDoc tag and silently re-applied it as a real tag,
+  truncating the example with zero warning. `@example` is now STRICT: it must be the last
+  tag in a block. Once open, a line starting with `@` is a HARD ERROR (non-zero exit,
+  nothing written, names the offending line, tells the author to move `@example` to the
+  end of the block or write the line as a `//`-prefixed comment) — regardless of spacing,
+  case, alias, or whether the word is a known tag; there is no `KNOWN_TAGS` lookup inside
+  an example. Also new: a **duplicate
+  catalog-name hard error** — two `@when` blocks resolving to the same `name` (e.g. two
+  classes each with an unnamed `add` method) is now a loud, non-zero-exit rejection
+  instead of a silent two-entries-one-name collision. Outside `@example`, a line starting
+  with `@` is either a tag at the normal position (right after ` * `) or itself a hard
+  error — an indented `@`-led line (a wrapped continuation that happens to start with
+  `@`) is no longer silently folded into the prior tag's body. See `docs/wiki/decisions-log.md`
+  § "shared primitives.json generator core" for the full design, the union-of-rules audit,
+  and verification results. `primitives.json` is byte-identical to the prior committed
+  manifest in both bare-agent and litectx; one bare-agent source JSDoc block
+  (`createShellTools`, which legitimately had two separate `@example` tags) was merged
+  into a single trailing `@example` to satisfy the new strict rule, with no change to the
+  regenerated manifest's content. bareguard's real source (`Gate#add`/`#rwxTools`/
+  `#readAudit`/`addToGates` in `src/gate.js`) has `@example` genuinely NOT last today and
+  will need the same reorder before it can adopt this core — a ready-to-apply patch is
+  prepared for hand-off, not committed here (bareguard is a separate, independently
+  released repo).
+
+- **`createShellTools({ noFollowSymlinks: true })`** — opt-in refusal for `shell_read`,
+  `shell_write`, `shell_edit`, and `shell_grep` when a path's FINAL component is a symlink
+  (file, dir, or dangling). Refuses via a thrown error (`err.code:'ELOOP'`) instead of
+  silently following the link — a dangling-symlink write no longer creates the link's
+  target. Scope is the final path component only; a symlinked PARENT directory is
+  unaffected (bareguard's own resolved-path containment check for that is planned for an
+  upcoming release, not yet published — see `resolveToolPath` below). Uses the native
+  `O_NOFOLLOW` open flag (atomic) on linux/macOS;
+  falls back to a documented non-atomic `lstat`-then-open check on Windows, where
+  `O_NOFOLLOW` doesn't exist. `shell_grep` refuses only a symlinked ROOT path loudly — a
+  file that turns into a symlink mid-walk is skipped silently, matching the existing
+  read-error `continue` behavior. `shell_grep`'s root check is atomic (opens through the
+  same shared helper as the other tools, then fstats the handle) rather than a
+  look-then-open `lstat`. A directory listing (`shell_read` on a dir, `shell_grep`'s root
+  when it's a dir) additionally rechecks the path's `dev`+`ino` against the open handle
+  right after listing, narrowing (not closing) the window where a directory swapped in
+  between the open and the by-path listing could report a different directory's names.
+  Default `false`; identical behavior to before this option existed.
+
+- **`resolveToolPath(p)`** (exported from `tools/shell.js` and re-exported from
+  `bare-agent/tools`) — THE canonicalizer every shell file tool (`shell_read`,
+  `shell_write`, `shell_edit`, `shell_grep`) now applies before opening a path: expand
+  `~`/`~/…`, then `path.resolve` against `process.cwd()`. Idempotent
+  (`resolveToolPath(resolveToolPath(p)) === resolveToolPath(p)`). Exists so an adopter's
+  `actionTranslator` can canonicalize `args.path` the SAME way before `gate.check` —
+  bareguard's `fs` primitive checks the path it's given without canonicalizing it today,
+  so a `~`-prefixed or relative path would be judged in a different form than the
+  absolute path the tool actually opens. `examples/with-bareguard.mjs` updated to use it.
+
+### Changed
+
+- **Home directory source is now `os.homedir()`**, matching bareguard's own `~`
+  expansion, instead of `process.env.HOME || process.env.USERPROFILE`.
+- **`shell_read`/`shell_grep` with an empty path now error instead of reading/searching
+  `process.cwd()`.** `resolveToolPath` now rejects a non-string or empty `path` up front
+  (thrown, before any expansion/resolution): `resolveToolPath: path must be a non-empty
+  string (got <type>)`, naming only the type/category of the bad value, never the value
+  itself. Before this, `undefined`/`null` crashed with a raw Node internal message,
+  a non-string like a number crashed with `p.startsWith is not a function`, and `""`
+  silently resolved to `process.cwd()` — an assumed default that a gate would then judge
+  and a tool would then read/list, for a model call that named no path at all. Every file
+  tool routes through `resolveToolPath`, so this closes the gap for `shell_read` and
+  `shell_grep` (`shell_write`/`shell_edit` already had their own earlier non-empty-path
+  guards, unchanged). `expandHome` (used directly by `shell_run`/`shell_exec`'s `cwd`
+  handling) also now guards a non-string input directly, with its own type-only message.
+- Internal: every file-open site in `tools/shell.js` (`shell_read`, `shell_write`,
+  `shell_edit`, and `shell_grep`'s root + per-file reads) now goes through one shared
+  `openFile` helper instead of duplicated flag-on/flag-off code paths. `noFollowSymlinks`
+  off is still a plain `fs.open` (unaffected by that flag either way), but `shell_read`
+  and `shell_edit`'s content reads changed shape regardless of the flag as part of the
+  procfs/sysfs + OOM fix below — see that entry for the one observable difference this
+  refactor's read path carries.
+- **`shell_edit` now refuses (throws) a file it reads that is larger than the `maxBytes`
+  cap, even if the intended edit would have shrunk the RESULT back under the cap.**
+  `shell_edit: file is larger than the <cap>-byte cap (pass maxBytes to raise it) — no
+  change made.` This is a direct tradeoff of the OOM fix above: `readBounded` stops at
+  `cap + 1` bytes on the READ side, before any edit is computed, so it can no longer tell
+  "the source is huge" from "the source is huge but this specific edit would have made it
+  small" — it refuses both, rather than risk reading an unbounded/huge file to find out.
+  Raise `maxBytes` if you legitimately need to edit a large file.
+
+### Fixed
+
+- **`shell_read`/`shell_edit` no longer read back empty content from procfs/sysfs files,
+  AND no longer risk an out-of-memory crash of the whole process on a file with no EOF.**
+  Two related bugs, one fix: (1) `stat.size`-based reads returned `""` for files like
+  `/proc/self/status`, which report `stat.size === 0` while having real content (the
+  kernel generates it on read, not on stat) — this bug PREDATES the `noFollowSymlinks`
+  work; the originally-released `fs.readFile()`/`Buffer.alloc(stat.size)` code in 0.46.6
+  had the exact same problem. (2) An intermediate fix read through the handle to EOF
+  (`fh.readFile('utf8')`) to solve (1), but that is UNBOUNDED — a device file with no EOF
+  at all, e.g. `/dev/zero`, made it grow without bound until the process died with a
+  FATAL heap OOM (exit 134), taking the whole agent down, not just the one call; and a
+  stat-lying-but-finite file like `/proc/kallsyms` (`size:0`, real content ~20MB) was
+  fully read into memory and only truncated down to the cap afterward. Both `shell_read`
+  and `shell_edit` now read through a new shared `readBounded` helper that reads in 64KB
+  chunks and NEVER reads more than `cap + 1` bytes, regardless of what `stat.size` claims
+  or whether the source ever reaches EOF. `shell_read` on a stat-lying file within the cap
+  gets a new, honest message — `[truncated at <cap> bytes: file size unknown]` — instead
+  of inventing a byte count it doesn't have; the known-large-file (`stat.size > cap`)
+  fixed-size truncation path and its `[truncated: N more bytes not shown]` message are
+  unchanged. Evidence: `statSync('/proc/self/status').size === 0` vs.
+  `readFileSync(...).length` ~1500+; `/dev/zero` reproducibly OOM-killed a bare
+  `fs.readFile()` call in both the 0.46.6-released code and the intermediate fix above.
+- **`~`-prefixed paths no longer silently collapse to a root/cwd-relative path when no
+  home directory can be determined.** The previous `process.env.HOME ||
+  process.env.USERPROFILE || ''` fallback turned `~/x` into plain `x` (then
+  cwd-relative) when `HOME` was unset or empty — an ambiguous "no home" case rounding
+  toward "works" instead of surfacing. Expanding `~` now throws a clear error
+  (`cannot expand ~: no home directory`) in that case, never a silent wrong path.
+- **`scripts/gen-primitives.mjs` no longer silently truncates a wrapped `@when`/`@fails`
+  tag (present since 0.18.1, root-fixed here after two narrower attempts each left an
+  escape).** `@when`/`@fails` are one-line catalog entries by design (the manifest reads
+  only the tag's first line); `parseBlock` originally had no continuation check at all,
+  and a shape-by-shape "is the next line a continuation" fix still missed a
+  whitespace-only star line and a continuation that itself starts with `@word` (read as
+  an unrelated new tag and dropped) — both silently truncated a tag with `--check` still
+  reporting "current," since it only compares the generator's own (equally truncated)
+  output against the committed file, never against the source JSDoc. `parseBlock` is now
+  root-fixed to parse each JSDoc block the way JSDoc itself does: a tag's BODY is every
+  line from the tag through the line before the next tag (or the comment's end), with no
+  shape guessing. Two rules apply over that body: (A) `@when`/`@fails`, plus the other
+  hand-authored single-line fields `@category`/`@name`/`@signature` (their value is also
+  read from only the first line), fail the generator when their body has more than one
+  non-empty line (`<name>: @<tag> spans more than one line — keep @when/@fails on one
+  line (the manifest reads only the first)`, worded per-tag for the others); (B) any
+  `@tag` inside a `@when` block that isn't in the hand-maintained `KNOWN_TAGS` set fails
+  the generator too (`<name>: unknown tag @<tag> — if this is a wrapped @when/@fails
+  line, keep them on one line; otherwise add the tag to KNOWN_TAGS`), with a hint when
+  the tag matches a known JSDoc alias (`@return`/`@arg`/`@argument`/`@exception`/`@prop`
+  → `did you mean @returns`/`@param`/`@param`/`@throws`/`@property`). At this point,
+  `@example` was exempt from tag-boundary detection for its own body: while it's open,
+  only a `KNOWN_TAGS` line closed it, so example CONTENT that merely looked like a tag (a
+  decorator, an email) was kept verbatim instead of fracturing the sample — but a genuine
+  known tag following `@example` still closed and re-applied as a real tag, silently
+  truncating the example (this generator's own copy of that bug, corrected later — see the
+  "shared primitives.json generator core" entry above, which makes `@example` strictly the
+  LAST tag in a block instead). `primitives.json` is unchanged (byte-identical) under the
+  stricter parse. Matches the identical RULE-A/RULE-B fix shipped in bareguard's copy of
+  this generator (bareguard's copy did NOT share the `@word`-inside-`@example` truncation
+  bug this entry's KNOWN_TAGS gate was addressing — verified by running its old generator
+  directly; both repos DID share the known-tag-after-`@example` truncation this paragraph
+  documents).
+
 ## [0.46.6] - 2026-09-27
 
 ### Docs

@@ -25,7 +25,7 @@ const DEFAULT_RETRY_ON = (err) => {
 class Retry {
   /**
    * @param {RetryOptions} [options={}]
-   * @when you want backoff-with-jitter around a flaky async call (a provider request, a plan step) — the retry seam Loop and runPlan wrap providers with
+   * @when you want backoff-with-jitter around a flaky async call (a provider request, a plan step) — the retry seam that Loop and runPlan wrap around providers
    * @fails rethrows the last error once attempts are exhausted; by default only transient errors (429/5xx/ECONNRESET/ETIMEDOUT) are retried.
    * @example
    *   const retry = new Retry({ maxAttempts: 3, jitter: true });
