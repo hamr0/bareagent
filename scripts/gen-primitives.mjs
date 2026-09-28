@@ -35,24 +35,35 @@ function parseBlock(block) {
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
   let type = null, sigOverride = null;
   const example = []; let mode = null;
+  // @when/@fails are one-line catalog entries by design (the manifest reads only
+  // the first line) — a wrapped continuation must be flagged, never silently
+  // joined or truncated. contState tracks "the previous tag was when/fails and
+  // hasn't been closed yet"; a non-blank, non-tag line while it's set is a
+  // continuation. A blank line or the next @tag closes it without a problem.
+  const continued = new Set(); let contState = null;
   for (const raw of inner.split('\n').map(strip)) {
     const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
     if (tag) {
       mode = null; const [, name, rest] = tag;
+      contState = null;
       if (name === 'param') {
         const b = braced(rest); const nm = b && b.rest.match(/^\s*(\[?)([\w.$]+)/);
         if (b && nm && !nm[2].includes('.')) params.push({ name: nm[2], type: cleanType(b.inner), optional: nm[1] === '[' });
       } else if (name === 'returns') { const b = braced(rest); returns = b ? cleanType(b.inner) : null; }
       else if (name === 'type') { const b = braced(rest); type = b ? cleanType(b.inner) : null; }
       else if (name === 'signature') sigOverride = rest.trim(); // exact literal, overrides the derived signature
-      else if (name === 'when') when = rest.trim();
-      else if (name === 'fails') fails = rest.trim();
+      else if (name === 'when') { when = rest.trim(); contState = 'when'; }
+      else if (name === 'fails') { fails = rest.trim(); contState = 'fails'; }
       else if (name === 'category') category = rest.trim();
       else if (name === 'name') primName = rest.trim(); // override when the export name differs from the declaration (alias)
       else if (name === 'example') mode = 'example';
       continue;
     }
-    if (mode === 'example') example.push(raw);
+    if (mode === 'example') { example.push(raw); continue; }
+    if (contState) {
+      if (raw.trim()) continued.add(contState);
+      contState = null;
+    }
   }
   while (example.length && !example[0].trim()) example.shift();
   while (example.length && !example[example.length - 1].trim()) example.pop();
@@ -61,7 +72,7 @@ function parseBlock(block) {
   const indents = example.filter(l => l.trim()).map(l => l.match(/^\s*/)[0].length);
   const pad = indents.length ? Math.min(...indents) : 0;
   if (pad) for (let i = 0; i < example.length; i++) example[i] = example[i].slice(pad);
-  return { params, returns, type, sigOverride, when, fails, category, primName, example: example.join('\n') };
+  return { params, returns, type, sigOverride, when, fails, category, primName, example: example.join('\n'), continued: [...continued] };
 }
 function symbolAfter(src, afterIdx) {
   const tail = src.slice(afterIdx);
@@ -160,6 +171,7 @@ for (const rel of jsFiles) {
     const p = parseBlock(m[0]);
     const name = p.primName || sym.name; // @name overrides an aliased export
     for (const req of ['when', 'fails', 'example']) if (!p[req]) problems.push(`${name}: missing @${req}`);
+    for (const tag of p.continued) problems.push(`${name}: @${tag} continues onto a second line — keep @when/@fails on one line (the manifest reads only the first)`);
     const spec = imports.get(name);
     if (!spec) problems.push(`${name}: not found in any exports barrel (is it exported?)`);
     out.push({

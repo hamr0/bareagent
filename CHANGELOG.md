@@ -96,6 +96,19 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   cwd-relative) when `HOME` was unset or empty — an ambiguous "no home" case rounding
   toward "works" instead of surfacing. Expanding `~` now throws a clear error
   (`cannot expand ~: no home directory`) in that case, never a silent wrong path.
+- **`scripts/gen-primitives.mjs` no longer silently truncates a wrapped `@when`/`@fails`
+  tag.** `@when`/`@fails` are one-line catalog entries by design (the manifest reads only
+  the tag's first line), but `parseBlock` had no check for a continuation line — a tag
+  wrapped onto a second line was silently cut down to a sentence fragment, and
+  `npm run check:primitives` still reported "current" because it only compares the
+  generator's own (equally truncated) output against the committed file, never against
+  the source JSDoc. This is exactly what happened to `resolveToolPath`'s `@when` in
+  0.46.6. `parseBlock` now tracks whether a non-blank, non-tag line follows an
+  unclosed `@when`/`@fails` and reports it as a loud generation-time problem (`<name>: @when
+  continues onto a second line — keep @when/@fails on one line (the manifest reads only
+  the first)`), failing the generator (and thus `check:primitives`/CI) instead of shipping
+  a truncated entry. A blank line or the next `@tag` still closes a tag normally, with no
+  problem reported.
 
 ## [0.46.6] - 2026-09-27
 
