@@ -55,11 +55,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   EVERY branch — bareguard 0.19's action identity for `tools.allowlist`/`tools.denylist` is
   `action.tool ?? action.type`, so a tool-name allowlist keeps matching even though `type`
   is now a primitive name, not the literal tool name. A malformed or missing `path` never
-  crashes the translator and never silently allows: a present-but-unresolvable path
-  (non-string, empty, unresolvable `~`) normalizes to `''` (bareguard denies via
-  `fs.invalidPath` regardless of scope config); a genuinely absent path (no `path` key at
-  all) is left `undefined`, matching bareguard's own designed behavior of skipping fs
-  scope checking for a path-less action.
+  crashes the translator and never silently allows: ANY missing or unresolvable path —
+  absent `path` key, non-string, empty, or an unresolvable `~` — normalizes to `''`
+  (bareguard denies via `fs.invalidPath` regardless of scope config). A real call is
+  never silently allowed.
 - **`filterTools` probes tool IDENTITY ONLY** (`{type: name, tool: name}`) — never the
   `actionTranslator`'s translated per-type shape. No real `args` exist yet at discovery
   time, so a shell file tool would be probed with `path: undefined`; measured against a
