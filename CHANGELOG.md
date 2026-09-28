@@ -23,7 +23,23 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   setting that key has it silently ignored); `shell_run`'s mapped `cmd` is its `argv`
   joined with spaces, so `bash.allow`/`bash.deny` patterns see an argument containing a
   space differently from how it actually runs (a known, documented limitation — not
-  changed by this release).
+  changed by this release). Also note: bareguard (as of 0.19.0) matches `bash.allow`/
+  `bash.deny` prefixes with a plain `cmd.startsWith(prefix)`, no word boundary, so
+  `allow:['git status']` also allows `git statuses-are-fine --evil`. Before this release
+  the default translator didn't bash-check `shell_run` at all, so this is stricter than
+  before, not looser. Mitigation until bareguard adds word-boundary matching: end
+  prefixes with a trailing space where that fits (e.g. `'git status '` — note this then
+  stops the bare `git status` from matching), or list exact commands.
+- **Tools with a `url` argument now hit bareguard's net rules.** The 0.19 floor also
+  brings in bareguard's net check (added in 0.18), which gates ANY action whose
+  `action.url` or `action.args.url` is present, whatever the tool type. The default
+  translator forwards `args` verbatim for non-shell tools, so tools like barebrowse's
+  `browse_goto` (and any MCP tool with a `url` argument) are now judged by
+  `net.allowDomains`/`net.denyPrivateIps` when configured — e.g.
+  `Gate({net:{allowDomains:['example.com']}})` denies `browse_goto` called with
+  `https://evil.example.org`. Adopters on bareguard <0.18 who set net rules will see this
+  for the first time; this is not a bare-agent code change. **Upgrade action:** make sure
+  `net.allowDomains` covers every host your browsing/fetch tools need.
 
 ### Changed
 
