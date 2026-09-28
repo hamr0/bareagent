@@ -839,7 +839,6 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * @example
  *   const { tools } = createShellTools();
  *   const loop = new Loop({ provider, tools, policy });
- * @example
  *   const { tools: safeTools } = createShellTools({ noFollowSymlinks: true });
  */
 function createShellTools(options = {}) {

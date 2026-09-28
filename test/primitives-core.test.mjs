@@ -14,9 +14,16 @@
 //   RULE A — a tag's body is every line up to the next tag/end of comment.
 //   RULE B — @when/@fails/@category/@name/@signature must stay single-line.
 //   RULE C — an unknown @tag inside a @when block fails, with alias hints.
-//   RULE D — @example is the last recognized tag boundary; only a KNOWN_TAGS
-//            tag closes it, so a `@word`-shaped line inside a code sample
-//            (a decorator, a typo) survives as content, never truncating.
+//   RULE D (strict) — @example MUST be the last tag in a block. Once open, a
+//            KNOWN_TAGS line is a HARD ERROR (never silently reopened as a
+//            tag, never silently swallowed as content); anything else (a
+//            decorator, a typo, any other `@word`-shaped line) is
+//            unambiguous example content, kept whole to the end of the
+//            comment, however many lines.
+//   Duplicate catalog names — two @when blocks resolving to the same
+//            `name` (e.g. two unnamed same-named methods on different
+//            classes) is a HARD ERROR, never a silent last-write-wins
+//            collision.
 //   Class methods (an exported class's own verbs) resolve as a symbol kind,
 //   both with an explicit @name override (bareguard's "Class#method" style)
 //   and without one (litectx's auto-inferred "receiver.method(...)" style).
@@ -115,6 +122,36 @@ function writeFixtureClassPkg(dir, { methodBlock, className = 'Foo', methodName 
   fs.writeFileSync(path.join(dir, 'src', 'foo.js'), `export class ${className} {
 ${methodBlock}
   ${methodName}(x) {
+    return x;
+  }
+}
+`);
+}
+
+// Two classes, each with an unnamed method of the SAME name — the shape that
+// silently collided ("two entries both named 'add'") before the duplicate-
+// name guard.
+function writeFixtureDupNamePkg(dir) {
+  const methodBlock = `  /**
+   * @when this description stays on one line
+   * @fails never
+   * @example
+   * x.add(1)
+   */`;
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'fixture-pkg', version: '0.0.0', type: 'module', main: './index.js',
+  }));
+  fs.writeFileSync(path.join(dir, 'index.js'), `export { Foo, Bar } from './src/foo.js';\n`);
+  fs.mkdirSync(path.join(dir, 'src'));
+  fs.writeFileSync(path.join(dir, 'src', 'foo.js'), `export class Foo {
+${methodBlock}
+  add(x) {
+    return x;
+  }
+}
+export class Bar {
+${methodBlock}
+  add(x) {
     return x;
   }
 }
@@ -260,8 +297,21 @@ test('an unknown tag with a known alias hints the correct tag', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RULE D — @example is the last recognized tag boundary
+// RULE D (strict) — @example MUST be the last tag in a block
 // ---------------------------------------------------------------------------
+
+test('a KNOWN_TAGS tag after @example is a hard error naming the offending tag and telling the author to move @example', () => {
+  withTmpDir('prim-gen-ex-known-after-', (dir) => {
+    writeFixturePkg(dir, {
+      whenLine: '@when this description stays on one line',
+      exampleBlock: ' * @example\n * foo()\n * @category custom-category\n',
+    });
+    assertGeneratorRejects(
+      dir,
+      /foo: @category appears after @example — @example must be the last tag: move @example to the end of the block/,
+    );
+  });
+});
 
 test('an @example line starting with an unknown @tag is kept as content, not truncated', () => {
   withTmpDir('prim-gen-ex-decorator-', (dir) => {
@@ -278,17 +328,19 @@ test('an @example line starting with an unknown @tag is kept as content, not tru
   });
 });
 
-test('a KNOWN_TAGS tag after @example still closes the example and is applied', () => {
-  withTmpDir('prim-gen-ex-category-', (dir) => {
+test('@example as the genuinely last tag keeps every line, however many, whole', () => {
+  withTmpDir('prim-gen-ex-multiline-last-', (dir) => {
     writeFixturePkg(dir, {
       whenLine: '@when this description stays on one line',
-      exampleBlock: ' * @example\n * foo()\n * @category custom-category\n',
+      exampleBlock: ' * @example\n * const t = new Tool({\n * // @type {string}\n *   name: "x" })\n * add(1)\n',
     });
     execFileSync(process.execPath, [GEN_SCRIPT], { cwd: dir, stdio: 'pipe' });
     const out = JSON.parse(fs.readFileSync(path.join(dir, 'primitives.json'), 'utf8'));
     assert.strictEqual(out.primitives.length, 1);
-    assert.strictEqual(out.primitives[0].example.trim(), 'foo()');
-    assert.strictEqual(out.primitives[0].category, 'custom-category');
+    assert.strictEqual(
+      out.primitives[0].example,
+      'const t = new Tool({\n// @type {string}\n  name: "x" })\nadd(1)',
+    );
   });
 });
 
@@ -334,5 +386,17 @@ test('a class method with an explicit @name override renders literally (bareguar
     assert.strictEqual(out.primitives.length, 1);
     assert.strictEqual(out.primitives[0].name, 'Foo#bar');
     assert.strictEqual(out.primitives[0].signature, 'foo.bar(x) => number');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate catalog names — a hard error, never a silent last-write-wins
+// collision (e.g. two classes each with an unnamed `add` method).
+// ---------------------------------------------------------------------------
+
+test('two unnamed methods resolving to the same catalog name are a hard error, nothing written', () => {
+  withTmpDir('prim-gen-dupname-', (dir) => {
+    writeFixtureDupNamePkg(dir);
+    assertGeneratorRejects(dir, /duplicate primitive name "add" \(2 occurrences\) — give each a distinct @name \(e\.g\. "@name Class#method"\)/);
   });
 });

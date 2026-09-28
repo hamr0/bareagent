@@ -23,12 +23,27 @@
 //     a body spanning more than one non-empty line fails loudly (RULE B).
 //   * An unknown `@tag` inside a `@when` block fails, with an alias hint
 //     (return/arg/argument/exception/prop) (RULE C).
-//   * `@example` is the LAST tag a block recognizes: once open, only a
-//     KNOWN_TAGS tag closes it — anything else (a decorator, a typo, a
-//     `@word`-shaped line in a code sample) is example CONTENT, never mistaken
-//     for a tag boundary (RULE D — closes a real hole two of the three
-//     drifted copies had: litectx's `mode`-based parser closed @example on
-//     ANY `@word` line, and bareguard's had the same shape).
+//   * `@example` MUST be the LAST tag in a block (RULE D, strict). Once open,
+//     a KNOWN_TAGS line is a HARD ERROR — non-zero exit, nothing written,
+//     naming the offending tag and telling the author to move `@example` to
+//     the end of the block (or prefix the line inside the example, e.g.
+//     `// @type`, if it's meant as content). Anything else (a decorator, a
+//     typo, any other `@word`-shaped line in a code sample) is unambiguous
+//     example CONTENT, kept verbatim. No outcome is ever silent: a real tag
+//     is never swallowed into an example (that would silently corrupt a
+//     derived `signature`/`fails` with zero warning — see bareguard's
+//     `addToGates`, which has `@param`/`@returns`/`@throws` genuinely AFTER
+//     `@example` in its actual source and would otherwise degrade to a
+//     garbage signature with exit 0), and an example is never silently
+//     truncated either. RULE D closes two DISTINCT, separately-verified holes
+//     in the three repos' pre-shared copies: litectx's `mode`-based parser
+//     closed `@example` on ANY `@word` line, including a non-tag decorator
+//     (bareguard did NOT have this one — verified by running bareguard's own
+//     pre-shared generator against a decorator fixture); and ALL THREE
+//     (including bare-agent's own pre-core copy) closed `@example` on a
+//     KNOWN_TAGS line and silently re-applied it as a real tag, truncating
+//     the example with zero warning (verified by running all three repos'
+//     old generators against a fixture with a known tag inside `@example`).
 //   * Class methods (litectx's LiteCtx/ScopedView verbs, bareguard's
 //     Gate#add/#rwxTools/#readAudit) are a resolvable symbol kind: the
 //     enclosing class is found via a LINE-ANCHORED class-declaration scan (a
@@ -121,19 +136,31 @@ function parseBlock(block) {
   // line, a whitespace-only star line, and a line that itself starts with
   // @word all used to need their own case; this one rule covers all of them).
   //
-  // The one deliberate exception is @example (RULE D): while its body is
-  // open, only a KNOWN_TAGS tag line closes it — anything else (a typo, a
-  // decorator-like line in a code sample) is example CONTENT, never mistaken
-  // for a tag. @example must therefore be the LAST tag a block recognizes as
-  // a tag boundary; nothing after it can end its body except a real
-  // KNOWN_TAGS tag (a KNOWN_TAGS tag that follows @example still closes and
-  // applies normally — it is just content-or-tag, decided the same way every
-  // other line inside the open example is).
+  // The one deliberate exception is @example (RULE D, strict): @example must
+  // be the LAST tag in a block. Once its body is open, NOTHING closes it —
+  // a line that merely LOOKS like a tag (a decorator, a typo, any other
+  // `@word`-shaped line in a code sample) is unambiguous example CONTENT. A
+  // line that IS a real KNOWN_TAGS tag is a HARD ERROR instead of silently
+  // reopening as a tag (which would corrupt a derived field with zero
+  // warning) or silently becoming content (which would silently swallow a
+  // real, intended tag — e.g. bareguard's `addToGates`, whose real
+  // `@param`/`@returns`/`@throws` genuinely follow `@example` in source and
+  // must therefore error, not vanish). Recorded in `problems` below, once per
+  // occurrence; the block is rejected either way, so the swallowed content
+  // itself is discarded, never written.
   const segments = [];
+  const problems = [];
   for (const raw of inner.split('\n').map(strip)) {
     const tag = raw.trimEnd().match(/^@(\w+)\s*(.*)$/);
     const openExample = segments.length && segments[segments.length - 1].tag === 'example';
-    if (tag && (!openExample || KNOWN_TAGS.has(tag[1]))) {
+    if (openExample) {
+      if (tag && KNOWN_TAGS.has(tag[1])) {
+        problems.push(`@${tag[1]} appears after @example — @example must be the last tag: move @example to the end of the block (or prefix the line inside the example, e.g. "// @${tag[1]}")`);
+      }
+      segments[segments.length - 1].body.push(raw);
+      continue;
+    }
+    if (tag) {
       segments.push({ tag: tag[1], rest: tag[2], body: [] });
     } else if (segments.length) {
       segments[segments.length - 1].body.push(raw);
@@ -142,7 +169,6 @@ function parseBlock(block) {
   const params = []; let returns = null, when = null, fails = null, category = null, primName = null;
   let type = null, sigOverride = null;
   const example = [];
-  const problems = [];
   for (const { tag: name, rest, body } of segments) {
     if (name === 'param') {
       const b = braced(rest); const nm = b && b.rest.match(/^\s*(\[?)([\w.$]+)/);
@@ -353,6 +379,18 @@ export async function run(config) {
         example: p.example,
       });
     }
+  }
+  // Two @when blocks resolving to the same catalog `name` (e.g. two classes
+  // each with an unnamed `add` method) is a HARD ERROR, not a silent
+  // last-write-wins collision — two catalog entries sharing one `name` is an
+  // ambiguous manifest a consumer's `import { add }` can't disambiguate.
+  // Checked over every entry (not just methods): the same trap applies to a
+  // manual `@name` collision. Reported once per duplicated name, listing the
+  // count, so a fix is a single glance away.
+  const nameCounts = new Map();
+  for (const o of out) nameCounts.set(o.name, (nameCounts.get(o.name) || 0) + 1);
+  for (const [dupName, count] of nameCounts) {
+    if (count > 1) problems.push(`duplicate primitive name "${dupName}" (${count} occurrences) — give each a distinct @name (e.g. "@name Class#method")`);
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
   // No `version` field by design: package.json sits beside the manifest in the

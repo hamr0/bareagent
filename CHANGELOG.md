@@ -12,14 +12,35 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   three, each with a tiny `primitives.config.mjs` for the genuinely repo-specific bits
   (category inference; an optional class-method `receivers` name map). `gen-primitives.mjs`
   is now a 5-line per-repo entry point; `build:primitives`/`check:primitives` are
-  unchanged. Fixes a real bug two of the three repos' pre-shared generators shared: an
-  open `@example` body closed on ANY `@word`-shaped line (a decorator, a typo), silently
-  truncating the code sample — now only a known JSDoc tag closes it. A per-repo
-  `test/primitives-core.test.mjs` (also vendored) pins both files' SHA-256 against
-  `scripts/primitives-core.hashes.json` and fails loudly on drift. See
-  `docs/wiki/decisions-log.md` § "shared primitives.json generator core" for the full
-  design and verification writeup. Regenerated `primitives.json` is byte-identical to the
-  prior committed manifest — no primitive's catalog entry changed.
+  unchanged. A per-repo `test/primitives-core.test.mjs` (also vendored) pins both files'
+  SHA-256 against `scripts/primitives-core.hashes.json` and fails loudly on drift.
+  Fixes two real, separately-verified bugs (by actually running each repo's OLD generator
+  against a fixture, not by reading): **litectx's** pre-shared generator closed an open
+  `@example` body on ANY `@word`-shaped line (a decorator, a typo), silently truncating
+  the sample (verified NOT present in bareguard's old generator, which correctly gated on
+  known tags); and **all three** (bareguard, litectx, and bare-agent's own pre-core copy)
+  closed `@example` on a KNOWN JSDoc tag and silently re-applied it as a real tag,
+  truncating the example with zero warning. `@example` is now STRICT: it must be the last
+  tag in a block — once open, a known tag appearing after it is a HARD ERROR (non-zero
+  exit, nothing written, names the offending tag, tells the author to move `@example` to
+  the end of the block) rather than either silently reopening as a tag or silently
+  becoming swallowed content; the loud-strict choice over "everything after `@example` is
+  content" is deliberate — the latter would let a real trailing tag (e.g. bareguard's
+  `addToGates`, whose real `@param`/`@returns`/`@throws` follow `@example` in source)
+  silently degrade `signature`/`fails` to garbage with exit 0. Also new: a **duplicate
+  catalog-name hard error** — two `@when` blocks resolving to the same `name` (e.g. two
+  classes each with an unnamed `add` method) is now a loud, non-zero-exit rejection
+  instead of a silent two-entries-one-name collision. See `docs/wiki/decisions-log.md`
+  § "shared primitives.json generator core" for the full design, the union-of-rules audit,
+  and verification results. `primitives.json` is byte-identical to the prior committed
+  manifest in both bare-agent and litectx; one bare-agent source JSDoc block
+  (`createShellTools`, which legitimately had two separate `@example` tags) was merged
+  into a single trailing `@example` to satisfy the new strict rule, with no change to the
+  regenerated manifest's content. bareguard's real source (`Gate#add`/`#rwxTools`/
+  `#readAudit`/`addToGates` in `src/gate.js`) has `@example` genuinely NOT last today and
+  will need the same reorder before it can adopt this core — a ready-to-apply patch is
+  prepared for hand-off, not committed here (bareguard is a separate, independently
+  released repo).
 
 - **`createShellTools({ noFollowSymlinks: true })`** — opt-in refusal for `shell_read`,
   `shell_write`, `shell_edit`, and `shell_grep` when a path's FINAL component is a symlink
@@ -131,13 +152,19 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   the generator too (`<name>: unknown tag @<tag> — if this is a wrapped @when/@fails
   line, keep them on one line; otherwise add the tag to KNOWN_TAGS`), with a hint when
   the tag matches a known JSDoc alias (`@return`/`@arg`/`@argument`/`@exception`/`@prop`
-  → `did you mean @returns`/`@param`/`@param`/`@throws`/`@property`). `@example` is
-  exempt from tag-boundary detection for its own body: while it's open, only a
-  `KNOWN_TAGS` line closes it, so example CONTENT that merely looks like a tag (a
-  decorator, an email) is kept verbatim instead of fracturing the sample; a genuine known
-  tag following `@example` still closes and applies normally. `primitives.json` is
-  unchanged (byte-identical) under the stricter parse. Matches the identical fix shipped
-  in bareguard's copy of this generator.
+  → `did you mean @returns`/`@param`/`@param`/`@throws`/`@property`). At this point,
+  `@example` was exempt from tag-boundary detection for its own body: while it's open,
+  only a `KNOWN_TAGS` line closed it, so example CONTENT that merely looked like a tag (a
+  decorator, an email) was kept verbatim instead of fracturing the sample — but a genuine
+  known tag following `@example` still closed and re-applied as a real tag, silently
+  truncating the example (this generator's own copy of that bug, corrected later — see the
+  "shared primitives.json generator core" entry above, which makes `@example` strictly the
+  LAST tag in a block instead). `primitives.json` is unchanged (byte-identical) under the
+  stricter parse. Matches the identical RULE-A/RULE-B fix shipped in bareguard's copy of
+  this generator (bareguard's copy did NOT share the `@word`-inside-`@example` truncation
+  bug this entry's KNOWN_TAGS gate was addressing — verified by running its old generator
+  directly; both repos DID share the known-tag-after-`@example` truncation this paragraph
+  documents).
 
 ## [0.46.6] - 2026-09-27
 
