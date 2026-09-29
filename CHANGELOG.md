@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.48.1] - 2026-09-29
 
 ### Changed
 
@@ -23,6 +23,9 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   symlinked root now throws at Gate construction, and a root swapped for a symlink later denies
   with the new rules `fs.readScope.symlinkRoot` / `fs.writeScope.symlinkRoot`. Roots that don't
   exist yet remain legal.
+- bareguard also requires the lexical path to lie under the scope root, so with a symlinked `$HOME`
+  a `~/x` path denies (fail-closed) against a realpath'd scope. List the lexical form too if your
+  home directory is a symlink.
 - bareguard 0.19.1 fixed the `bash.allow` word-boundary issue flagged in 0.48.0's notes.
 
 ## [0.48.0] - 2026-09-29
