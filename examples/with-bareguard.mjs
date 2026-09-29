@@ -31,17 +31,20 @@ const { createShellTools } = require('bare-agent/tools');
 //    floor), a shell file action denies by default when its scope is unset (fs.readScope.unset /
 //    fs.writeScope.unset) — leaving writeScope out here would silently deny every shell_write /
 //    shell_edit call, not leave the primitive dead like on older bareguard.
-//    readScope is deliberately WIDER than writeScope here — read is fine anywhere under /tmp,
+//    Scope roots are realpath'd: bareguard >=0.19.2 throws at `new Gate` on a root that is or
+//    contains a symlink (macOS /tmp and os.tmpdir() are symlinks), so list real paths.
+//    readScope is deliberately WIDER than writeScope here — read is fine anywhere under the tmp root,
 //    but writes are narrowed to one demo subdir, to show the two scopes are independent (a
 //    folder listed only in readScope is NOT writable, and vice versa). The demo dir is created
 //    below since fs.writeScope doesn't need the path to pre-exist, but the example's own
 //    shell_write call does.
-const writeDir = path.join(os.tmpdir(), 'bare-agent-demo');
+const TMP = fs.realpathSync(os.tmpdir());
+const writeDir = path.join(TMP, 'bare-agent-demo');
 fs.mkdirSync(writeDir, { recursive: true });
 const gate = new Gate({
   budget: { maxCostUsd: 0.10 },           // hard USD cap
   limits: { maxTurns: 20 },                // safety net on think/act cycles
-  fs:     { readScope: ['/tmp'], writeScope: [writeDir] },  // read: anywhere under /tmp; write: one narrower demo dir
+  fs:     { readScope: [TMP], writeScope: [writeDir] },  // read: anywhere under the tmp root; write: one narrower demo dir
   bash:   { allow: ['ls', 'cat', 'echo', 'pwd'] },  // argv[0] allowlist for shell_run
   audit:  { path: './bareagent-audit.jsonl' },
   // Required by bareguard: any ask/halt event flows through here.
@@ -87,7 +90,7 @@ const loop = new Loop({
 
 // 4. Run. Pass the tools as-is — gating is via policy/onToolResult, not by wrapping execute().
 const result = await loop.run(
-  [{ role: 'user', content: 'List the contents of /tmp using shell_run with argv ["ls", "/tmp"].' }],
+  [{ role: 'user', content: `List the contents of ${TMP} using shell_run with argv ["ls", "${TMP}"].` }],
   tools,
 );
 

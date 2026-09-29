@@ -448,7 +448,7 @@ const { createShellTools } = require('bare-agent/tools');
 const gate = new Gate({
   budget: { maxCostUsd: 0.50 },
   limits: { maxTurns: 20 },
-  fs:     { readScope: ['/tmp', '~/Projects'], deny: ['/etc'] },
+  fs:     { readScope: ['/srv/agent', '~/Projects'], deny: ['/etc'] },  // list REAL paths (bareguard >=0.19.2 throws on a symlinked scope root; on macOS /tmp is one — use fs.realpathSync(os.tmpdir()))
   bash:   { allow: ['ls', 'cat', 'grep', 'ps', 'df'] },          // argv[0] allowlist
   audit:  { path: './audit.jsonl' },
   humanChannel: async (event) => ({ decision: 'deny' }),         // wire to your UI
@@ -1427,7 +1427,7 @@ Mobile tools follow the observe-act pattern: action tools auto-return a fresh sn
 
 **Zero baked-in allowlist.** The library ships the primitives; gating is bareguard's job via the standard `wireGate(gate)` wiring.
 
-> **Path canonicalization + symlink refusal, together.** bareguard's own resolved-path (symlink) containment check is planned for an upcoming release, not yet published; until then the gate matches paths lexically, so a symlinked parent dir is NOT contained even when the link sits inside an allowed scope. bare-agent canonicalizes the path (`~` + resolve, via `resolveToolPath`) before the gate check and opens that same path — this closes a *different* gap (the gate judging a `~`/relative path in a different form than the one the tool opens), not the lexical-match gap above. `noFollowSymlinks` refuses a symlinked final path *component* at open time. Together they narrow but do not close the check-then-open window, and neither covers hardlinks.
+> **Path canonicalization + symlink refusal, together.** bareguard >=0.19.0 already realpath-resolves the checked path and every scope root on each call, so a symlink under an allowed scope that resolves outside it is denied (`fs.<scope>.symlinkEscape`; dangling → `danglingSymlink`). bareguard 0.19.2 additionally requires the scope ROOTS themselves not be, or sit under, a symlink: `new Gate` throws otherwise, and a root swapped for a symlink later denies `fs.readScope.symlinkRoot` / `fs.writeScope.symlinkRoot` — list real paths (e.g. `fs.realpathSync(os.tmpdir())`; on macOS `/tmp` and `os.tmpdir()` are symlinks). bare-agent canonicalizes the path (`~` + resolve, via `resolveToolPath`) before the gate check and opens that same path — this closes a *different* gap (the gate judging a `~`/relative path in a different form than the one the tool opens), not the symlink-containment gap, which is bareguard's job. `noFollowSymlinks` refuses a symlinked final path *component* at open time. Together they narrow but do not close the check-then-open window, and neither covers hardlinks.
 >
 > **Opt-in symlink refusal:** `createShellTools({ noFollowSymlinks: true })` makes `shell_read`, `shell_write`, `shell_edit`, and `shell_grep` refuse to open a path whose **final** path component is a symlink — a file, a dir, or dangling — instead of silently following it. Refusal is a **thrown** error with `err.code === 'ELOOP'` (feeds the Loop's `maxIdenticalToolErrors` guard like any other tool error), and for `shell_write` the link's target is never created or touched. Scope is the final component **only** — a symlinked *parent* directory is not covered (per the canonicalization note above), and neither is the `cwd` option of `shell_run`/`shell_exec` — it only gets `~` expansion, never this flag or `resolveToolPath`'s full canonicalization, so a symlinked `cwd` is always followed. `shell_grep` refuses only a symlinked **root** path loudly, via the same atomic open every other tool uses (open-then-fstat, not a look-then-open `lstat`); a file that turns into a symlink partway through the walk is skipped silently, the same as any other read error. The check is atomic (`O_NOFOLLOW`) on linux/macOS; on Windows, which has no `O_NOFOLLOW`-equivalent open flag, it falls back to a non-atomic `lstat`-then-open check — a symlink planted in that gap slips through. A directory listing (`shell_read` on a dir, `shell_grep`'s root when it's a dir) additionally rechecks the path's `dev`+`ino` against the open handle right after listing — Node has no `fdopendir`, so the listing itself still goes by path, and this narrows (does not close) the window where a directory swapped in between the open and the listing would report a different directory's names; a swap-and-swap-back inside that narrow window still passes undetected. Default `false` — omitting the option is byte-identical to the pre-existing behavior.
 >
@@ -1451,7 +1451,7 @@ const gate = new Gate({
   // Hard-deny shell_exec for this agent. tools.denylist short-circuits before content checks.
   tools:  { denylist: ['shell_exec'] },
   // fs scope for shell_read / shell_grep.
-  fs:     { readScope: ['/home/', '/tmp/'] },
+  fs:     { readScope: ['/home/', '/srv/agent/'] },  // real paths only — see the symlink note above
   audit:  { path: './shell-audit.jsonl' },
   humanChannel: async (event) => ({ decision: 'deny' }),
 });

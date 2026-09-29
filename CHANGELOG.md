@@ -2,6 +2,29 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The `examples/with-bareguard.mjs` and the bareguard-backed tests now `fs.realpathSync` their
+  tmp scope roots. bareguard 0.19.2 throws at `new Gate(...)` on an `fs.readScope`/`fs.writeScope`
+  root that is or contains a symlink (macOS `/tmp` and `os.tmpdir()` are symlinks). devDependency
+  bareguard is now `^0.19.2`; the peer range `>=0.19.0 <1.0.0` is unchanged and already admits it.
+
+### Fixed
+
+- Docs no longer say bareguard's resolved-path symlink containment is "planned, not yet
+  published": bareguard >=0.19.0 resolves the checked path and scope roots on every call; 0.19.2
+  adds the root check below.
+
+### Upgrade note (adopters)
+
+- List real paths in `fs.readScope`/`fs.writeScope`, e.g. `fs.realpathSync(os.tmpdir())`. A
+  symlinked root now throws at Gate construction, and a root swapped for a symlink later denies
+  with the new rules `fs.readScope.symlinkRoot` / `fs.writeScope.symlinkRoot`. Roots that don't
+  exist yet remain legal.
+- bareguard 0.19.1 fixed the `bash.allow` word-boundary issue flagged in 0.48.0's notes.
+
 ## [0.48.0] - 2026-09-29
 
 ### BREAKING
