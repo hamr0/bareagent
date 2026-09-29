@@ -21,6 +21,11 @@ async function loadBareguard() {
   return await import('bareguard');
 }
 
+// Real path: bareguard >=0.19.2 throws at Gate construction on a scope root that is/contains a symlink
+// (macOS os.tmpdir() is one).
+const TMP = fs.realpathSync(os.tmpdir());
+const TMPX = path.join(TMP, 'x');
+
 function tmpAudit() {
   return path.join(os.tmpdir(), `bareagent-ba-test-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`);
 }
@@ -266,35 +271,68 @@ describe('Real bareguard 0.2 Gate + Loop end-to-end', () => {
 describe('Default actionTranslator maps shell tools to fs/bash primitives (bareguard >=0.19, "C2" fix)', () => {
   it('shell_read denies outside readScope, allows inside', async () => {
     const { Gate } = await loadBareguard();
-    const gate = new Gate({ fs: { readScope: ['/tmp'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    const gate = new Gate({ fs: { readScope: [TMP] }, humanChannel: async () => ({ decision: 'deny' }) });
     await gate.init();
     const { policy } = wireGate(gate);
 
-    assert.equal(await policy('shell_read', { path: '/tmp/x' }, null), true);
+    assert.equal(await policy('shell_read', { path: TMPX }, null), true);
     const denied = await policy('shell_read', { path: '/etc/passwd' }, null);
     assert.match(denied, /\[deny: fs\.readScope\]/);
   });
 
   it('shell_write/shell_edit deny outside writeScope, allow inside', async () => {
     const { Gate } = await loadBareguard();
-    const gate = new Gate({ fs: { writeScope: ['/tmp'] }, humanChannel: async () => ({ decision: 'deny' }) });
+    const gate = new Gate({ fs: { writeScope: [TMP] }, humanChannel: async () => ({ decision: 'deny' }) });
     await gate.init();
     const { policy } = wireGate(gate);
 
-    assert.equal(await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null), true);
-    assert.equal(await policy('shell_edit', { path: '/tmp/x', oldText: 'a', newText: 'b' }, null), true);
+    assert.equal(await policy('shell_write', { path: TMPX, content: 'hi' }, null), true);
+    assert.equal(await policy('shell_edit', { path: TMPX, oldText: 'a', newText: 'b' }, null), true);
     assert.match(await policy('shell_write', { path: '/etc/passwd', content: 'hi' }, null), /\[deny: fs\.writeScope\]/);
   });
 
   it('a relative or ~-prefixed path is canonicalized before the gate sees it', async () => {
     const { Gate } = await loadBareguard();
     const os = require('node:os');
-    const gate = new Gate({ fs: { readScope: [os.homedir()] }, humanChannel: async () => ({ decision: 'deny' }) });
-    await gate.init();
-    const { policy } = wireGate(gate);
+    // Pin HOME to a realpath'd scratch dir: bareguard >=0.19.2 rejects a symlinked scope root,
+    // and the adapter's ~ expansion is lexical (it does not realpath), so a symlinked $HOME
+    // could never satisfy both. Scope root and `~` must resolve to the same real string.
+    const prevHome = process.env.HOME;
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(TMP, 'ba-home-')));
+    process.env.HOME = home;
+    try {
+      assert.equal(fs.realpathSync(os.homedir()), home);
+      const gate = new Gate({ fs: { readScope: [fs.realpathSync(os.homedir())] }, humanChannel: async () => ({ decision: 'deny' }) });
+      await gate.init();
+      const { policy } = wireGate(gate);
 
-    // ~/somefile resolves under the homedir, which IS in scope.
-    assert.equal(await policy('shell_read', { path: '~/somefile' }, null), true);
+      // ~/somefile resolves under the homedir, which IS in scope.
+      assert.equal(await policy('shell_read', { path: '~/somefile' }, null), true);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // bareguard >=0.19.2: an fs scope root that is (or contains) a symlink is rejected at Gate
+  // construction — why every scope root in this file is realpath'd. Red on 0.19.1 (no throw).
+  it('a symlinked fs.readScope root makes `new Gate` throw (bareguard >=0.19.2)', async () => {
+    const { Gate } = await loadBareguard();
+    const dir = fs.mkdtempSync(path.join(TMP, 'ba-symroot-'));
+    try {
+      const target = path.join(dir, 'real');
+      const link = path.join(dir, 'link');
+      fs.mkdirSync(target);
+      fs.symlinkSync(target, link);
+      assert.throws(
+        () => new Gate({ fs: { readScope: [link] }, humanChannel: async () => ({ decision: 'deny' }) }),
+        /symlink/,
+      );
+      // Control: the real (non-symlink) root is accepted.
+      assert.doesNotThrow(() => new Gate({ fs: { readScope: [target] }, humanChannel: async () => ({ decision: 'deny' }) }));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // The task-B gap this closes: a REAL per-call action (not filterTools' discovery-time
@@ -307,7 +345,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
   it('a real call with a missing `path` key denies via fs.invalidPath, never silently allows (even with scope configured)', async () => {
     const { Gate } = await loadBareguard();
     const gate = new Gate({
-      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      fs: { readScope: [TMP], writeScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
@@ -344,7 +382,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
     await gate.init();
     const { policy } = wireGate(gate);
 
-    const denied = await policy('shell_read', { path: '/tmp/x' }, null);
+    const denied = await policy('shell_read', { path: TMPX }, null);
     assert.match(denied, /\[deny: fs\.readScope\.unset\]/);
   });
 
@@ -354,16 +392,16 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
       tools: { allowlist: ['shell_read'] },
       // Both scopes configured so the fs check itself would allow shell_write — isolates the
       // assertion to the allowlist's own exclusive-identity denial, not an unset-scope denial.
-      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      fs: { readScope: [TMP], writeScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
     const { policy } = wireGate(gate);
 
-    assert.equal(await policy('shell_read', { path: '/tmp/x' }, null), true);
+    assert.equal(await policy('shell_read', { path: TMPX }, null), true);
     // shell_write isn't in the allowlist — exclusive identity denies it even though a real
-    // shell_write to /tmp/x would otherwise be within writeScope.
-    const denied = await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null);
+    // shell_write to TMP/x would otherwise be within writeScope.
+    const denied = await policy('shell_write', { path: TMPX, content: 'hi' }, null);
     assert.match(denied, /\[deny: tools\.allowlist/);
   });
 
@@ -378,7 +416,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
   it('filterTools probes IDENTITY ONLY (never a path-less fs shape): a properly-scoped shell tool stays visible', async () => {
     const { Gate } = await loadBareguard();
     const gate = new Gate({
-      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      fs: { readScope: [TMP], writeScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
@@ -395,7 +433,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
     const { Gate } = await loadBareguard();
     const gate = new Gate({
       tools: { allowlist: ['shell_read'] },
-      fs: { readScope: ['/tmp'] },
+      fs: { readScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
@@ -412,7 +450,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
     const { Gate } = await loadBareguard();
     const gate = new Gate({
       tools: { denylist: ['shell_write'] },
-      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      fs: { readScope: [TMP], writeScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
@@ -446,8 +484,8 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
     assert.deepEqual(filtered.map(t => t.name), ['shell_read', 'shell_write']);
     // But an actual call is denied loudly (fs.readScope.unset / fs.writeScope.unset),
     // never silently allowed — the Loop's deny-streak guard bounds a model that retries.
-    assert.match(await policy('shell_read', { path: '/tmp/x' }, null), /\[deny: fs\.readScope\.unset\]/);
-    assert.match(await policy('shell_write', { path: '/tmp/x', content: 'hi' }, null), /\[deny: fs\.writeScope\.unset\]/);
+    assert.match(await policy('shell_read', { path: TMPX }, null), /\[deny: fs\.readScope\.unset\]/);
+    assert.match(await policy('shell_write', { path: TMPX, content: 'hi' }, null), /\[deny: fs\.writeScope\.unset\]/);
   });
 
   // MUTATION (real 0.19 Gate): reverting filterTools to probe the TRANSLATED shape
@@ -462,7 +500,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
     const { Gate } = await loadBareguard();
     const { defaultActionTranslator } = require('../src/bareguard-adapter');
     const gate = new Gate({
-      fs: { readScope: ['/tmp'], writeScope: ['/tmp'] },
+      fs: { readScope: [TMP], writeScope: [TMP] },
       humanChannel: async () => ({ decision: 'deny' }),
     });
     await gate.init();
@@ -488,7 +526,7 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
   it('end-to-end through a Loop: shell_write outside writeScope is denied and fed back, the model recovers', async () => {
     const { Gate } = await loadBareguard();
     const auditPath = tmpAudit();
-    const gate = new Gate({ fs: { writeScope: ['/tmp'] }, audit: { path: auditPath }, humanChannel: async () => ({ decision: 'deny' }) });
+    const gate = new Gate({ fs: { writeScope: [TMP] }, audit: { path: auditPath }, humanChannel: async () => ({ decision: 'deny' }) });
     await gate.init();
     const { policy, onLlmResult, onToolResult } = wireGate(gate);
     const writeTool = {

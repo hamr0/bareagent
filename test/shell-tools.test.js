@@ -10,7 +10,10 @@ const { Loop } = require('../src/loop');
 const { Gate } = require('bareguard');
 const { wireGate } = require('../src/bareguard-adapter');
 
-const TMP = path.join(os.tmpdir(), `bareagent-shell-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+// Real path: bareguard >=0.19.2 throws at Gate construction on a scope root that is/contains a symlink
+// (macOS os.tmpdir() is one), so every scope root below must sit under the resolved tmp dir.
+const REAL_TMPDIR = fs.realpathSync(os.tmpdir());
+const TMP = path.join(REAL_TMPDIR, `bareagent-shell-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 function findTool(tools, name) {
   return tools.find(t => t.name === name);
@@ -488,8 +491,8 @@ describe('createShellTools', () => {
     // BA-2 gating contract (mirrors poc/ba2-write-tool-gate.mjs as a regression): translated to {type:'write'},
     // shell_write is gated by fs.writeScope — in-scope lands, out-of-scope is denied BEFORE execute (no file).
     it('is gated by bareguard fs.writeScope when translated to {type:"write"} (in-scope lands, out-of-scope denied)', async () => {
-      const scope = fs.mkdtempSync(path.join(os.tmpdir(), 'ba2-scope-'));
-      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ba2-out-'));
+      const scope = fs.mkdtempSync(path.join(REAL_TMPDIR, 'ba2-scope-'));
+      const outside = fs.mkdtempSync(path.join(REAL_TMPDIR, 'ba2-out-'));
       const inPath = path.join(scope, 'ok.txt');
       const outPath = path.join(outside, 'leak.txt');
       const provider = {
@@ -630,8 +633,8 @@ describe('createShellTools', () => {
     // C5: translated to {type:'edit'}, shell_edit is gated by fs.writeScope — bareguard gates `edit` by the
     // SAME writeScope as `write` with ZERO bareguard change. In-scope lands, out-of-scope is denied before execute.
     it('C5: is gated by bareguard fs.writeScope when translated to {type:"edit"} (in lands, out denied)', async () => {
-      const scope = fs.mkdtempSync(path.join(os.tmpdir(), 'ba13-scope-'));
-      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ba13-out-'));
+      const scope = fs.mkdtempSync(path.join(REAL_TMPDIR, 'ba13-scope-'));
+      const outside = fs.mkdtempSync(path.join(REAL_TMPDIR, 'ba13-out-'));
       const inPath = path.join(scope, 'ok.txt');
       const outPath = path.join(outside, 'leak.txt');
       fs.writeFileSync(inPath, 'ANCHOR in\n');
