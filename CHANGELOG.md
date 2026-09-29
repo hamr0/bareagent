@@ -13,6 +13,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   thinking mode by default and 400s "Thinking mode does not support this tool_choice" on a named or
   `'required'` `toolChoice`; `thinking: { type: 'disabled' }` makes the forced call return 200. Unset ⇒
   request body byte-identical to before.
+  **Fallback caveat:** per-call options (incl. `thinking`) are forwarded to EVERY provider in a `FallbackProvider`
+  chain (documented + pinned by test) — for a mixed-vendor chain set `thinking` on each provider's constructor, not per-call.
 
 ## [0.48.1] - 2026-09-29
 

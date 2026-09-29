@@ -505,6 +505,14 @@ The blocks now ride the transcript on `Message.providerBlocks` (`{provider, mode
 
 `AnthropicProvider({ thinking })` is a separate, opt-in knob, forwarded to `body.thinking` verbatim (e.g. `{type:'adaptive', display:'summarized'}` to surface the reasoning; the default `display` is `'omitted'`). **It does not "turn thinking on"** — it's already on. Use it to pin the mode or reach `display`/`effort`. It is passed through unvalidated on purpose: `budget_tokens` was removed from the API and now **400s** on sonnet-5/Opus 4.7+, so a library that reshaped this parameter would need a release every time Anthropic moved.
 
+`OpenAIProvider({ thinking })` is the OpenAI-compatible counterpart: same verbatim/unvalidated forwarding to `body.thinking`, overridable per call (`loop.run(msgs, tools, { thinking })` / `generate(..., { thinking })`), and per-call `null` suppresses the constructor default. Needed for DeepSeek, which runs thinking mode by default and 400s "Thinking mode does not support this tool_choice" on a forced `toolChoice`:
+
+```js
+new OpenAIProvider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', legacyMaxTokens: true, thinking: { type: 'disabled' } })
+```
+
+> **Fallback caveat:** per-call options (incl. `thinking`) are forwarded to EVERY provider in a `FallbackProvider` chain. For a mixed-vendor chain set `thinking` on each provider's constructor, not per-call.
+
 > **Honesty note, and we mean it.** This is a **protocol/data-loss fix, not a capability fix.** A head-to-head with thinking fully preserved vs. stock bare-agent produced **indistinguishable** outcomes. Do not adopt 0.27 expecting better reasoning — you will not get it, and we have the measurement.
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.

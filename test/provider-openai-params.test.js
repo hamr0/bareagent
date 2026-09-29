@@ -11,6 +11,7 @@ const http = require('node:http');
 
 const { OpenAIProvider } = require('../src/provider-openai');
 const { ProviderError } = require('../src/errors');
+const { Loop } = require('../src/loop');
 
 const OPENAI_OK = { choices: [{ message: { content: 'hi', role: 'assistant' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
 const MSGS = [{ role: 'user', content: 'hi' }];
@@ -272,5 +273,28 @@ describe('BA-7(b): OpenAI thinking option', () => {
         (e) => e instanceof ProviderError && e.status === 400 && /thinking/.test(e.message),
       );
     } finally { server.close(); }
+  });
+});
+
+describe('thinking per-call path through Loop.run', () => {
+  const LOOP_TOOLS = [{ ...TOOLS[0], execute: async () => 'done' }];
+
+  it('run(msgs, tools, { thinking, toolChoice }) reaches the wire body verbatim', async () => {
+    const s = await captureServer();
+    try {
+      const loop = new Loop({ provider: new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }) });
+      await loop.run(MSGS, LOOP_TOOLS, { thinking: { type: 'disabled' }, toolChoice: { name: 'do_it' } });
+      assert.deepEqual(s.state.body.thinking, { type: 'disabled' });
+      assert.ok(s.state.body.tool_choice, 'tool_choice forwarded');
+    } finally { s.server.close(); }
+  });
+
+  it('NEGATIVE CONTROL: run without thinking ⇒ no thinking key on the wire', async () => {
+    const s = await captureServer();
+    try {
+      const loop = new Loop({ provider: new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }) });
+      await loop.run(MSGS, LOOP_TOOLS, { toolChoice: { name: 'do_it' } });
+      assert.ok(!('thinking' in s.state.body), 'no thinking key');
+    } finally { s.server.close(); }
   });
 });

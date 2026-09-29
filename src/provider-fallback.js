@@ -11,6 +11,11 @@
  * @property {(error: any, fromIndex: number, toIndex: number) => void} [onFallback] - Callback.
  */
 
+/**
+ * NOTE: per-call `generate()` options (incl. `thinking`, `toolChoice`) are forwarded UNCHANGED to EVERY provider in the chain. For a
+ * mixed-vendor chain (e.g. OpenAI-compat DeepSeek + Anthropic) set `thinking` on each provider's CONSTRUCTOR instead of per-call,
+ * or a value shaped for one vendor lands in another's `body.thinking` on fallback.
+ */
 class FallbackProvider {
   /**
    * Provider that tries multiple providers in order.

@@ -85,6 +85,8 @@ function isLoopbackHost(hostname) {
  *   forced tool call return 200. Deliberately opaque (no model sniffing, no free-form extra-body field) — a
  *   library that reshapes it would need a release every time a vendor moves. Unset ⇒ request body unchanged.
  *   Overridable per call via `generate(..., { thinking })`; pass `null` there to suppress an instance default.
+ *   WARNING: per-call options (incl. `thinking`) are forwarded to EVERY provider in a `FallbackProvider` chain — for a mixed-vendor
+ *   chain set `thinking` on each provider's CONSTRUCTOR instead of per-call.
  */
 
 class OpenAIProvider {
