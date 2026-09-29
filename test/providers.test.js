@@ -472,6 +472,16 @@ describe('Anthropic thinking blocks — BA-7 preservation + opt-in', () => {
     });
   });
 
+  it('REGRESSION: thinking unset ⇒ no thinking key, body byte-identical to a thinking:null provider', async () => {
+    await withServer(RESP_PLAIN, async ({ url, received }) => {
+      const msgs = [{ role: 'user', content: 'go' }];
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5' }).generate(msgs, []);
+      await new AnthropicProvider({ apiKey: 'x', baseUrl: url, model: 'claude-sonnet-5', thinking: null }).generate(msgs, []);
+      assert.equal('thinking' in received[0].body, false);
+      assert.equal(JSON.stringify(received[0].body), JSON.stringify(received[1].body));
+    });
+  });
+
   it('per-call thinking overrides the instance default', async () => {
     await withServer(RESP_PLAIN, async ({ url, received }) => {
       await new AnthropicProvider({ apiKey: 'x', baseUrl: url, thinking: { type: 'adaptive' } })

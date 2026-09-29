@@ -2,6 +2,18 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `OpenAIProvider` opt-in `thinking` option (fwdloop DeepSeek ask — extends BA-7(b)'s `thinking` option, delivered for Anthropic in 0.27.0, to `OpenAIProvider`): constructor `thinking` and per-call
+  `generate(..., { thinking })` are forwarded to `body.thinking` VERBATIM (unvalidated, no model sniffing;
+  per-call `null` suppresses an instance default). Mirrors the Anthropic provider's option. Needed for
+  DeepSeek's OpenAI-compatible API (`baseUrl` `https://api.deepseek.com`, `deepseek-flash`), which runs
+  thinking mode by default and 400s "Thinking mode does not support this tool_choice" on a named or
+  `'required'` `toolChoice`; `thinking: { type: 'disabled' }` makes the forced call return 200. Unset ⇒
+  request body byte-identical to before.
+
 ## [0.48.1] - 2026-09-29
 
 ### Changed
