@@ -18,16 +18,30 @@
 
 import { Gate } from 'bareguard';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 const require = createRequire(import.meta.url);
 const { Loop, wireGate } = require('bare-agent');
 const { OpenAI } = require('bare-agent/providers');
-const { createShellTools, resolveToolPath } = require('bare-agent/tools');
+const { createShellTools } = require('bare-agent/tools');
 
 // 1. Build the gate. Every primitive is optional with sensible defaults.
+//    fs.readScope/fs.writeScope are both set: on bareguard >=0.19 (bareagent's peerDependency
+//    floor), a shell file action denies by default when its scope is unset (fs.readScope.unset /
+//    fs.writeScope.unset) — leaving writeScope out here would silently deny every shell_write /
+//    shell_edit call, not leave the primitive dead like on older bareguard.
+//    readScope is deliberately WIDER than writeScope here — read is fine anywhere under /tmp,
+//    but writes are narrowed to one demo subdir, to show the two scopes are independent (a
+//    folder listed only in readScope is NOT writable, and vice versa). The demo dir is created
+//    below since fs.writeScope doesn't need the path to pre-exist, but the example's own
+//    shell_write call does.
+const writeDir = path.join(os.tmpdir(), 'bare-agent-demo');
+fs.mkdirSync(writeDir, { recursive: true });
 const gate = new Gate({
   budget: { maxCostUsd: 0.10 },           // hard USD cap
   limits: { maxTurns: 20 },                // safety net on think/act cycles
-  fs:     { readScope: ['/tmp', '~/'] },   // shell_read / shell_grep allowed roots
+  fs:     { readScope: ['/tmp'], writeScope: [writeDir] },  // read: anywhere under /tmp; write: one narrower demo dir
   bash:   { allow: ['ls', 'cat', 'echo', 'pwd'] },  // argv[0] allowlist for shell_run
   audit:  { path: './bareagent-audit.jsonl' },
   // Required by bareguard: any ask/halt event flows through here.
@@ -45,36 +59,16 @@ const gate = new Gate({
 });
 await gate.init();
 
-// 2. Wire the gate. The DEFAULT translator emits `{ type: <toolName> }` — which matches bareguard's
-//    `tools.allowlist`/`tools.denylist` (they read `action.type`) but does NOT activate the `bash`/`fs`/`net`
-//    primitives: those fire only on `action.type ∈ {bash, read, write, edit}` and read `action.cmd`/`action.path`.
-//    So to make the `bash.allow` + `fs.readScope` config above actually enforce, we MUST translate the shell
-//    tools into those primitive shapes — otherwise the caps are silently dead (relayfact F7/BA-3).
-//
-//    `path` below is `resolveToolPath(args.path)`, not the raw arg: bareguard's fs primitive checks the
-//    path you hand it WITHOUT canonicalizing it, so a `~`-prefixed or relative path would be judged
-//    against `fs.readScope`/`fs.writeScope` in a different form than the one the tool actually opens —
-//    gate string and opened string must be the SAME string. `resolveToolPath` is the one canonicalizer
-//    (expand `~` via os.homedir(), then path.resolve) every shell file tool already applies internally
-//    before opening; calling it here too means the gate sees exactly what gets opened.
-const actionTranslator = (toolName, args, ctx) => {
-  switch (toolName) {
-    // shell_run is argv (no shell); bareguard's bash.allow matches `cmd.startsWith(prefix)`, so join argv[0..].
-    case 'shell_run':  return { type: 'bash', cmd: (args?.argv || []).join(' '), args, _ctx: ctx ?? null };
-    case 'shell_exec': return { type: 'bash', cmd: args?.command, args, _ctx: ctx ?? null };
-    // shell_read / shell_grep are reads — gate them through fs.readScope, on the canonicalized path.
-    case 'shell_read':
-    case 'shell_grep': return { type: 'read', path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
-    // shell_write is a write — gate it through fs.writeScope (add writeScope to the Gate config to enforce).
-    case 'shell_write': return { type: 'write', path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
-    // shell_edit is an anchored edit — bareguard gates {type:'edit'} by the SAME fs.writeScope as write.
-    case 'shell_edit':  return { type: 'edit',  path: resolveToolPath(args?.path), args, _ctx: ctx ?? null };
-    default:           return { type: toolName, args, _ctx: ctx ?? null };
-  }
-};
+// 2. Wire the gate. As of bareguard >=0.19 (bareagent's peerDependency floor), the DEFAULT
+//    actionTranslator already maps the six `createShellTools` primitives into bareguard's `fs`/`bash`
+//    shapes (shell_read/shell_grep → {type:'read',...}, shell_write → {type:'write',...}, shell_edit →
+//    {type:'edit',...}, shell_run/shell_exec → {type:'bash',...}), canonicalizing the path with
+//    `resolveToolPath` itself — so the `bash.allow` + `fs.readScope`/`fs.writeScope` config above just
+//    works with no custom actionTranslator (this used to be a required hand-written override — the "C2"
+//    gap, relayfact F7/BA-3 — see src/bareguard-adapter.js for the exact shape and bareguard-version note).
 // onToolResult + onLlmResult are the current wiring (wrapTools is deprecated — it loses _ctx and never sees
 // LLM cost, so the budget cap can't cover token-only rounds). policy gates pre-call; the result hooks record.
-const { policy, onToolResult, onLlmResult } = wireGate(gate, { actionTranslator });
+const { policy, onToolResult, onLlmResult } = wireGate(gate);
 
 // 3. Standard bareagent setup.
 const provider = new OpenAI({

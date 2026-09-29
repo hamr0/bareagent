@@ -77,6 +77,7 @@ describe('wireGate', () => {
     assert.equal(gate._checkCalls.length, 1);
     assert.deepEqual(gate._checkCalls[0], {
       type: 'get_weather',
+      tool: 'get_weather',
       args: { city: 'Berlin' },
       _ctx: { userId: 1 },
     });
@@ -174,10 +175,74 @@ describe('wireGate', () => {
   it('defaultActionTranslator is exported for adopters to compose', () => {
     const { defaultActionTranslator } = require('../src/bareguard-adapter');
     assert.equal(typeof defaultActionTranslator, 'function');
+    // Non-shell tool: unchanged shape plus `tool` (bareguard 0.19's action identity
+    // is `action.tool ?? action.type` — carrying it keeps a tool-name allowlist matching
+    // even for the shell tools below, whose `type` is now a primitive name, not the tool name).
     assert.deepEqual(
       defaultActionTranslator('get_weather', { city: 'X' }, { userId: 1 }),
-      { type: 'get_weather', args: { city: 'X' }, _ctx: { userId: 1 } },
+      { type: 'get_weather', tool: 'get_weather', args: { city: 'X' }, _ctx: { userId: 1 } },
     );
+  });
+
+  it('defaultActionTranslator maps shell_read/shell_grep to the fs read primitive', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    for (const toolName of ['shell_read', 'shell_grep']) {
+      assert.deepEqual(
+        defaultActionTranslator(toolName, { path: '/tmp/x' }, null),
+        { type: 'read', path: '/tmp/x', tool: toolName, args: { path: '/tmp/x' }, _ctx: null },
+      );
+    }
+  });
+
+  it('defaultActionTranslator maps shell_write/shell_edit to the fs write/edit primitives', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    assert.deepEqual(
+      defaultActionTranslator('shell_write', { path: '/tmp/x', content: 'hi' }, null),
+      { type: 'write', path: '/tmp/x', tool: 'shell_write', args: { path: '/tmp/x', content: 'hi' }, _ctx: null },
+    );
+    assert.deepEqual(
+      defaultActionTranslator('shell_edit', { path: '/tmp/x', oldText: 'a', newText: 'b' }, null),
+      { type: 'edit', path: '/tmp/x', tool: 'shell_edit', args: { path: '/tmp/x', oldText: 'a', newText: 'b' }, _ctx: null },
+    );
+  });
+
+  it('defaultActionTranslator canonicalizes a relative/~ path via resolveToolPath', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    const os = require('node:os');
+    const path = require('node:path');
+    const resolved = defaultActionTranslator('shell_read', { path: '~/x' }, null);
+    assert.equal(resolved.path, path.join(os.homedir(), 'x'));
+    const relResolved = defaultActionTranslator('shell_read', { path: 'rel/x' }, null);
+    assert.equal(relResolved.path, path.resolve('rel/x'));
+  });
+
+  it('defaultActionTranslator maps shell_run/shell_exec to the bash primitive', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    assert.deepEqual(
+      defaultActionTranslator('shell_run', { argv: ['ls', '-la'] }, null),
+      { type: 'bash', cmd: 'ls -la', tool: 'shell_run', args: { argv: ['ls', '-la'] }, _ctx: null },
+    );
+    assert.deepEqual(
+      defaultActionTranslator('shell_exec', { command: 'ls -la' }, null),
+      { type: 'bash', cmd: 'ls -la', tool: 'shell_exec', args: { command: 'ls -la' }, _ctx: null },
+    );
+  });
+
+  it('defaultActionTranslator never crashes and never emits an allow-shaped path on a malformed/missing path', () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    // Present-but-malformed path: normalized to '' (reliably denies via fs.invalidPath on a
+    // real gate — see the real-bareguard test below), never passed through raw or thrown.
+    assert.equal(defaultActionTranslator('shell_read', { path: 123 }, null).path, '');
+    assert.equal(defaultActionTranslator('shell_read', { path: '' }, null).path, '');
+    assert.equal(defaultActionTranslator('shell_read', { path: null }, null).path, '');
+    // Genuinely absent path — a missing `path` key, or `args` missing entirely — is now
+    // ALSO normalized to '' (never `undefined`). filterTools no longer probes this
+    // translator (identity-only, see filterTools above), so every call here is a REAL
+    // per-call translation; `undefined` used to hit bareguard's fs primitive's "not a
+    // file action, skip scope entirely" branch and silently ALLOW a real call with no
+    // path at all — closed by normalizing to the same '' every other malformed path gets.
+    assert.equal(defaultActionTranslator('shell_read', {}, null).path, '');
+    assert.equal(defaultActionTranslator('shell_read', undefined, null).path, '');
   });
 
   // onLlmResult bypasses actionTranslator — LLM rounds always use {type:'llm'}
@@ -198,8 +263,10 @@ describe('wireGate', () => {
 
   // BA3: filterTools drops denied tools via gate.allows.
   it('filterTools drops tools denied by gate.allows (BA3)', async () => {
+    // gate.allows now receives the translated ACTION (same shape `policy` checks), not a bare
+    // tool-name string — identity for a non-fs/bash tool is still `action.tool` (here === the name).
     const gate = mockGate({
-      allowsImpl: (name) => name !== 'shell_run',
+      allowsImpl: (action) => action.tool !== 'shell_run',
     });
     const { filterTools } = wireGate(gate);
     const tools = [
@@ -214,6 +281,57 @@ describe('wireGate', () => {
     assert.equal(gate._checkCalls.length, 0);
     assert.equal(gate._recordCalls.length, 0);
     assert.equal(gate._allowsCalls.length, 3);
+  });
+
+  // Mutation-proof for task A's fix: filterTools must probe tool IDENTITY ONLY
+  // (`{type:name, tool:name}`), never the actionTranslator's real per-type shape.
+  // `safeToolPath` now ALWAYS normalizes a missing/malformed path to `''` (never
+  // `undefined` — see `safeToolPath`'s own doc for why the `undefined` case was
+  // closed), so a discovery-time probe of the translated shape would carry
+  // `path:''` for every shell file tool. This mock captures that MEASURED real
+  // bareguard behavior (fs.invalidPath denies an empty-string path unconditionally,
+  // regardless of scope config) rather than a hypothetical.
+  it('filterTools stays correct even though the translator now always emits path:"" for a discovery-time (no real args) probe', async () => {
+    const strictGate = mockGate({
+      allowsImpl: (action) => {
+        if ((action.type === 'read' || action.type === 'write' || action.type === 'edit') && action.path === '') {
+          return false; // real bareguard 0.19: fs.invalidPath denies an empty-string path
+        }
+        return true;
+      },
+    });
+    const { filterTools } = wireGate(strictGate);
+    const tools = [
+      { name: 'shell_read', execute: async () => 'ok' },
+      { name: 'shell_write', execute: async () => 'ok' },
+      { name: 'get_weather', execute: async () => 'ok' },
+    ];
+    const filtered = await filterTools(tools);
+    // The fix (identity-only probe, type:'shell_read' not type:'read') never trips this
+    // rule at all — every tool stays visible.
+    assert.deepEqual(filtered.map(t => t.name), ['shell_read', 'shell_write', 'get_weather']);
+  });
+
+  // The mutation: reverting filterTools to probe the TRANSLATED shape (what task A's
+  // fix replaced) goes RED against the same rule above — shell_read and shell_write
+  // would vanish (silently hidden) even though nothing said to hide them. This is now
+  // provably true on a REAL bareguard 0.19 Gate too (not just this mock) — see
+  // 'MUTATION (real 0.19 Gate): reverting filterTools to the translated shape hides
+  // properly-scoped shell tools' in test/integration-bareguard-real.test.js.
+  it('MUTATION (documented, not applied): translate(name, undefined, undefined) would fail the strict-gate simulation', async () => {
+    const { defaultActionTranslator } = require('../src/bareguard-adapter');
+    const strictAllows = (action) => {
+      if ((action.type === 'read' || action.type === 'write' || action.type === 'edit') && action.path === '') {
+        return false;
+      }
+      return true;
+    };
+    // Reproduce the OLD filterTools body inline (translate(t.name, undefined, undefined))
+    // rather than mutating the shipped source, and assert it goes red — proves the shipped
+    // fix (identity-only probe) is load-bearing, not incidental.
+    const names = ['shell_read', 'shell_write', 'get_weather'];
+    const oldVerdicts = names.map(n => strictAllows(defaultActionTranslator(n, undefined, null)));
+    assert.deepEqual(oldVerdicts, [false, false, true], 'the pre-fix translated probe silently hides shell_read/shell_write under this rule');
   });
 
   it('filterTools throws if gate lacks .allows', async () => {
@@ -237,7 +355,7 @@ describe('wireGate', () => {
     });
     assert.equal(gate._recordCalls.length, 1);
     const [{ action, result }] = gate._recordCalls;
-    assert.deepEqual(action, { type: 'get_weather', args: { city: 'Berlin' }, _ctx: { userId: 7 } });
+    assert.deepEqual(action, { type: 'get_weather', tool: 'get_weather', args: { city: 'Berlin' }, _ctx: { userId: 7 } });
     assert.equal(result.durationMs, 42);
     assert.ok(typeof result.result === 'string');
   });

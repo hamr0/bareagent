@@ -22,6 +22,10 @@ const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
  * @property {boolean} [exposeErrorBody=false]
  * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`, `context.bound: 'idle'`) instead of hanging until the OS TCP timeout. `0`/`Infinity` disables it. Overridable per call via `generate(..., { timeoutMs })`. (A local Ollama that is loading a large model cold can be slow to first byte — raise this or disable it for very large local models.)
  * @property {number} [deadlineMs=0] - BA-19: TOTAL call-duration deadline in ms, beside `timeoutMs`. The idle bound resets on any socket activity, so a response that trickles a byte forever never trips it and hangs for hours. This is an absolute, non-resetting ceiling; on trip, `generate()` rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`, `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via `generate(..., { deadlineMs })`. (A cold large-model load is a legitimate long single call — leave this disabled or set it generously for such models.)
+ * @property {boolean} [exposeMalformedArgs=false] - BA-27 follow-up: when a tool call's string-shaped
+ *   `function.arguments` JSON fails to parse, also attach the raw string (verbatim, capped at 500
+ *   chars, `rawTruncated:true` when longer) to `malformedToolCall.rawArguments`. Off by default,
+ *   independent of `exposeErrorBody`. See `src/provider-toolcalls.js`.
  */
 
 class OllamaProvider {
@@ -41,6 +45,8 @@ class OllamaProvider {
     this.timeoutMs = options.timeoutMs;
     // BA-19: total call-duration deadline (ms). Resolved at call time (default 0 = disabled).
     this.deadlineMs = options.deadlineMs;
+    // BA-27 follow-up: expose the raw malformed tool-call arguments string. Off by default.
+    this.exposeMalformedArgs = options.exposeMalformedArgs === true;
   }
 
   /**
@@ -100,7 +106,7 @@ class OllamaProvider {
       arguments: typeof tc.function.arguments === 'string'
         ? JSON.parse(tc.function.arguments)
         : tc.function.arguments,
-    }));
+    }), { exposeMalformedArgs: this.exposeMalformedArgs });
 
     return {
       text: msg.content || '',

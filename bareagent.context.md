@@ -1,7 +1,7 @@
 # bareagent — Integration Guide
 
 > For AI assistants and developers wiring bareagent into a project.
-> v0.43.0 | Node.js >= 18 | zero required deps (`bareguard >=0.9.0 <0.16.0` optional peer for governance) | Apache 2.0
+> v0.43.0 | Node.js >= 18 | zero required deps (`bareguard >=0.19.0 <1.0.0` optional peer for governance) | Apache 2.0
 >
 > Full human guide with composition examples, design philosophy, and recipes: [Usage Guide](docs/archive/usage-guide.md)
 
@@ -509,7 +509,18 @@ The blocks now ride the transcript on `Message.providerBlocks` (`{provider, mode
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.
 
-**`actionTranslator` for bash/fs primitive activation (v0.10.1+).** Bareguard's `bashCheck` / `fsCheck` / `netCheck` only fire when `action.type === 'bash'` / `'read'` / `'write'` / `'fetch'`. The default action shape is `{type: toolName, args, _ctx}` which matches `tools.denylist` / `tools.allowlist` but does NOT activate those primitives. Adopters who want both pass `wireGate(gate, { actionTranslator })`. Since bareguard 0.4.1+, the primitives read fields from either flat (`action.cmd`) or nested (`action.args.cmd` / `.command`) shapes, so you can pass args through verbatim:
+**`actionTranslator` for bash/fs primitive activation — DEFAULT since bareguard >=0.19.0 (the "C2" fix).** Bareguard's `bashCheck` / `fsCheck` only fire when `action.type === 'bash'` / `'read'` / `'write'` / `'edit'`. Through 0.15, `wireGate`'s default action shape was `{type: toolName, args, _ctx}` — this matched `tools.denylist` / `tools.allowlist` but never activated `fs`/`bash`, so every adopter had to hand-write the translator below. **As of bareagent's current peerDependency floor (bareguard >=0.19.0), the DEFAULT translator does this mapping for you** — no custom `actionTranslator` needed for the six `createShellTools` primitives:
+
+- `shell_read` / `shell_grep` → `{type:'read', tool, path: resolveToolPath(args.path), args, _ctx}`
+- `shell_write` → `{type:'write', tool, path: resolveToolPath(args.path), args, _ctx}`
+- `shell_edit` → `{type:'edit', tool, path: resolveToolPath(args.path), args, _ctx}`
+- `shell_run` → `{type:'bash', tool, cmd: args.argv.join(' '), args, _ctx}`
+- `shell_exec` → `{type:'bash', tool, cmd: args.command, args, _ctx}`
+- every other tool → `{type: toolName, tool: toolName, args, _ctx}`
+
+`tool` carries the literal bareagent tool name on **every** branch — bareguard 0.19's action identity for `tools.allowlist`/`tools.denylist` is `action.tool ?? action.type`, so a tool-name allowlist (`tools.allowlist: ['shell_read']`) keeps matching even though `type` is now `'read'`/`'write'`/`'bash'`, not the tool name. **`filterTools` deliberately does NOT use this translator** — it probes tool IDENTITY ONLY (`{type: name, tool: name}`). No real `args` exist at discovery time, so probing the translated shape would mean `path: undefined`; measured on a real 0.19 Gate, a path-less `read`/`write`/`edit` action SKIPS the fs scope check entirely (not a deny), which would silently OFFER a shell file tool with NO scope configured at all — and bareguard has flagged that behavior may tighten to a deny in a future release, which would instead silently HIDE a properly-scoped tool. Neither reading is safe to build `filterTools` on, so it only reflects `tools.allowlist`/`tools.denylist`; scope enforcement stays entirely at `policy`, on the real call, where it denies loudly. `onLlmResult` still always uses `{type:'llm'}` regardless of the translator (so budget rules match without translator collusion). `resolveToolPath` canonicalizes `~`/relative paths before the gate sees them, exactly as the manual translator below used to; a malformed or missing path is handled so the translator **never crashes and never silently allows** — see `src/bareguard-adapter.js`'s `safeToolPath` for the exact contract: ANY missing or unresolvable path — absent `path` key, non-string, empty, or an unresolvable `~` — normalizes to `''` (bareguard denies via `fs.invalidPath` regardless of scope config). A real call is never silently allowed.
+
+**Requires bareguard >=0.19.0.** 0.15 and earlier ignore `action.tool` entirely, so this exact shape combined with a tool-name allowlist would deny every shell file action — that's WHY the peerDependency floor moved, not a runtime version check. Override with `wireGate(gate, { actionTranslator })` if you need a different shape or are pinned to an older bareguard:
 
 ```javascript
 const { policy, onToolResult } = wireGate(gate, {
@@ -524,9 +535,9 @@ const { policy, onToolResult } = wireGate(gate, {
 });
 ```
 
-`onLlmResult` always uses `{type:'llm'}` regardless of the translator (so budget rules match without translator collusion). `defaultActionTranslator` is exported for composition. **A tool is NOT auto-gated by the fs/bash primitives without this translator** — e.g. `shell_write` runs the write but `fs.writeScope` only enforces once `shell_write` → `{type:'write', path}`; the default `{type:'shell_write'}` matches `tools.allow/denylist` only. Verified live: with the translator, `gate.check` ALLOWs `shell_run ["ls","/tmp"]` and DENYs `shell_read /etc/passwd` (`[deny: fs.readScope]`), and an out-of-scope `shell_write` is denied **before** `execute` (nothing touches disk).
+Verified live against a real 0.19 Gate: `gate.check` ALLOWs `shell_run ["ls","/tmp"]` and DENYs `shell_read /etc/passwd` (`[deny: fs.readScope]`), and an out-of-scope `shell_write` is denied **before** `execute` (nothing touches disk) — with zero custom translator. `defaultActionTranslator` is exported for composition.
 
-> **Canonicalize the path before the gate sees it.** bareguard's `fs` primitive checks the path you hand it WITHOUT canonicalizing it — a `~`-prefixed or relative `args.path` reads `fs.readScope`/`fs.writeScope` differently than the absolute path the tool actually opens. Call `resolveToolPath` (exported from `bare-agent/tools` alongside `createShellTools`) on `args.path` in the translator — either put the result in an explicit `path` field (as the snippet above's sibling example, `examples/with-bareguard.mjs`, does) or, if relying on bareguard reading `args.path` directly, replace `args.path` with the canonicalized value before returning. Same string in, same string opened.
+> **fs.readScope/writeScope now deny by default when unset (bareguard 0.19).** Before, an unconfigured `fs` primitive that never activated was silently a no-op; now that the default translator activates it, a Gate with NO `fs.readScope` configured denies every `shell_read`/`shell_grep` (`fs.readScope.unset`), and likewise `fs.writeScope.unset` for `shell_write`/`shell_edit`. If you want the shell file tools usable at all, set both scopes explicitly — see `examples/with-bareguard.mjs`. Note this denial is a `policy`-time fact only: `filterTools` (identity-only, see above) still OFFERS the shell file tools to the model even with no scope configured — the deny happens loudly on the real call, not by hiding the tool at discovery time.
 
 **Bounding tool rounds — use `limits.maxToolRounds` (bareguard 0.4.2+), not doubled `maxTurns`.** `limits.maxTurns` ticks on every `gate.record` (LLM + tool), so an "N LLM-tool round" cap is `maxTurns: N*2`. `limits.maxToolRounds: N` ticks only on non-`llm` records and gives the natural semantic — pairs cleanly with our split `onLlmResult` / `onToolResult` (the LLM side writes `{type:'llm'}` records which the counter skips). Halt severity, same shape as `maxTurns`, rebuilt from audit on cold-start.
 
