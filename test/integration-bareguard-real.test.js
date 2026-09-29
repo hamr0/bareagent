@@ -294,12 +294,24 @@ describe('Default actionTranslator maps shell tools to fs/bash primitives (bareg
   it('a relative or ~-prefixed path is canonicalized before the gate sees it', async () => {
     const { Gate } = await loadBareguard();
     const os = require('node:os');
-    const gate = new Gate({ fs: { readScope: [os.homedir()] }, humanChannel: async () => ({ decision: 'deny' }) });
-    await gate.init();
-    const { policy } = wireGate(gate);
+    // Pin HOME to a realpath'd scratch dir: bareguard >=0.19.2 rejects a symlinked scope root,
+    // and the adapter's ~ expansion is lexical (it does not realpath), so a symlinked $HOME
+    // could never satisfy both. Scope root and `~` must resolve to the same real string.
+    const prevHome = process.env.HOME;
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(TMP, 'ba-home-')));
+    process.env.HOME = home;
+    try {
+      assert.equal(fs.realpathSync(os.homedir()), home);
+      const gate = new Gate({ fs: { readScope: [fs.realpathSync(os.homedir())] }, humanChannel: async () => ({ decision: 'deny' }) });
+      await gate.init();
+      const { policy } = wireGate(gate);
 
-    // ~/somefile resolves under the homedir, which IS in scope.
-    assert.equal(await policy('shell_read', { path: '~/somefile' }, null), true);
+      // ~/somefile resolves under the homedir, which IS in scope.
+      assert.equal(await policy('shell_read', { path: '~/somefile' }, null), true);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   // bareguard >=0.19.2: an fs scope root that is (or contains) a symlink is rejected at Gate

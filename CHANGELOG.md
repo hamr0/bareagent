@@ -9,7 +9,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - The `examples/with-bareguard.mjs` and the bareguard-backed tests now `fs.realpathSync` their
   tmp scope roots. bareguard 0.19.2 throws at `new Gate(...)` on an `fs.readScope`/`fs.writeScope`
   root that is or contains a symlink (macOS `/tmp` and `os.tmpdir()` are symlinks). devDependency
-  bareguard is now `>=0.19.2 <1.0.0`; the peer range `>=0.19.0 <1.0.0` is unchanged and already admits it.
+  bareguard is now `>=0.19.2 <1.0.0`; the peer range `>=0.19.0 <1.0.0` is unchanged and already admits it. bareguard 0.19.0 and 0.19.1 (still admitted by that range) silently follow a symlinked fs scope root to its target, so the scope moves to wherever the link points; upgrade to bareguard >=0.19.2, or make sure no scope root is or contains a symlink.
 
 ### Fixed
 
