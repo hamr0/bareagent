@@ -77,6 +77,16 @@ function isLoopbackHost(hostname) {
  *   when longer) to `malformedToolCall.rawArguments`. Off by default, independent of `exposeErrorBody` —
  *   the raw blob is model-generated, not an upstream error body, but the same "don't leak an unbounded
  *   unexpected string into logs by default" reasoning applies. See `src/provider-toolcalls.js`.
+ * @property {any} [thinking] - Opt-in `thinking` request field (fwdloop DeepSeek ask — extends BA-7(b)'s Anthropic option), forwarded to `body.thinking`
+ *   VERBATIM and unvalidated — e.g. `{ type: 'disabled' }`. Generalises the Anthropic provider's option to
+ *   OpenAI-compatible endpoints. Motivating case: DeepSeek's OpenAI-compatible API (`baseUrl`
+ *   `https://api.deepseek.com`, model `deepseek-flash`) runs thinking mode by default and 400s "Thinking mode
+ *   does not support this tool_choice" on a named or `'required'` `toolChoice`; `{ type: 'disabled' }` makes the
+ *   forced tool call return 200. Deliberately opaque (no model sniffing, no free-form extra-body field) — a
+ *   library that reshapes it would need a release every time a vendor moves. Unset ⇒ request body unchanged.
+ *   Overridable per call via `generate(..., { thinking })`; pass `null` there to suppress an instance default.
+ *   WARNING: per-call options (incl. `thinking`) are forwarded to EVERY provider in a `FallbackProvider` chain — for a mixed-vendor
+ *   chain set `thinking` on each provider's CONSTRUCTOR instead of per-call.
  */
 
 class OpenAIProvider {
@@ -100,13 +110,16 @@ class OpenAIProvider {
     this.legacyMaxTokens = options.legacyMaxTokens === true;
     // BA-27 follow-up: expose the raw malformed tool-call arguments string. Off by default.
     this.exposeMalformedArgs = options.exposeMalformedArgs === true;
+    // BA-7 (b) / fwdloop: forwarded to `body.thinking` VERBATIM — unvalidated, un-reshaped (mirrors the
+    // Anthropic provider). Null/unset ⇒ no `thinking` key, byte-identical to the pre-option body.
+    this.thinking = options.thinking != null ? options.thinking : null;
   }
 
   /**
    * Generate a response from the OpenAI API.
    * @param {Message[]} messages - Conversation messages.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19; toolChoice — `'auto'` | `'required'` | `{ name }`, forwarded as OpenAI `tool_choice`, applied only when `tools` are present).
+   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19; toolChoice — `'auto'` | `'required'` | `{ name }`, forwarded as OpenAI `tool_choice`, applied only when `tools` are present; thinking — per-call override of the constructor's `thinking`, `null` suppresses an instance default, see BA-7 (b)).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[OpenAIProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
@@ -121,6 +134,11 @@ class OpenAIProvider {
       ...(options.temperature != null && { temperature: options.temperature }),
       ...(options.maxTokens && { [maxTokensKey]: options.maxTokens }),
     };
+    // BA-7 (b) / fwdloop: DeepSeek-style compat endpoints default to thinking mode and 400 on a forced
+    // tool_choice; the caller pins it (e.g. `{type:'disabled'}`). Set on `body` before the temperature
+    // fallback so the retry (which only deletes `temperature`) keeps it. Per-call `null` suppresses.
+    const thinking = options.thinking !== undefined ? options.thinking : this.thinking;
+    if (thinking) body.thinking = thinking;
     // Ask 4 (fwdloop): validate the toolChoice SHAPE unconditionally so an invalid value ALWAYS throws
     // (a silently-dropped force is the exact confusion this surfaces) — even when tools happen to be
     // empty. Attach it only when tools are present: OpenAI 400s on a tool_choice with no tools, so a

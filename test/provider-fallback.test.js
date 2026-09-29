@@ -57,4 +57,14 @@ describe('FallbackProvider', () => {
   it('rejects empty providers array', () => {
     assert.throws(() => new FallbackProvider([]), /requires at least one provider/);
   });
+
+  it('per-call options (incl. thinking) are forwarded UNCHANGED to every provider in the chain, incl. the fallback', async () => {
+    const seen = [];
+    const capture = (fails) => ({ generate: async (m, t, o) => { seen.push(o); if (fails) throw new Error('down'); return { text: 'ok', toolCalls: [], usage: {} }; } });
+    const opts = { thinking: { type: 'disabled' }, toolChoice: { name: 'x' } };
+    await new FallbackProvider([capture(true), capture(false)]).generate([], [], opts);
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[0], opts);
+    assert.deepEqual(seen[1], opts, 'the 2nd (mixed-vendor) provider receives the first provider\'s per-call thinking');
+  });
 });

@@ -11,6 +11,7 @@ const http = require('node:http');
 
 const { OpenAIProvider } = require('../src/provider-openai');
 const { ProviderError } = require('../src/errors');
+const { Loop } = require('../src/loop');
 
 const OPENAI_OK = { choices: [{ message: { content: 'hi', role: 'assistant' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
 const MSGS = [{ role: 'user', content: 'hi' }];
@@ -120,6 +121,180 @@ describe('Ask 4: OpenAI tool_choice', () => {
         () => new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }).generate(MSGS, TOOLS, { toolChoice: circular }),
         (e) => e instanceof ProviderError && /invalid toolChoice/.test(e.message),
       );
+    } finally { s.server.close(); }
+  });
+});
+
+// BA-7 (b) / fwdloop: opt-in `thinking` forwarded VERBATIM (DeepSeek-compat 400s a forced tool_choice
+// while thinking mode is on; `{type:'disabled'}` fixes it). Mirrors the Anthropic provider's option.
+describe('BA-7(b): OpenAI thinking option', () => {
+  const OFF = { type: 'disabled' };
+
+  it('constructor thinking + named toolChoice + tools ⇒ body.thinking verbatim AND tool_choice present', async () => {
+    const s = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: OFF }).generate(MSGS, TOOLS, { toolChoice: { name: 'do_it' } });
+      assert.deepEqual(s.state.body.thinking, OFF);
+      assert.deepEqual(s.state.body.tool_choice, { type: 'function', function: { name: 'do_it' } });
+    } finally { s.server.close(); }
+  });
+
+  it('per-call thinking overrides the instance default', async () => {
+    const s = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: OFF }).generate(MSGS, [], { thinking: { type: 'enabled' } });
+      assert.deepEqual(s.state.body.thinking, { type: 'enabled' });
+    } finally { s.server.close(); }
+  });
+
+  it('per-call thinking works with no instance default', async () => {
+    const s = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }).generate(MSGS, [], { thinking: OFF });
+      assert.deepEqual(s.state.body.thinking, OFF);
+    } finally { s.server.close(); }
+  });
+
+  it('per-call null suppresses an instance default', async () => {
+    const s = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: OFF }).generate(MSGS, [], { thinking: null });
+      assert.ok(!('thinking' in s.state.body), 'null must suppress the instance default');
+    } finally { s.server.close(); }
+  });
+
+  it('NEGATIVE CONTROL: unset ⇒ no thinking key, body byte-identical to a no-option provider', async () => {
+    const a = await captureServer();
+    const b = await captureServer();
+    try {
+      const call = { toolChoice: { name: 'do_it' }, maxTokens: 64 };
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: a.url }).generate(MSGS, TOOLS, call);
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: b.url, thinking: null }).generate(MSGS, TOOLS, { ...call, thinking: undefined });
+      assert.ok(!('thinking' in a.state.body));
+      assert.equal(JSON.stringify(a.state.body), JSON.stringify(b.state.body));
+    } finally { a.server.close(); b.server.close(); }
+  });
+
+  it('temperature-fallback retry keeps thinking (and drops only temperature)', async () => {
+    const bodies = [];
+    const server = http.createServer((req, res) => {
+      let c = '';
+      req.on('data', d => (c += d));
+      req.on('end', () => {
+        const body = JSON.parse(c);
+        bodies.push(body);
+        if (body.temperature != null) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: { message: "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported." } }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(OPENAI_OK));
+      });
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const warn = console.warn; console.warn = () => {};
+    try {
+      const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: `http://127.0.0.1:${server.address().port}`, thinking: OFF })
+        .generate(MSGS, [], { temperature: 0.2 });
+      assert.equal(r.temperatureDropped, true);
+      assert.equal(bodies.length, 2);
+      assert.deepEqual(bodies[0].thinking, OFF);
+      assert.deepEqual(bodies[1].thinking, OFF, 'retry must keep thinking');
+      assert.ok(!('temperature' in bodies[1]));
+    } finally { console.warn = warn; server.close(); }
+  });
+
+  it('thinking:false (constructor and per-call) ⇒ no thinking key', async () => {
+    const a = await captureServer();
+    const b = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: a.url, thinking: false }).generate(MSGS, [], {});
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: b.url }).generate(MSGS, [], { thinking: false });
+      assert.ok(!('thinking' in a.state.body), 'constructor false must not be sent');
+      assert.ok(!('thinking' in b.state.body), 'per-call false must not be sent');
+    } finally { a.server.close(); b.server.close(); }
+  });
+
+  it('thinking is forwarded VERBATIM and unvalidated: {} and {type:"garbage"}', async () => {
+    const a = await captureServer();
+    const b = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: a.url, thinking: {} }).generate(MSGS, [], {});
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: b.url }).generate(MSGS, [], { thinking: { type: 'garbage' } });
+      assert.deepEqual(a.state.body.thinking, {});
+      assert.deepEqual(b.state.body.thinking, { type: 'garbage' });
+    } finally { a.server.close(); b.server.close(); }
+  });
+
+  it('thinking with NO tools ⇒ thinking present, no tools, no tool_choice, request succeeds', async () => {
+    const s = await captureServer();
+    try {
+      const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: OFF }).generate(MSGS, []);
+      assert.equal(r.text, 'hi');
+      assert.deepEqual(s.state.body.thinking, OFF);
+      assert.ok(!('tools' in s.state.body));
+      assert.ok(!('tool_choice' in s.state.body));
+    } finally { s.server.close(); }
+  });
+
+  it('thinking with tools but NO toolChoice ⇒ thinking + tools, no tool_choice', async () => {
+    const s = await captureServer();
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: OFF }).generate(MSGS, TOOLS, {});
+      assert.deepEqual(s.state.body.thinking, OFF);
+      assert.ok(Array.isArray(s.state.body.tools) && s.state.body.tools.length === 1);
+      assert.ok(!('tool_choice' in s.state.body));
+    } finally { s.server.close(); }
+  });
+
+  it('caller thinking object is not mutated and body.thinking deep-equals it', async () => {
+    const s = await captureServer();
+    const t = { type: 'enabled', nested: { a: [1, 2] } };
+    const snapshot = JSON.stringify(t);
+    try {
+      await new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, thinking: t }).generate(MSGS, TOOLS, { toolChoice: { name: 'do_it' } });
+      assert.equal(JSON.stringify(t), snapshot, 'caller object unchanged');
+      assert.deepEqual(s.state.body.thinking, t);
+    } finally { s.server.close(); }
+  });
+
+  it('server 400 while thinking is set surfaces as a thrown ProviderError', async () => {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Invalid thinking type: garbage', type: 'invalid_request_error' } }));
+      });
+    });
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    try {
+      await assert.rejects(
+        new OpenAIProvider({ apiKey: 'x', baseUrl: `http://127.0.0.1:${server.address().port}`, thinking: { type: 'garbage' } }).generate(MSGS, TOOLS, {}),
+        (e) => e instanceof ProviderError && e.status === 400 && /thinking/.test(e.message),
+      );
+    } finally { server.close(); }
+  });
+});
+
+describe('thinking per-call path through Loop.run', () => {
+  const LOOP_TOOLS = [{ ...TOOLS[0], execute: async () => 'done' }];
+
+  it('run(msgs, tools, { thinking, toolChoice }) reaches the wire body verbatim', async () => {
+    const s = await captureServer();
+    try {
+      const loop = new Loop({ provider: new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }) });
+      await loop.run(MSGS, LOOP_TOOLS, { thinking: { type: 'disabled' }, toolChoice: { name: 'do_it' } });
+      assert.deepEqual(s.state.body.thinking, { type: 'disabled' });
+      assert.ok(s.state.body.tool_choice, 'tool_choice forwarded');
+    } finally { s.server.close(); }
+  });
+
+  it('NEGATIVE CONTROL: run without thinking ⇒ no thinking key on the wire', async () => {
+    const s = await captureServer();
+    try {
+      const loop = new Loop({ provider: new OpenAIProvider({ apiKey: 'x', baseUrl: s.url }) });
+      await loop.run(MSGS, LOOP_TOOLS, { toolChoice: { name: 'do_it' } });
+      assert.ok(!('thinking' in s.state.body), 'no thinking key');
     } finally { s.server.close(); }
   });
 });
