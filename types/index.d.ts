@@ -135,12 +135,22 @@ export interface GenerateResult {
    */
   temperatureDropped?: boolean;
   /**
-   * Present ONLY when `thinkingMode` ('on'|'off') was set on the provider/call. The post-reply check:
-   * `true` — a shape was accepted and, for 'off', the reply shows zero thinking signal (for 'on' always
-   * `true` once accepted: an adaptive model may legitimately choose not to think); `false` — 'off' was
-   * requested but the reply shows thinking happened (the provider warns once; the round is paid and kept,
-   * never thrown); `null` — cannot tell (the reply's thinking signal is unreadable, e.g. OpenAI without
-   * `reasoning_tokens`). Surfaced on `Loop.run()`'s return, sticky-false: any round reporting `false` makes the run `false`, else the latest round's value.
+   * Present ONLY when `thinkingMode` ('on'|'off') was set on the provider/call. The outcome — "not
+   * supported" is an ANSWER, never an error; the call always runs:
+   * `'applied'` — a shape was accepted and, for 'off', the reply shows zero thinking (for 'on' always
+   * `'applied'` once accepted: an adaptive model may legitimately choose not to think);
+   * `'unsupported'` — this provider/model cannot do the requested mode (measured, every shape rejected,
+   * DeepSeek 'on' + forced toolChoice, or CLIPipe): the call ran WITHOUT our thinking field (the model's
+   * default behavior; DeepSeek forced-tool case sends `thinking:{type:'disabled'}`);
+   * `'ignored'` — 'off' was sent and accepted but the reply shows thinking anyway (warns once; round kept);
+   * `'unknown'` — accepted but the reply's thinking signal is unreadable (e.g. OpenAI without `reasoning_tokens`).
+   * `'ignored'`/`'unsupported'` warn once per provider instance. `Loop.run()` surfaces the WORST status
+   * across rounds (ignored > unsupported > unknown > applied).
+   */
+  thinkingStatus?: 'applied' | 'unsupported' | 'ignored' | 'unknown';
+  /**
+   * Legacy boolean, DERIVED from `thinkingStatus` (present with it): applied⇒`true`, ignored⇒`false`,
+   * unsupported⇒`false`, unknown⇒`null`. Prefer `thinkingStatus`. On `Loop.run()` it is derived from the worst status.
    */
   thinkingApplied?: boolean | null;
   /**

@@ -58,16 +58,18 @@ function isTemperatureThinkingConflict(err) {
  * @param {() => boolean} opts.hadTemperature - was a temperature actually in the request body?
  * @param {() => void} opts.stripTemperature - mutate the request body to remove the temperature.
  * @param {boolean} [opts.thinkingOn] - a thinkingMode 'on' shape is being sent: ALSO treat a 400 naming both temperature and thinking as droppable (thinking wins). Default off ⇒ behavior unchanged.
- * @param {() => void} [opts.warnOnce] - emit the one-time degrade warning (caller dedupes per instance).
+ * @param {(reason: 'unsupported'|'thinking') => void} [opts.warnOnce] - emit the one-time degrade warning for that reason (caller dedupes per instance AND reason).
  * @returns {Promise<{ data: any, temperatureDropped: boolean }>}
  */
 async function requestWithTemperatureFallback({ request, hadTemperature, stripTemperature, thinkingOn, warnOnce }) {
   try {
     return { data: await request(), temperatureDropped: false };
   } catch (err) {
-    if ((isTemperatureUnsupported(err) || (thinkingOn === true && isTemperatureThinkingConflict(err))) && hadTemperature()) {
+    // 'unsupported' wins when both match (the model refuses temperature outright); else the thinking conflict.
+    const reason = isTemperatureUnsupported(err) ? 'unsupported' : (thinkingOn === true && isTemperatureThinkingConflict(err)) ? 'thinking' : null;
+    if (reason && hadTemperature()) {
       stripTemperature();
-      if (warnOnce) warnOnce();
+      if (warnOnce) warnOnce(reason);
       return { data: await request(), temperatureDropped: true };
     }
     throw err;

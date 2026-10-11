@@ -2,13 +2,13 @@
 
 const https = require('https');
 const http = require('http');
-const { ProviderError, ValidationError } = require('./errors');
+const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
 const { parseToolCalls } = require('./provider-toolcalls');
-const { normalizeThinkingMode, resolveThinkingMode, requestWithThinkingMode, assessThinkingApplied, isDeepSeek } = require('./thinking-mode');
+const { normalizeThinkingMode, resolveThinkingMode, requestWithThinkingMode, assessThinking, deepseekDisabledBody, isDeepSeek } = require('./thinking-mode');
 
 // BA-24: raw OpenAI usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
 const OPENAI_USAGE_KEYS = ['prompt_tokens', 'completion_tokens', 'prompt_tokens_details'];
@@ -77,9 +77,9 @@ function isLoopbackHost(hostname) {
  *   JSON fails to parse, also attach the FULL raw string (verbatim, uncapped) to `malformedToolCall.rawArguments`.
  *   Off by default, independent of `exposeErrorBody` — the raw blob is model-generated and may be large
  *   or sensitive, so it only reaches logs/audit rows if the caller opts in. See `src/provider-toolcalls.js`.
- * @property {'on'|'off'|null} [thinkingMode] - Normalized thinking switch: `'on'` or `'off'`, and bare-agent sends the right `reasoning_effort` (OpenAI) / `thinking` (DeepSeek — selected by model id `deepseek-*` or a `deepseek.com` baseUrl) request field for the provider/model, retries the known alternative shapes if the API rejects the field by name, and THROWS a `ValidationError` (naming what it tried) if every shape is rejected — or before any request when the model is measured as not switchable. Every reply is checked: `GenerateResult.thinkingApplied` is `true`/`false`/`null` (`false` = 'off' was sent but the reply shows thinking happened — warns once per instance, result kept). Unset ⇒ request body byte-identical to before. Overridable per call via `generate(..., { thinkingMode })`; `null` suppresses an instance default. Any value but 'on'/'off' ⇒ `ValidationError`. A NEW field: it does not change the raw `thinking` option; setting both (after per-call override) ⇒ `ValidationError`. See `src/thinking-mode.js` / `thinkingSupport()`.
- *   Per-call `thinkingMode` reaches EVERY provider in a `FallbackProvider` chain — correct for a normalized field (each provider maps it to its own shape; one that cannot — CLIPipe, a non-switchable model — throws `ValidationError`, which the chain treats like any failure and falls through).
- *   DeepSeek: `'on'` + a forced `toolChoice` (`'required'`/`{name}`) ⇒ `ValidationError` before sending (the API 400s thinking mode on a forced tool_choice).
+ * @property {'on'|'off'|null} [thinkingMode] - Normalized thinking switch: `'on'` or `'off'`, and bare-agent sends the right `reasoning_effort` (OpenAI) / `thinking` (DeepSeek — selected by model id `deepseek-*` or a `deepseek.com` baseUrl) request field for the provider/model, tries the next known shape when a shape request fails with a 400/422 (not the temperature path), and the call ALWAYS RUNS: if every shape fails that way, ONE plain request without a thinking field decides — plain OK ⇒ `thinkingStatus:'unsupported'`, plain fails ⇒ that plain request's error is thrown as-is; other failures propagate after one request; a model measured as not switchable is sent plain directly. Only the winning shape is cached per instance+model ('unsupported' is never cached); warns once per status. Every reply is checked: `GenerateResult.thinkingStatus` is `'applied'`/`'unsupported'`/`'ignored'`/`'unknown'` (`'ignored'` = 'off' was accepted but the reply shows thinking anyway — warns once, result kept) and the legacy `thinkingApplied` is derived (`true`/`false`/`null`). Unset ⇒ request body byte-identical to before. Overridable per call via `generate(..., { thinkingMode })`; `null` suppresses an instance default. Any value but 'on'/'off' ⇒ `ValidationError`. A NEW field: it does not change the raw `thinking` option; setting both (after per-call override) ⇒ `ValidationError`. See `src/thinking-mode.js` / `thinkingSupport()`.
+ *   Per-call `thinkingMode` reaches EVERY provider in a `FallbackProvider` chain — correct for a normalized field (each provider maps it to its own shape; one that cannot — CLIPipe, a non-switchable model — just runs without it and reports `thinkingStatus:'unsupported'`, so the first member answers and the chain does not fall through).
+ *   DeepSeek: `'on'` + a forced `toolChoice` (`'required'`/`{name}`) cannot work (the API 400s thinking mode on a forced tool_choice) ⇒ the call is sent with `thinking:{type:'disabled'}` (the only shape that works there) and reports `thinkingStatus:'unsupported'`.
  * @property {any} [thinking] - Opt-in `thinking` request field (fwdloop DeepSeek ask — extends BA-7(b)'s Anthropic option), forwarded to `body.thinking`
  *   VERBATIM and unvalidated — e.g. `{ type: 'disabled' }`. Generalises the Anthropic provider's option to
  *   OpenAI-compatible endpoints. Motivating case: DeepSeek's OpenAI-compatible API (`baseUrl`
@@ -153,10 +153,12 @@ class OpenAIProvider {
     // valid choice with nothing to force is dropped (documented), while absent ⇒ the API default 'auto'.
     const toolChoice = toOpenAIToolChoice(options.toolChoice);
     const thinkingMode = resolveThinkingMode({ label: 'OpenAIProvider', instanceMode: this.thinkingMode, options, instanceThinking: this.thinking, hasRawThinking: true });
+    /** @type {{ unsupported: boolean, reason?: string }} */
+    const thinkingTrack = { unsupported: false };
     const thinkingKind = thinkingMode ? (isDeepSeek(this.model, this.baseUrl) ? 'deepseek' : 'openai') : null;
-    if (thinkingKind === 'deepseek' && thinkingMode === 'on' && tools.length > 0 && toolChoice != null && toolChoice !== 'auto') {
-      throw new ValidationError("[OpenAIProvider] thinkingMode 'on' cannot be combined with a forced toolChoice on DeepSeek (the API 400s: thinking mode does not support a forced tool_choice) — use thinkingMode 'off' or toolChoice 'auto'.", { context: { lib: 'bare-agent', provider: 'deepseek', model: this.model } });
-    }
+    // DeepSeek 'on' + a forced tool choice is impossible (the API 400s thinking mode on it): the call still
+    // runs, with the only shape that works there (thinking:{type:'disabled'}), and reports 'unsupported'.
+    const forcedDeepseekOn = thinkingKind === 'deepseek' && thinkingMode === 'on' && tools.length > 0 && toolChoice != null && toolChoice !== 'auto';
     if (tools.length > 0) {
       body.tools = tools.map(t => ({
         type: 'function',
@@ -170,12 +172,14 @@ class OpenAIProvider {
     const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const deadlineMs = resolveTimeoutMs(this.deadlineMs, options.deadlineMs, 0, 'deadlineMs');
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => thinkingKind
-        ? requestWithThinkingMode({ kind: /** @type {'openai'|'deepseek'} */ (thinkingKind), mode: /** @type {'on'|'off'} */ (thinkingMode), model: this.model, label: 'OpenAIProvider', body, cache: this._thinkingShapes, request: (b) => this._request('/chat/completions', b, timeoutMs, deadlineMs) })
+      request: () => forcedDeepseekOn
+        ? (thinkingTrack.unsupported = true, thinkingTrack.reason = 'forced-tool', this._request('/chat/completions', deepseekDisabledBody(body), timeoutMs, deadlineMs))
+        : thinkingKind
+        ? requestWithThinkingMode({ kind: /** @type {'openai'|'deepseek'} */ (thinkingKind), mode: /** @type {'on'|'off'} */ (thinkingMode), model: this.model, body, cache: this._thinkingShapes, track: thinkingTrack, request: (b) => this._request('/chat/completions', b, timeoutMs, deadlineMs) })
         : this._request('/chat/completions', body, timeoutMs, deadlineMs),
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
     // BA-27: a successful 200 whose body carries no `choices` (some OpenAI-compat servers return a
     // 4xx-shaped error object with HTTP 200) reached `data.choices[0]` as a bare TypeError with no
@@ -215,15 +219,18 @@ class OpenAIProvider {
       stopReason: normalizeStopReason(choice?.finish_reason, 'openai', { hasToolCalls: toolCalls.length > 0 }),
       usage: this._normalizeUsage(data.usage),
       ...(temperatureDropped && { temperatureDropped: true }),
-      ...(thinkingKind && { thinkingApplied: assessThinkingApplied({ kind: /** @type {'openai'|'deepseek'} */ (thinkingKind), mode: /** @type {'on'|'off'} */ (thinkingMode), data, owner: this, label: 'OpenAIProvider', model: this.model }) }),
+      ...(thinkingKind && assessThinking({ kind: /** @type {'openai'|'deepseek'} */ (thinkingKind), mode: /** @type {'on'|'off'} */ (thinkingMode), data, unsupported: thinkingTrack.unsupported, reason: thinkingTrack.reason, owner: this, label: 'OpenAIProvider', model: this.model })),
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[OpenAIProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[OpenAIProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[OpenAIProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

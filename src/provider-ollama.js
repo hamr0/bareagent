@@ -7,7 +7,7 @@ const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
 const { parseToolCalls } = require('./provider-toolcalls');
-const { normalizeThinkingMode, resolveThinkingMode, requestWithThinkingMode, assessThinkingApplied } = require('./thinking-mode');
+const { normalizeThinkingMode, resolveThinkingMode, requestWithThinkingMode, assessThinking } = require('./thinking-mode');
 
 // BA-24: raw Ollama usage fields. Any present (even 0) ⇒ a usage signal; none ⇒ null (unpriceable).
 const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
@@ -20,8 +20,8 @@ const OLLAMA_USAGE_KEYS = ['prompt_eval_count', 'eval_count'];
  * @typedef {object} OllamaOptions
  * @property {string} [model='llama3.2']
  * @property {string} [url='http://localhost:11434']
- * @property {'on'|'off'|null} [thinkingMode] - Normalized thinking switch: `'on'` or `'off'`, and bare-agent sends the right `think` (`/api/chat`; NOT live-verified against a real Ollama thinking model — reply signal `message.thinking`) request field for the provider/model, retries the known alternative shapes if the API rejects the field by name, and THROWS a `ValidationError` (naming what it tried) if every shape is rejected — or before any request when the model is measured as not switchable. Every reply is checked: `GenerateResult.thinkingApplied` is `true`/`false`/`null` (`false` = 'off' was sent but the reply shows thinking happened — warns once per instance, result kept). Unset ⇒ request body byte-identical to before. Overridable per call via `generate(..., { thinkingMode })`; `null` suppresses an instance default. Any value but 'on'/'off' ⇒ `ValidationError`. A NEW field: it does not change the raw `thinking` option; setting both (after per-call override) ⇒ `ValidationError`. See `src/thinking-mode.js` / `thinkingSupport()`.
- *   Per-call `thinkingMode` reaches EVERY provider in a `FallbackProvider` chain — correct for a normalized field (each provider maps it to its own shape; one that cannot — CLIPipe, a non-switchable model — throws `ValidationError`, which the chain treats like any failure and falls through).
+ * @property {'on'|'off'|null} [thinkingMode] - Normalized thinking switch: `'on'` or `'off'`, and bare-agent sends the right `think` (`/api/chat`; NOT live-verified against a real Ollama thinking model — reply signal `message.thinking`) request field for the provider/model, tries the next known shape when a shape request fails with a 400/422 (not the temperature path), and the call ALWAYS RUNS: if every shape fails that way, ONE plain request without a thinking field decides — plain OK ⇒ `thinkingStatus:'unsupported'`, plain fails ⇒ that plain request's error is thrown as-is; other failures propagate after one request; a model measured as not switchable is sent plain directly. Only the winning shape is cached per instance+model ('unsupported' is never cached); warns once per status. Every reply is checked: `GenerateResult.thinkingStatus` is `'applied'`/`'unsupported'`/`'ignored'`/`'unknown'` (`'ignored'` = 'off' was accepted but the reply shows thinking anyway — warns once, result kept) and the legacy `thinkingApplied` is derived (`true`/`false`/`null`). Unset ⇒ request body byte-identical to before. Overridable per call via `generate(..., { thinkingMode })`; `null` suppresses an instance default. Any value but 'on'/'off' ⇒ `ValidationError`. A NEW field: it does not change the raw `thinking` option; setting both (after per-call override) ⇒ `ValidationError`. See `src/thinking-mode.js` / `thinkingSupport()`.
+ *   Per-call `thinkingMode` reaches EVERY provider in a `FallbackProvider` chain — correct for a normalized field (each provider maps it to its own shape; one that cannot — CLIPipe, a non-switchable model — just runs without it and reports `thinkingStatus:'unsupported'`, so the first member answers and the chain does not fall through).
  * @property {boolean} [exposeErrorBody=false]
  * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`, `context.bound: 'idle'`) instead of hanging until the OS TCP timeout. `0`/`Infinity` disables it. Overridable per call via `generate(..., { timeoutMs })`. (A local Ollama that is loading a large model cold can be slow to first byte — raise this or disable it for very large local models.)
  * @property {number} [deadlineMs=0] - BA-19: TOTAL call-duration deadline in ms, beside `timeoutMs`. The idle bound resets on any socket activity, so a response that trickles a byte forever never trips it and hangs for hours. This is an absolute, non-resetting ceiling; on trip, `generate()` rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`, `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via `generate(..., { deadlineMs })`. (A cold large-model load is a legitimate long single call — leave this disabled or set it generously for such models.)
@@ -94,15 +94,17 @@ class OllamaProvider {
     // BA-10: graceful degrade if a model rejects a non-default `temperature` (Ollama nests it under
     // `options`). Keyed off the API error text, so dormant on models that accept temperature.
     const thinkingMode = resolveThinkingMode({ label: 'OllamaProvider', instanceMode: this.thinkingMode, options });
+    /** @type {{ unsupported: boolean }} */
+    const thinkingTrack = { unsupported: false };
     const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const deadlineMs = resolveTimeoutMs(this.deadlineMs, options.deadlineMs, 0, 'deadlineMs');
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
       request: () => thinkingMode
-        ? requestWithThinkingMode({ kind: 'ollama', mode: thinkingMode, model: this.model, label: 'OllamaProvider', body, cache: this._thinkingShapes, request: (b) => this._request('/api/chat', b, timeoutMs, deadlineMs) })
+        ? requestWithThinkingMode({ kind: 'ollama', mode: thinkingMode, model: this.model, body, cache: this._thinkingShapes, track: thinkingTrack, request: (b) => this._request('/api/chat', b, timeoutMs, deadlineMs) })
         : this._request('/api/chat', body, timeoutMs, deadlineMs),
       hadTemperature: () => body.options?.temperature != null,
       stripTemperature: () => { if (body.options) delete body.options.temperature; },
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
     const msg = data.message || {};
 
@@ -136,15 +138,18 @@ class OllamaProvider {
         ? { inputTokens: data.prompt_eval_count || 0, outputTokens: data.eval_count || 0 }
         : null,
       ...(temperatureDropped && { temperatureDropped: true }),
-      ...(thinkingMode && { thinkingApplied: assessThinkingApplied({ kind: 'ollama', mode: thinkingMode, data, owner: this, label: 'OllamaProvider', model: this.model }) }),
+      ...(thinkingMode && assessThinking({ kind: 'ollama', mode: thinkingMode, data, unsupported: thinkingTrack.unsupported, owner: this, label: 'OllamaProvider', model: this.model })),
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[OllamaProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[OllamaProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[OllamaProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**
