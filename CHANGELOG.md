@@ -26,8 +26,13 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   provider/model cannot do the requested mode now RUNS and reports it:
   - measured not-switchable (`claude-opus-5-5` off, `gemini-3.1-pro-preview[-customtools]` off): exactly ONE request, NO
     thinking field (the model's default behavior), `thinkingStatus:'unsupported'`;
-  - every ladder shape rejected: the shapes are tried, then ONE more request with no thinking field,
-    `thinkingStatus:'unsupported'`; cached per provider instance + mode + model, so later calls are ONE plain request;
+  - a shape request that fails with a client validation error (400, or 422 for FastAPI/pydantic `extra_forbidden`; not
+    temperature-named) tries the next shape, then ONE plain request (no thinking field) decides: plain succeeds ⇒ the
+    setting was the problem, result kept, `thinkingStatus:'unsupported'`; plain fails too ⇒ it was a real error and the
+    PLAIN request's error is thrown as-is (never a `ValidationError`, never swallowed). No error-text word list decides
+    this. 5xx / 429 / timeout / transport / 401 / 403 / 404 propagate immediately after one request, no ladder. Only the
+    winning shape is cached per provider instance + mode + model; "unsupported" is never cached, so an unknown model that
+    cannot switch pays its refused (unbilled) shape requests on every call;
   - DeepSeek `'on'` + a forced `toolChoice` (`'required'`/`{name}`): thinking-on is impossible there, so the request goes
     out with `thinking:{type:'disabled'}` (the only shape that works with a forced tool choice) and reports `'unsupported'`;
   - `CLIPipeProvider` + `thinkingMode` (constructor and per call): the call runs unchanged (both `toolProtocol` modes and
@@ -40,7 +45,6 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ### Fixed
 
-- `thinkingMode`: a 400 is now a shape rejection only if it names the field AND contains a rejection phrase (`not supported|unsupported|invalid|unknown|unrecognized|not allowed|does not support|not permitted|only works`, bounded, case-insensitive). Before, any 400 that merely mentioned `thinking` (e.g. a broken-transcript "final assistant message must start with a thinking block") walked the ladder and ended as a plain resend reporting `'unsupported'`, hiding the real error; it is now thrown as-is after ONE request. Every real 400 recorded in `poc/results/thinking-mode-verify.json` still classifies as a rejection.
 - `thinkingMode` warn-once is now per status: an `'unsupported'` warning no longer silences a later, more serious `'ignored'` on the same provider instance.
 - The temperature-drop warning no longer says "unsupported/deprecated" when the drop was the thinking-conflict retry; it now says "'temperature' must be 1 while thinking is on — retrying without it". Each reason warns once per instance (the deprecated path's text is unchanged).
 - `thinkingSupport('openai', 'deepseek-flash')` reported OpenAI `reasoning_effort` shapes as `'unverified'` while the request

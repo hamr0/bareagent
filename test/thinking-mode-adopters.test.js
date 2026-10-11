@@ -181,10 +181,13 @@ describe('fwdloop acceptance', () => {
         assert.equal(r.usage.outputTokens, 4);
       });
     });
-    it('h2: 400 NOT naming the field ⇒ error thrown as-is, no ladder', async () => {
+    it('h2: 400 NOT naming the field ⇒ the PLAIN request\'s error is thrown as-is, after the shapes + one plain request', async () => {
       await withServer(err400('context length exceeded'), async (s) => {
-        await assert.rejects(oa(s, { model: 'my-local-model' }).generate(MSGS, [], { thinkingMode: 'off' }), /context length exceeded/);
-        assert.equal(s.state.bodies.length, 1);
+        await assert.rejects(oa(s, { model: 'my-local-model' }).generate(MSGS, [], { thinkingMode: 'off' }),
+          (e) => !(e instanceof ValidationError) && /context length exceeded/.test(e.message));
+        assert.equal(s.state.bodies.length, 3, 'none, minimal, then one plain request');
+        assert.deepEqual(s.state.bodies.map((b) => b.reasoning_effort), ['none', 'minimal', undefined]);
+        assert.ok(!('reasoning_effort' in s.state.bodies[2]));
       });
     });
     it('h3: accepted, no reasoning_tokens ⇒ unknown', async () => {

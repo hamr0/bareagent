@@ -109,6 +109,35 @@ if (process.env.DEEPSEEK_API_KEY) {
   }
 }
 
+// The ladder WALKED for real: gpt-5-nano is not in the measured table ('unverified'), so 'off' starts at
+// reasoning_effort:'none'; the gpt-5 family 400s on it and 'minimal' should then be accepted.
+if (process.env.OPENAI_API_KEY) {
+  const tag = 'openai/gpt-5-nano thinkingMode=off (ladder walk)';
+  const provider = new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-5-nano' });
+  const sent = [];
+  let first400 = null;
+  const orig = provider._request.bind(provider);
+  provider._request = async (...a) => {
+    sent.push(a.find((x) => x && typeof x === 'object' && !Array.isArray(x)));
+    try { return await orig(...a); } catch (e) { if (e && e.status === 400 && first400 === null) first400 = e.message; throw e; }
+  };
+  ran++;
+  try {
+    const r = await provider.generate(MSGS, [], { thinkingMode: 'off', maxTokens: MAX });
+    const efforts = sent.map((b) => b && b.reasoning_effort);
+    console.log(`  info ${tag}: requests=${sent.length} efforts=${JSON.stringify(efforts)} thinkingStatus=${r.thinkingStatus} first400=${first400 === null ? '(none)' : JSON.stringify(first400)}`);
+    if (sent.length === 1 && efforts[0] === 'none' && r.thinkingStatus === 'applied') {
+      console.log(`  info ${tag}: the API accepted 'none' outright — ladder not walked on this model today (not a failure)`);
+    } else if (sent.length < 2) fail(`${tag}: ${sent.length} request(s) (expected >= 2 to walk the ladder)`);
+    else if (efforts[0] !== 'none') fail(`${tag}: first request effort=${efforts[0]} (expected 'none')`);
+    else if (efforts[efforts.length - 1] !== 'minimal') fail(`${tag}: accepted request effort=${efforts[efforts.length - 1]} (expected 'minimal')`);
+    else if (r.thinkingStatus !== 'applied') fail(`${tag}: thinkingStatus=${r.thinkingStatus} (expected 'applied')`);
+    else console.log(`  ok   ${tag}: ladder walked none -> minimal, thinkingStatus=applied`);
+  } catch (e) {
+    fail(`${tag}: threw ${e && e.name}: ${e && e.message} (first400=${first400})`);
+  }
+}
+
 if (ran === 0) { console.log(`\nALL SKIPPED (${skipped} providers) — no key set, nothing was proven. Exiting non-zero.`); process.exit(2); }
 if (failures > 0) { console.log(`\n${failures} FAILURE(s) over ${ran} case(s) (${skipped} provider(s) skipped).`); process.exit(1); }
 console.log(`\nPASS: ${ran} case(s)${skipped ? `; ${skipped} provider(s) SKIPPED (not proven)` : ''}.`);

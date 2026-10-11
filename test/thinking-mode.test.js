@@ -308,16 +308,67 @@ describe('thinkingMode: ladder (try all shapes; if none works the call still run
       assert.equal(r2.thinkingStatus, 'applied');
     });
   });
-  it('a 400 that does NOT name the field is an ordinary error — no ladder', async () => {
+  it('a 400 that is a REAL error (plain request fails too) ⇒ shapes + plain tried, the PLAIN request\'s error is thrown as-is, never a ValidationError', async () => {
     await withServer([err400('messages: text content blocks must be non-empty')], async (s) => {
-      await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on' }),
-        (e) => !(e instanceof ValidationError) && e.status === 400);
-      assert.equal(s.state.bodies.length, 1);
+      await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }),
+        (e) => !(e instanceof ValidationError) && e.status === 400 && /non-empty/.test(e.message));
+      assert.deepEqual(s.state.bodies.map((b) => b.thinking && b.thinking.type), ['adaptive', 'enabled', undefined]);
     });
     await withServer([err400('max_completion_tokens is too large')], async (s) => {
-      await assert.rejects(P.openai.make(s, { model: 'gpt-x-unmeasured' }).generate(MSGS, [], { thinkingMode: 'off' }), (e) => e.status === 400);
-      assert.equal(s.state.bodies.length, 1);
+      await assert.rejects(P.openai.make(s, { model: 'gpt-x-unmeasured' }).generate(MSGS, [], { thinkingMode: 'off' }), (e) => e.status === 400 && /too large/.test(e.message));
+      assert.equal(s.state.bodies.length, 3, 'none, minimal, plain');
+      assert.ok(!('reasoning_effort' in s.state.bodies[2]));
     });
+  });
+  it('the plain request\'s error (not the first shape\'s) is the one thrown', async () => {
+    await withServer([err400('shape-one complaint'), err400('shape-two complaint'), err400('plain complaint')], async (s) => {
+      await assert.rejects(P.openai.make(s, { model: 'gpt-x-unmeasured' }).generate(MSGS, [], { thinkingMode: 'off' }), /plain complaint/);
+      assert.equal(s.state.bodies.length, 3);
+    });
+  });
+  it('Anthropic "Invalid `signature` in `thinking` block" on EVERY request incl. plain ⇒ plain error thrown as-is; the 2nd call tries the shapes AGAIN (no cached unsupported)', async () => {
+    const SIG = 'messages.1.content.0: Invalid `signature` in `thinking` block';
+    await withServer([err400(SIG)], async (s) => {
+      const p = P.anthropic.make(s, { model: 'claude-future-1' });
+      for (let i = 0; i < 2; i++) {
+        await assert.rejects(p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }), (e) => e.status === 400 && /Invalid `signature`/.test(e.message));
+      }
+      assert.deepEqual(s.state.bodies.map((b) => b.thinking && b.thinking.type), ['adaptive', 'enabled', undefined, 'adaptive', 'enabled', undefined]);
+    });
+  });
+  it('same signature 400 on the shapes but the plain request succeeds ⇒ unsupported this call; the 2nd call tries the shapes again', async () => {
+    const SIG = err400('Invalid `signature` in `thinking` block');
+    await withServer([SIG, SIG, anthropicOk(), SIG, SIG, anthropicOk()], async (s) => {
+      const p = P.anthropic.make(s, { model: 'claude-future-1' });
+      const { value: [r1, r2] } = await captureWarn(async () => [
+        await p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }),
+        await p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }),
+      ]);
+      assert.equal(r1.thinkingStatus, 'unsupported');
+      assert.equal(r2.thinkingStatus, 'unsupported');
+      assert.deepEqual(s.state.bodies.map((b) => b.thinking && b.thinking.type), ['adaptive', 'enabled', undefined, 'adaptive', 'enabled', undefined]);
+    });
+  });
+  it('no word list: vLLM "unexpected keyword argument \'reasoning_effort\'" (400) and pydantic extra_forbidden (422) on shapes, plain OK ⇒ unsupported', async () => {
+    const vllm = err400("Completions.create() got an unexpected keyword argument 'reasoning_effort'");
+    const pyd = { __status: 422, body: { detail: [{ type: 'extra_forbidden', loc: ['body', 'reasoning_effort'], msg: 'Extra inputs are not permitted' }] } };
+    for (const bad of [vllm, pyd]) {
+      await withServer([bad, bad, openaiOk(0)], async (s) => {
+        const { value: r } = await captureWarn(() => P.openai.make(s, { model: 'my-local-model' }).generate(MSGS, [], { thinkingMode: 'off' }));
+        assert.equal(r.thinkingStatus, 'unsupported');
+        assert.equal(r.text, 'ok');
+        assert.equal(s.state.bodies.length, 3);
+        assert.ok(!('reasoning_effort' in s.state.bodies[2]));
+      });
+    }
+  });
+  it('500 / 429 / 401 / 404 on a shape propagate immediately after ONE request (no ladder)', async () => {
+    for (const status of [500, 429, 401, 404]) {
+      await withServer([{ __status: status, body: { error: { message: 'thinking something' } } }], async (s) => {
+        await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on', retry: false }), (e) => e.status === status, String(status));
+        assert.equal(s.state.bodies.length, 1, String(status));
+      });
+    }
   });
   it('a 400 naming BOTH the field and temperature is the temperature fallback\'s business, not a shape rejection', async () => {
     await withServer([err400('temperature may only be set to 1 when thinking is enabled')], async (s) => {
@@ -331,7 +382,7 @@ describe('thinkingMode: ladder (try all shapes; if none works the call still run
       assert.equal(s.state.bodies.length, 1);
     });
   });
-  it('every shape rejected ⇒ shapes tried + ONE plain request, unsupported, warns once; the 2nd call on the same instance+model is ONE plain request (cached)', async () => {
+  it('every shape rejected ⇒ shapes tried + ONE plain request, unsupported, warns once; the 2nd call tries the shapes AGAIN (nothing cached)', async () => {
     await withServer([P.openai.reject(), P.openai.reject(), P.openai.ok()], async (s) => {
       const p = P.openai.make(s, { model: 'gpt-4o-mini' });
       const { value: [r1, r2], warns } = await captureWarn(async () => [
@@ -342,14 +393,25 @@ describe('thinkingMode: ladder (try all shapes; if none works the call still run
       assert.equal(r1.thinkingApplied, false);
       assert.equal(r1.text, 'ok');
       assert.deepEqual(s.state.bodies.slice(0, 3).map((b) => b.reasoning_effort), ['none', 'minimal', undefined]);
-      assert.equal(s.state.bodies.length, 4, '3 requests first call + exactly ONE on the cached second call');
-      assert.ok(!('reasoning_effort' in s.state.bodies[3]));
-      assert.equal(r2.thinkingStatus, 'unsupported');
+      assert.equal(s.state.bodies.length, 4, 'call 1: 3 requests; call 2: the first shape again, accepted by the repeating script');
+      assert.equal(s.state.bodies[3].reasoning_effort, 'none');
+      assert.equal(r2.text, 'ok');
+      assert.equal(r2.thinkingStatus, 'applied');
+      assert.equal(warns.length, 1);
+    });
+    // fully-refusing server: the 2nd call re-walks the shapes (no cached UNSUPPORTED)
+    const rej = P.openai.reject();
+    await withServer([rej, rej, openaiOk(0), rej, rej, openaiOk(0)], async (s) => {
+      const p = P.openai.make(s, { model: 'gpt-4o-mini' });
+      const { warns } = await captureWarn(async () => {
+        await p.generate(MSGS, [], { thinkingMode: 'off' });
+        await p.generate(MSGS, [], { thinkingMode: 'off' });
+      });
+      assert.deepEqual(s.state.bodies.map((b) => b.reasoning_effort), ['none', 'minimal', undefined, 'none', 'minimal', undefined]);
       assert.equal(warns.length, 1);
       assert.match(warns[0], /OpenAIProvider.*'off' for gpt-4o-mini.*unsupported/);
-      // another mode on the same model is NOT poisoned by the cached 'off' verdict
       await p.generate(MSGS, [], { thinkingMode: 'on' });
-      assert.equal(s.state.bodies[4].reasoning_effort, 'medium');
+      assert.equal(s.state.bodies[6].reasoning_effort, 'medium');
     });
   });
   it('single-shape provider whose 400 names the field ⇒ one shape + one plain request (gemini pro budget 0 style, unmeasured id)', async () => {
@@ -761,36 +823,33 @@ describe('requestWithThinkingMode: shapes are copy-on-write (never mutate the ca
   }
 });
 
-describe('thinkingMode: a 400 is a shape rejection only if it names the field AND says it was refused', () => {
-  const { isShapeRejection } = require('../src/thinking-mode');
-  const rej = (msg) => Object.assign(new Error(msg), { status: 400 });
-  // Verbatim 400s recorded in poc/results/thinking-mode-verify.json (live-measured).
+describe('thinkingMode: a 400/422 never gets its text read — the plain retry decides', () => {
+  // Verbatim 400s recorded in poc/results/thinking-mode-verify.json (live-measured) still ladder correctly.
   const RECORDED = [
     ['anthropic', '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'],
-    ['anthropic', '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'],
-    ['anthropic', 'adaptive thinking is not supported on this model'],
     ['openai', "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."],
-    ['openai', "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."],
     ['gemini', 'Budget 0 is invalid. This model only works in thinking mode.'],
     ['deepseek', 'Thinking mode does not support this tool_choice (request_id: e5189e14-0428-49c8-ab48-f0348284037e)'],
   ];
+  const MAKE = { anthropic: () => P.anthropic, openai: () => P.openai, gemini: () => P.gemini, deepseek: () => P.openai };
   for (const [kind, msg] of RECORDED) {
-    it(`recorded real ${kind} rejection is a shape rejection: ${msg.slice(0, 50)}`, () => assert.equal(isShapeRejection(kind, rej(msg)), true));
+    it(`recorded real ${kind} rejection + plain OK ⇒ unsupported: ${msg.slice(0, 40)}`, async () => {
+      const bad = err400(msg);
+      const nShapes = kind === 'openai' ? 2 : 1;
+      await withServer([...Array(nShapes).fill(bad), kind === 'openai' || kind === 'deepseek' ? openaiOk(0) : kind === 'gemini' ? geminiOk() : anthropicOk()], async (s) => {
+        const opts = kind === 'deepseek' ? { model: 'deepseek-future' } : kind === 'openai' ? { model: 'gpt-x-unmeasured' } : kind === 'anthropic' ? { model: 'claude-future-1' } : { model: 'gemini-9-pro' };
+        const { value: r } = await captureWarn(() => MAKE[kind]().make(s, opts).generate(MSGS, [], { thinkingMode: 'off' }));
+        assert.equal(r.thinkingStatus, 'unsupported');
+      });
+    });
   }
-  it('a recorded text under a non-400 status is still not a rejection', () => {
-    assert.equal(isShapeRejection('anthropic', Object.assign(new Error(RECORDED[2][1]), { status: 500 })), false);
-  });
-  // ILLUSTRATIVE wording (not captured from the live API): a broken-transcript 400 that merely mentions thinking.
   const TRANSCRIPT = 'When `thinking` is enabled, a final `assistant` message must start with a thinking block';
-  it('a 400 that merely mentions thinking (illustrative broken-transcript text) is NOT a rejection', () => {
-    assert.equal(isShapeRejection('anthropic', rej(TRANSCRIPT)), false);
-    assert.equal(isShapeRejection('deepseek', rej(TRANSCRIPT)), false);
-  });
-  it('wire: that 400 is thrown as-is — ONE request, no ladder walk, not a ValidationError', async () => {
+  it('wire: a transcript 400 that fails the plain request too ⇒ the plain error thrown as-is, not a ValidationError, not swallowed', async () => {
     await withServer([err400(TRANSCRIPT)], async (s) => {
-      await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on' }),
+      await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }),
         (e) => !(e instanceof ValidationError) && e.status === 400 && /final `assistant` message/.test(e.message));
-      assert.equal(s.state.bodies.length, 1);
+      assert.equal(s.state.bodies.length, 3);
+      assert.ok(!('thinking' in s.state.bodies[2]));
     });
   });
 });

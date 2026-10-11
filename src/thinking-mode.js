@@ -9,7 +9,7 @@
 // Every fact in MODELS below was MEASURED live (poc/thinking-mode-verify.mjs →
 // poc/results/thinking-mode-verify.json, 2026-10-11) EXCEPT Ollama, which is shape-known but not
 // live-verified. A model that is not in the table is 'unverified': the ladder tries the shapes at
-// runtime and, if every one is rejected, runs the call plain and reports 'unsupported'.
+// runtime; if they all fail with a client validation error, ONE plain request decides (success ⇒ 'unsupported', failure ⇒ that error is thrown).
 //
 // The raw `thinking` passthrough options (BA-7) are a DIFFERENT, untouched field: opaque and verbatim.
 // `thinkingMode` is the normalized switch; setting both at once is a ValidationError (a caller config mistake, no silent precedence).
@@ -109,24 +109,8 @@ const MODELS = {
   ollama: {},
 };
 
-// Which 400s are "this shape was rejected" (try the next one) vs an ordinary error (surface it). The
-// error text must NAME the field being set; per-provider so an unrelated 400 that merely happens to
-// say "thinking" elsewhere in a different vendor's vocabulary can't trigger a retry. No `.*`, no
-// unbounded quantifiers (ReDoS-safe on provider-supplied text).
-/** @type {Record<LadderKind, RegExp>} */
-const FIELD_NAMED = {
-  anthropic: /\bthinking\b/i,
-  openai: /\b(reasoning_effort|reasoning)\b/i,
-  deepseek: /\bthinking\b/i,
-  gemini: /\b(thinkingBudget|thinkingConfig|thinking_budget|thinking_config|thinking|budget)\b/i,
-  ollama: /\b(thinking|think)\b/i,
-};
-// A 400 must ALSO say the field was refused (bounded alternation, no `.*` — ReDoS-safe): a 400 that
-// merely mentions the field (e.g. a broken-transcript "final assistant message must start with a
-// thinking block") is a real error to surface, not a shape to retry past.
-const REJECTION_PHRASE = /(not supported|unsupported|invalid|unknown|unrecognized|not allowed|does not support|not permitted|only works)/i;
-// A 400 that names `temperature` is the temperature fallback's business (e.g. Anthropic's "temperature
-// may only be set to 1 when thinking is enabled" names BOTH) — never a shape rejection.
+// An error that names `temperature` is the temperature fallback's business (e.g. Anthropic's "temperature
+// may only be set to 1 when thinking is enabled" names BOTH) — never a shape failure; it propagates to that path.
 const TEMPERATURE_NAMED = /temperature/i;
 
 /**
@@ -199,26 +183,32 @@ function resolveThinkingMode({ label, instanceMode, options, instanceThinking = 
 }
 
 /**
- * @param {LadderKind} kind
+ * A client validation error (400, or 422 — FastAPI/pydantic servers use it for extra_forbidden) that is
+ * not the temperature fallback's. NO error-text word list decides anything beyond the temperature
+ * exclusion: whether the thinking field was the problem is decided by a plain retry, not by reading prose.
  * @param {any} err
  * @returns {boolean}
  */
-function isShapeRejection(kind, err) {
-  const msg = err && typeof err.message === 'string' ? err.message : '';
-  return !!err && err.status === 400 && FIELD_NAMED[kind].test(msg) && REJECTION_PHRASE.test(msg) && !TEMPERATURE_NAMED.test(msg);
+function isClientValidationError(err) {
+  if (!err || (err.status !== 400 && err.status !== 422)) return false;
+  return !TEMPERATURE_NAMED.test(typeof err.message === 'string' ? err.message : '');
 }
 
-// Sentinel cached per instance+mode+model once a model is known/found not switchable.
-const UNSUPPORTED = '\u0000unsupported';
-
 /**
- * Send a request with the `thinkingMode` field applied, walking the shape ladder on a 400 that names
- * the field. Order: the instance cache (a shape that already worked for this mode+model, or the
- * UNSUPPORTED sentinel), else the table's known-good shape, else the ladder's first; then the remaining
- * shapes in ladder order. The call ALWAYS runs: a known-not-switchable model gets ONE plain request (no
- * thinking field), and every shape rejected ⇒ ONE more plain request; both set `track.unsupported = true`
- * (and cache it, so later calls skip straight to the plain request). A 400 that does not name the field
- * (or any non-400) is an ordinary error and propagates untouched.
+ * Send a request with the `thinkingMode` field applied. Order: the instance cache (a shape that already
+ * worked for this mode+model), else the table's known-good shape, else the ladder's first; then the
+ * remaining shapes in ladder order (a shape whose apply() returns null is skipped).
+ *
+ * When a shape request fails with a client validation error (400/422, not temperature-named), the next
+ * shape is tried; after the last, ONE plain request (no thinking field) decides: it succeeds ⇒ the
+ * setting was the problem (`track.unsupported = true`, result kept); it fails too ⇒ it was a real error
+ * and the PLAIN request's error is thrown as-is (it is the one without our field). Any other failure
+ * (5xx, 429, timeout, transport, 401/403/404) propagates immediately — no ladder.
+ *
+ * A model the table marks not switchable gets ONE plain request, `unsupported`. Only the winning shape
+ * is cached; "unsupported" is never cached (a runtime unsupported cache poisoned on body-dependent
+ * skips and transcript/signature errors), so an unknown model that cannot switch re-pays its refused
+ * shape requests on every call.
  *
  * @param {object} p
  * @param {LadderKind} p.kind
@@ -226,7 +216,7 @@ const UNSUPPORTED = '\u0000unsupported';
  * @param {string} p.model
  * @param {Record<string, any>} p.body - the base body (NOT mutated; each attempt gets a patched copy)
  * @param {(body: Record<string, any>) => Promise<any>} p.request
- * @param {Map<string, string>} p.cache - per provider instance
+ * @param {Map<string, string>} p.cache - per provider instance; holds winning shape keys only
  * @param {{ unsupported: boolean }} p.track - written: `unsupported` is set true when the call ran without our field
  * @returns {Promise<any>} the reply data
  */
@@ -234,33 +224,30 @@ async function requestWithThinkingMode({ kind, mode, model, body, request, cache
   const ladder = LADDERS[kind][mode];
   const facts = lookupModel(kind, model);
   const cacheKey = `${mode}|${model}`;
-  const cached = cache.get(cacheKey);
   track.unsupported = false;
-  if (cached === UNSUPPORTED || (facts && facts[mode] === null)) {
+  if (facts && facts[mode] === null) {
     track.unsupported = true;
-    if (cached !== UNSUPPORTED) cache.set(cacheKey, UNSUPPORTED);
     return request(body);
   }
-  const preferredKey = cached || (facts && facts[mode]) || null;
+  const preferredKey = cache.get(cacheKey) || (facts && facts[mode]) || null;
   const ordered = [...ladder].sort((a, b) => (a.key === preferredKey ? -1 : b.key === preferredKey ? 1 : 0));
 
-  let skipped = false;
   for (const s of ordered) {
     const patched = s.apply(body);
-    if (patched === null) { skipped = true; continue; } // shape cannot apply to this body (e.g. max_tokens too small)
+    if (patched === null) continue; // shape cannot apply to this body (e.g. max_tokens too small)
     try {
       const data = await request(patched);
       cache.set(cacheKey, s.key);
       return data;
     } catch (err) {
-      if (!isShapeRejection(kind, err)) throw err;
+      if (!isClientValidationError(err)) throw err;
     }
   }
-  // Every shape rejected: the call still runs, plain, and the result says unsupported. Cached ONLY if
-  // every shape was actually sent and rejected — a body-dependent skip says nothing about the model.
-  if (!skipped) cache.set(cacheKey, UNSUPPORTED);
+  // Every shape refused (or none applied): one plain request decides. Success ⇒ the setting was the
+  // problem; failure ⇒ a real error, thrown as the plain request's own.
+  const data = await request(body);
   track.unsupported = true;
-  return request(body);
+  return data;
 }
 
 /**
@@ -391,7 +378,7 @@ function assessThinking({ kind, mode, data, unsupported, reason, owner, label, m
 /**
  * What bare-agent knows about switching a model's thinking on/off, with no network. Measured models
  * answer true/false; a model not in the measured table on a provider with a shape ladder answers
- * 'unverified' (the ladder will try the shapes at runtime; if all are rejected the call runs plain and reports thinkingStatus 'unsupported');
+ * 'unverified' (the ladder will try the shapes at runtime; if they fail with client validation errors a plain request decides: OK ⇒ thinkingStatus 'unsupported', failure ⇒ that error is thrown);
  * clipipe and unknown providers answer false.
  * @param {'anthropic'|'openai'|'deepseek'|'gemini'|'ollama'|'clipipe'|string} provider
  * @param {string} [model]
@@ -426,7 +413,7 @@ function thinkingSupport(provider, model, opts) {
       on: LADDERS[kind].on[0].id,
       note: kind === 'ollama'
         ? 'Shapes known (think:true/false) but NOT live-verified; the reply signal is message.thinking.'
-        : `Model not in the measured table; the shape ladder is tried at runtime (off: ${LADDERS[kind].off.map((s) => s.id).join(' → ')}; on: ${LADDERS[kind].on.map((s) => s.id).join(' → ')}) and, if all are rejected, the call runs without the field and reports thinkingStatus 'unsupported'.`,
+        : `Model not in the measured table; the shape ladder is tried at runtime (off: ${LADDERS[kind].off.map((s) => s.id).join(' → ')}; on: ${LADDERS[kind].on.map((s) => s.id).join(' → ')}) and, if they fail with client validation errors, one plain request decides (OK ⇒ thinkingStatus 'unsupported'; failure ⇒ that error is thrown).`,
     };
   }
   const switchable = facts.off !== null && facts.on !== null;
@@ -451,7 +438,6 @@ module.exports = {
   warnThinkingStatus,
   deepseekDisabledBody,
   readThinkingSignal,
-  isShapeRejection,
   isDeepSeek,
   lookupModel,
 };
