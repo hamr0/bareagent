@@ -2,6 +2,19 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **BEHAVIOR CHANGE (opt-in only): `exposeMalformedArgs` is now uncapped.** With `exposeMalformedArgs: true`
+  on `OpenAIProvider`/`OllamaProvider`, `malformedToolCall.rawArguments` carries the FULL raw
+  `function.arguments` string verbatim (previously the first 500 chars). `rawTruncated` is no longer
+  set (the type field remains, marked `@deprecated`, so consumers referencing it still compile). Why
+  (fwdloop): malformed JSON usually breaks at the END (a stray trailing `}` from deepseek-flash, a
+  truncation), so the head-only cap hid exactly the broken part. Still opt-in: the raw text is
+  model-generated and may be large or carry sensitive content into logs/audit rows. Off (default):
+  unchanged, no `rawArguments` key, byte-identical.
+
 ## [0.49.0] - 2026-09-29
 
 ### Added
