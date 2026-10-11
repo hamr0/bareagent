@@ -737,3 +737,26 @@ describe('thinkingSupport() agrees with what the request path actually sends', (
     });
   }
 });
+
+describe('requestWithThinkingMode: shapes are copy-on-write (never mutate the caller body)', () => {
+  const { requestWithThinkingMode } = require('../src/thinking-mode');
+  for (const kind of ['anthropic', 'openai', 'deepseek', 'gemini', 'ollama']) {
+    for (const mode of ['on', 'off']) {
+      it(`${kind}/${mode}: base body untouched and no attempt inherits a rejected shape's field`, async () => {
+        const body = { model: 'not-in-table', max_tokens: 4096, messages: [{ role: 'user', content: 'hi' }], generationConfig: { temperature: 0.5 } };
+        const snapshot = structuredClone(body);
+        const attempts = [];
+        const rejection = Object.assign(new Error('400 bad field: thinking reasoning_effort thinkingBudget think'), { status: 400 });
+        await requestWithThinkingMode({
+          kind, mode, model: 'not-in-table', body, cache: new Map(), track: { unsupported: false },
+          request: async (b) => { attempts.push(structuredClone(b)); if (b !== body) throw rejection; return {}; },
+        });
+        assert.deepEqual(body, snapshot);
+        // every shape rejected ⇒ N patched attempts + 1 plain; the plain one is the untouched base
+        assert.deepEqual(attempts[attempts.length - 1], snapshot);
+        // (deepseek 'on' is the omit shape: its patched copy legitimately equals the base)
+        if (!(kind === 'deepseek' && mode === 'on')) for (const a of attempts.slice(0, -1)) assert.notDeepEqual(a, snapshot);
+      });
+    }
+  }
+});
