@@ -387,6 +387,7 @@ function assessThinking({ kind, mode, data, unsupported, reason, owner, label, m
  * clipipe and unknown providers answer false.
  * @param {'anthropic'|'openai'|'deepseek'|'gemini'|'ollama'|'clipipe'|string} provider
  * @param {string} [model]
+ * @param {{ baseUrl?: string }} [opts] - `baseUrl` only matters for provider 'openai': an OpenAI-wire endpoint on a DeepSeek host answers with DeepSeek's shapes, exactly as the request path does (same shared `isDeepSeek`). Omitted ⇒ model-id detection only. A non-object (incl. `null`) throws ValidationError (type only).
  * @returns {{ switchable: boolean|'unverified', off: string|null, on: string|null, note: string }}
  * @when you need to know, before building a request, whether a provider/model can have thinking turned on or off and which request field does it — pure lookup, no network
  * @fails returns switchable:false for clipipe and unknown providers (never throws); 'unverified' means not measured, not unsupported; Ollama's shapes are not live-verified.
@@ -394,15 +395,19 @@ function assessThinking({ kind, mode, data, unsupported, reason, owner, label, m
  * @example
  *   thinkingSupport('anthropic', 'claude-opus-5-5'); // { switchable: false, off: null, on: "thinking:{type:'adaptive'}", note: '...' }
  */
-function thinkingSupport(provider, model) {
+function thinkingSupport(provider, model, opts) {
+  if (opts !== undefined && (opts === null || typeof opts !== 'object' || Array.isArray(opts))) {
+    throw invalid(`thinkingSupport: opts must be an object (got ${opts === null ? 'null' : Array.isArray(opts) ? 'array' : typeof opts})`);
+  }
+  const baseUrl = opts && opts.baseUrl;
   if (provider === 'clipipe') {
     return { switchable: false, off: null, on: null, note: 'CLIPipe has no thinking-mode mechanism; thinkingMode runs the call unchanged and reports thinkingStatus \'unsupported\'.' };
   }
   if (typeof provider !== 'string' || !Object.prototype.hasOwnProperty.call(LADDERS, provider)) {
     return { switchable: false, off: null, on: null, note: `Unknown provider '${String(provider)}'.` };
   }
-  // The request path detects DeepSeek by model id (isDeepSeek) and sends DeepSeek's shape — the lookup must too.
-  const kind = /** @type {LadderKind} */ (provider === 'openai' && isDeepSeek(model, null) ? 'deepseek' : provider);
+  // The request path detects DeepSeek by model id OR baseUrl host (isDeepSeek) and sends DeepSeek's shape — the lookup must too, with the same call.
+  const kind = /** @type {LadderKind} */ (provider === 'openai' && isDeepSeek(model, baseUrl) ? 'deepseek' : provider);
   const idOf = (/** @type {'on'|'off'} */ mode, /** @type {string|null} */ key) =>
     key === null ? null : (LADDERS[kind][mode].find((s) => s.key === key) || LADDERS[kind][mode][0]).id;
   const facts = lookupModel(kind, /** @type {string} */ (model));

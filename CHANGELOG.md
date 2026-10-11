@@ -4,6 +4,14 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ## Unreleased
 
+### Added
+
+- `thinkingSupport(provider, model, { baseUrl } = {})` — optional 3rd arg. For provider `'openai'` a DeepSeek `baseUrl` now
+  yields DeepSeek's shapes even when the model id is not `deepseek-*`, via the SAME `isDeepSeek(model, baseUrl)` the OpenAI
+  request path uses (no copied regex; `isDeepSeek` stays unexported). Lets apps resolve support from wire shape + model +
+  baseUrl before any provider instance exists. No `opts` ⇒ unchanged. A non-object `opts` (incl. `null`) throws a
+  `ValidationError` naming the type only. A test pins the lookup's off shape against what `OpenAIProvider({model, baseUrl})` sends.
+
 ### Changed
 
 - **BEHAVIOR CHANGE — `thinkingMode`: "not supported" is an answer, not an error; the call ALWAYS runs.** Callers say

@@ -698,4 +698,30 @@ describe('thinkingSupport() agrees with what the request path actually sends', (
     assert.deepEqual(s, thinkingSupport('deepseek', 'deepseek-flash'));
     assert.equal(thinkingSupport('openai', 'gpt-5.5').off, "reasoning_effort:'none'", 'plain OpenAI unaffected');
   });
+
+  it('baseUrl on a DeepSeek host + non-deepseek model id ⇒ DeepSeek answer; without baseUrl ⇒ OpenAI answer', () => {
+    const withUrl = thinkingSupport('openai', 'some-model', { baseUrl: 'https://api.deepseek.com' });
+    assert.equal(withUrl.off, "thinking:{type:'disabled'}");
+    assert.equal(withUrl.on, '(field omitted — thinks by default)');
+    assert.equal(thinkingSupport('openai', 'some-model').off, "reasoning_effort:'none'");
+    assert.equal(thinkingSupport('openai', 'some-model', {}).off, "reasoning_effort:'none'");
+    assert.equal(thinkingSupport('openai', 'some-model', { baseUrl: 'https://api.openai.com/v1' }).off, "reasoning_effort:'none'");
+    // baseUrl is only consulted for 'openai'
+    assert.equal(thinkingSupport('anthropic', 'claude-sonnet-5', { baseUrl: 'https://api.deepseek.com' }).off, "thinking:{type:'disabled'}");
+  });
+  it('a non-object opts throws ValidationError naming the type only', () => {
+    for (const bad of [null, 'https://api.deepseek.com', 5, true, []]) {
+      assert.throws(() => thinkingSupport('openai', 'm', bad), (e) => e instanceof ValidationError && !/deepseek\.com/.test(e.message));
+    }
+  });
+  for (const [model, baseUrl] of [['some-model', 'https://api.deepseek.com'], ['gpt-5.5', 'https://api.deepseek.com/v1'], ['some-model', 'https://api.openai.com/v1']]) {
+    it(`openai ${model} @ ${baseUrl}: lookup off === what OpenAIProvider({model, baseUrl}) sends for 'off'`, async () => {
+      const p = new OpenAIProvider({ apiKey: 'k', model, baseUrl });
+      const bodies = [];
+      p._request = async (...args) => { bodies.push(args.find((a) => a && typeof a === 'object' && !Array.isArray(a))); return /deepseek/.test(baseUrl) ? deepseekOk() : openaiOk(0); };
+      await captureWarn(() => p.generate(MSGS, [], { thinkingMode: 'off' }));
+      assert.equal(bodies.length, 1);
+      assert.equal(describeBody(bodies[0]), thinkingSupport('openai', model, { baseUrl }).off);
+    });
+  }
 });

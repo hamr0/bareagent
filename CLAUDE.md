@@ -48,7 +48,7 @@ Tools: ShellTools (tools/shell.js, zero deps) — shell_read, shell_grep, shell_
 | Entry point | Contents |
 |-------------|----------|
 | `bare-agent` | Components (incl. `assessComplexity`, `isCritical`, `SkillRegistry`, `createStashSkill`, `remember`, `recurse`, `judge` + `calibrate`, `calibrateJev`) + error classes + CircuitBreaker + wireGate |
-| `bare-agent/providers` | All providers including Fallback + `JevProvider` (classify-only, not a `generate()` provider) + `thinkingSupport` (pure thinking-mode lookup) |
+| `bare-agent/providers` | All providers including Fallback + `JevProvider` (classify-only, not a `generate()` provider) + `thinkingSupport(provider, model, {baseUrl}?)` (pure thinking-mode lookup; `baseUrl` resolves an OpenAI-wire DeepSeek host via the request path's own `isDeepSeek`) |
 | `bare-agent/stores` | SQLite + JsonFile |
 | `bare-agent/transports` | JsonlTransport |
 | `bare-agent/tools` | createBrowsingTools, createMobileTools, createShellTools, resolveToolPath, createSpawnTool, spawnChild, createDeferTool, readDeferQueue |

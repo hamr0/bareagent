@@ -447,7 +447,7 @@
       "category": "providers",
       "when": "you need to know, before building a request, whether a provider/model can have thinking turned on or off and which request field does it — pure lookup, no network",
       "import": "import { thinkingSupport } from 'bare-agent/providers'",
-      "signature": "thinkingSupport(provider: 'anthropic'|'openai'|'deepseek'|'gemini'|'ollama'|'clipipe'|string, model?: string) => { switchable: boolean|'unverified', off: string|null, on: string|null, note: string }",
+      "signature": "thinkingSupport(provider: 'anthropic'|'openai'|'deepseek'|'gemini'|'ollama'|'clipipe'|string, model?: string, opts?: { baseUrl?: string }) => { switchable: boolean|'unverified', off: string|null, on: string|null, note: string }",
       "fails": "returns switchable:false for clipipe and unknown providers (never throws); 'unverified' means not measured, not unsupported; Ollama's shapes are not live-verified.",
       "example": "thinkingSupport('anthropic', 'claude-opus-5-5'); // { switchable: false, off: null, on: \"thinking:{type:'adaptive'}\", note: '...' }"
     },
