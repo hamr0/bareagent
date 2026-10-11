@@ -143,12 +143,15 @@ export interface GenerateResult {
    * repaired. Absent on a clean round. OpenAI-compatible + Ollama string-arguments only; Anthropic
    * arrives pre-parsed and cannot hit this.
    *
-   * `rawArguments`/`rawTruncated` (BA-27 follow-up) are present only when the provider was
+   * `rawArguments` (BA-27 follow-up) is present only when the provider was
    * constructed with `exposeMalformedArgs: true` (default off, mirrors `exposeErrorBody`) AND the
-   * raw `function.arguments` was a string: the raw value verbatim, capped at 500 chars, with
-   * `rawTruncated: true` added only when it was longer.
+   * raw `function.arguments` was a string: the FULL raw value verbatim, uncapped (model-generated; may be
+   * large or sensitive).
    */
-  malformedToolCall?: { name: string | undefined; error: string; rawArguments?: string; rawTruncated?: true };
+  malformedToolCall?: { name: string | undefined; error: string; rawArguments?: string;
+    /** @deprecated never set since 0.50.0 (rawArguments is now uncapped) */
+    rawTruncated?: true;
+  };
   /**
    * BA-7 — provider-native content blocks the normalized `{text, toolCalls}` shape cannot express
    * (Anthropic `thinking` / `redacted_thinking`), captured opaquely so the Loop can put them on the

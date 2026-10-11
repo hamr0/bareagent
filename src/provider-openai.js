@@ -73,10 +73,9 @@ function isLoopbackHost(hostname) {
  *   Set `true` for an OpenAI-compatible server that only understands the legacy key (e.g. some
  *   self-hosted / proxy endpoints). No model-name sniffing — the caller declares the dialect.
  * @property {boolean} [exposeMalformedArgs=false] - BA-27 follow-up: when a tool call's `function.arguments`
- *   JSON fails to parse, also attach the raw string (verbatim, capped at 500 chars, `rawTruncated:true`
- *   when longer) to `malformedToolCall.rawArguments`. Off by default, independent of `exposeErrorBody` —
- *   the raw blob is model-generated, not an upstream error body, but the same "don't leak an unbounded
- *   unexpected string into logs by default" reasoning applies. See `src/provider-toolcalls.js`.
+ *   JSON fails to parse, also attach the FULL raw string (verbatim, uncapped) to `malformedToolCall.rawArguments`.
+ *   Off by default, independent of `exposeErrorBody` — the raw blob is model-generated and may be large
+ *   or sensitive, so it only reaches logs/audit rows if the caller opts in. See `src/provider-toolcalls.js`.
  * @property {any} [thinking] - Opt-in `thinking` request field (fwdloop DeepSeek ask — extends BA-7(b)'s Anthropic option), forwarded to `body.thinking`
  *   VERBATIM and unvalidated — e.g. `{ type: 'disabled' }`. Generalises the Anthropic provider's option to
  *   OpenAI-compatible endpoints. Motivating case: DeepSeek's OpenAI-compatible API (`baseUrl`

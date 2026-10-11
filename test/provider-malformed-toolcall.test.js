@@ -208,8 +208,9 @@ describe('BA-27: a 200 with no `choices` throws a diagnosable ProviderError (Ope
 
 // BA-27 follow-up (fwdloop) — exposeMalformedArgs: an opt-in raw-arguments string on the marker,
 // independent of exposeErrorBody. Off by default (no new key on the marker); on, the raw
-// `function.arguments` string rides verbatim, capped at 500 chars with a visible `rawTruncated` flag.
+// `function.arguments` string rides verbatim and UNCAPPED (the broken tail is the useful part); `rawTruncated` is never set.
 const BAD_ARGS_LONG = '{"x":"' + 'a'.repeat(600) + '"}}'; // invalid JSON (extra brace), > 500 chars
+const BAD_ARGS_HUGE = '{"x":"' + 'b'.repeat(20000) + '"}}'; // 20k chars
 
 describe('BA-27 follow-up: exposeMalformedArgs (OpenAI)', () => {
   it('off by default: no rawArguments key on the marker', async () => {
@@ -236,18 +237,21 @@ describe('BA-27 follow-up: exposeMalformedArgs (OpenAI)', () => {
     }
   });
 
-  it('on + 600-char bad args: rawArguments capped at 500 chars, rawTruncated:true', async () => {
-    const s = await serve(openaiBody(BAD_ARGS_LONG));
-    try {
-      const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeMalformedArgs: true });
-      const r = await p.generate(MSGS, TOOLS);
-      assert.equal(r.malformedToolCall.rawArguments.length, 500);
-      assert.equal(r.malformedToolCall.rawArguments, BAD_ARGS_LONG.slice(0, 500));
-      assert.equal(r.malformedToolCall.rawTruncated, true);
-    } finally {
-      s.server.close();
-    }
-  });
+  for (const [label, big] of [['600-char', BAD_ARGS_LONG], ['20000-char', BAD_ARGS_HUGE]]) {
+    it(`on + ${label} bad args: rawArguments is the FULL string incl. tail, no rawTruncated`, async () => {
+      const s = await serve(openaiBody(big));
+      try {
+        const p = new OpenAIProvider({ apiKey: 'x', baseUrl: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+        const r = await p.generate(MSGS, TOOLS);
+        assert.equal(r.malformedToolCall.rawArguments, big);
+        assert.equal(r.malformedToolCall.rawArguments.length, big.length);
+        assert.ok(r.malformedToolCall.rawArguments.endsWith('"}}'), 'broken tail present');
+        assert.ok(!('rawTruncated' in r.malformedToolCall));
+      } finally {
+        s.server.close();
+      }
+    });
+  }
 });
 
 describe('BA-27 follow-up: exposeMalformedArgs (Ollama)', () => {
@@ -267,22 +271,26 @@ describe('BA-27 follow-up: exposeMalformedArgs (Ollama)', () => {
     }
   });
 
-  it('on: rawArguments carries the verbatim string, capped + flagged past 500 chars', async () => {
-    const s = await serve({
-      model: 'qwen',
-      message: { content: '', tool_calls: [{ function: { name: 'find', arguments: BAD_ARGS_LONG } }] },
-      done_reason: 'stop',
-      prompt_eval_count: 10, eval_count: 5,
+  for (const [label, big] of [['600-char', BAD_ARGS_LONG], ['20000-char', BAD_ARGS_HUGE]]) {
+    it(`on + ${label}: rawArguments is the FULL string incl. tail, no rawTruncated`, async () => {
+      const s = await serve({
+        model: 'qwen',
+        message: { content: '', tool_calls: [{ function: { name: 'find', arguments: big } }] },
+        done_reason: 'stop',
+        prompt_eval_count: 10, eval_count: 5,
+      });
+      try {
+        const p = new OllamaProvider({ url: s.url, timeoutMs: 0, exposeMalformedArgs: true });
+        const r = await p.generate(MSGS, TOOLS);
+        assert.equal(r.malformedToolCall.rawArguments, big);
+        assert.equal(r.malformedToolCall.rawArguments.length, big.length);
+        assert.ok(r.malformedToolCall.rawArguments.endsWith('"}}'), 'broken tail present');
+        assert.ok(!('rawTruncated' in r.malformedToolCall));
+      } finally {
+        s.server.close();
+      }
     });
-    try {
-      const p = new OllamaProvider({ url: s.url, timeoutMs: 0, exposeMalformedArgs: true });
-      const r = await p.generate(MSGS, TOOLS);
-      assert.equal(r.malformedToolCall.rawArguments, BAD_ARGS_LONG.slice(0, 500));
-      assert.equal(r.malformedToolCall.rawTruncated, true);
-    } finally {
-      s.server.close();
-    }
-  });
+  }
 
   it('non-string raw arguments are never exposed, even with the option on', async () => {
     // A malformed OBJECT case doesn't occur naturally (JSON.parse only runs on a string), but the

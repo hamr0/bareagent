@@ -183,6 +183,8 @@ All implement: `generate(messages, tools, options) -> { text, toolCalls, usage }
 
 OpenAI / Anthropic / Ollama also accept `{ exposeErrorBody: true }` — attach the full upstream response to `err.body` on HTTP errors (off by default since v0.11.0; the API message is always on `err.message`). (prd.md:2383)
 
+OpenAI / Ollama also accept `{ exposeMalformedArgs: true }` — on a malformed tool-call JSON round, attach the FULL raw `function.arguments` string (verbatim, uncapped since 0.50.0) to `malformedToolCall.rawArguments`; off by default, independent of `exposeErrorBody`. `rawTruncated` is deprecated and never set.
+
 ```javascript
 // OpenAI
 const { OpenAI } = require('bare-agent/providers');
