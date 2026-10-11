@@ -2,6 +2,43 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **BEHAVIOR CHANGE — `thinkingMode`: "not supported" is an answer, not an error; the call ALWAYS runs.** Callers say
+  `thinkingMode: 'on'|'off'` and need not care about providers. Everything that used to THROW a `ValidationError` because a
+  provider/model cannot do the requested mode now RUNS and reports it:
+  - measured not-switchable (`claude-opus-5-5` off, `gemini-3.1-pro-preview[-customtools]` off): exactly ONE request, NO
+    thinking field (the model's default behavior), `thinkingStatus:'unsupported'`;
+  - every ladder shape rejected: the shapes are tried, then ONE more request with no thinking field,
+    `thinkingStatus:'unsupported'`; cached per provider instance + mode + model, so later calls are ONE plain request;
+  - DeepSeek `'on'` + a forced `toolChoice` (`'required'`/`{name}`): thinking-on is impossible there, so the request goes
+    out with `thinking:{type:'disabled'}` (the only shape that works with a forced tool choice) and reports `'unsupported'`;
+  - `CLIPipeProvider` + `thinkingMode` (constructor and per call): the call runs unchanged (both `toolProtocol` modes and
+    plain text), `thinkingStatus:'unsupported'`.
+  `'unsupported'`/`'ignored'` warn once per provider instance (provider, model, requested mode, status).
+  **Still `ValidationError`** (caller config mistakes): an invalid `thinkingMode` value; raw `thinking` and `thinkingMode`
+  set together at the same level.
+- **`FallbackProvider`:** a not-switchable member no longer throws, so the chain no longer falls through on it — the first
+  member just runs and reports `'unsupported'`.
+
+### Added
+
+- **`GenerateResult.thinkingStatus: 'applied'|'unsupported'|'ignored'|'unknown'`** (present only when `thinkingMode` is set;
+  unset ⇒ body and result byte-identical to before). `applied` = a shape was accepted and, for `'off'`, the reply shows no
+  thinking; `unsupported` = the call ran without our field; `ignored` = `'off'` accepted but the reply shows thinking
+  anyway; `unknown` = accepted, signal unreadable. `thinkingApplied` is kept and DERIVED (applied⇒`true`,
+  ignored/unsupported⇒`false`, unknown⇒`null`). `Loop.run()` surfaces the WORST status across rounds (ignored >
+  unsupported > unknown > applied; absent if no round carried it) and derives its `thinkingApplied` from it (so
+  `[applied, unknown]` is now `unknown`/`null` in either order; `false`-sticky is unchanged).
+
+### Fixed
+
+- `thinkingSupport('openai', 'deepseek-flash')` reported OpenAI `reasoning_effort` shapes as `'unverified'` while the request
+  path sends DeepSeek's shape (selected by model id). The lookup now uses the same `deepseek-*` model-id detection for
+  provider `'openai'`. A test pins `thinkingSupport`'s off/on shape against what each provider's request path actually sends.
+
 ## [0.51.0] - 2026-10-11
 
 ### Added

@@ -1,17 +1,18 @@
 'use strict';
 
-// Normalized `thinkingMode: 'on' | 'off'` (hamr-approved design: try the known shapes, fail LOUDLY,
-// check every reply). Callers say "on"/"off"; this module owns the per-provider/per-model request
-// field, the retry ladder, the measured per-model facts, and the post-reply signal readers. The
-// provider files stay thin: they ask here for the patch and the reader.
+// Normalized `thinkingMode: 'on' | 'off'` (hamr-approved design: callers don't care about providers —
+// try the known shapes, ALWAYS run the call, and REPORT the outcome as `thinkingStatus`). "Not
+// supported" is an ANSWER, not an error: the call runs without our field and says so. Callers say
+// "on"/"off"; this module owns the per-provider/per-model request field, the retry ladder, the measured
+// per-model facts, and the post-reply signal readers. The provider files stay thin.
 //
 // Every fact in MODELS below was MEASURED live (poc/thinking-mode-verify.mjs →
 // poc/results/thinking-mode-verify.json, 2026-10-11) EXCEPT Ollama, which is shape-known but not
 // live-verified. A model that is not in the table is 'unverified': the ladder tries the shapes at
-// runtime and fails loudly if every one is rejected.
+// runtime and, if every one is rejected, runs the call plain and reports 'unsupported'.
 //
 // The raw `thinking` passthrough options (BA-7) are a DIFFERENT, untouched field: opaque and verbatim.
-// `thinkingMode` is the normalized switch; setting both at once is a ValidationError (no silent precedence).
+// `thinkingMode` is the normalized switch; setting both at once is a ValidationError (a caller config mistake, no silent precedence).
 
 const { ValidationError } = require('./errors');
 
@@ -72,8 +73,8 @@ const LADDERS = {
 };
 
 /**
- * MEASURED per-model facts. Value `null` ⇒ the mode is known NOT switchable on that model (throws
- * before any request is sent). A string ⇒ the first shape that worked (tried first).
+ * MEASURED per-model facts. Value `null` ⇒ the mode is known NOT switchable on that model (one plain
+ * request is sent with no thinking field; `thinkingStatus:'unsupported'`). A string ⇒ the first shape that worked (tried first).
  * @type {Record<LadderKind, Record<string, { off: string|null, on: string|null }>>}
  */
 const MODELS = {
@@ -203,53 +204,68 @@ function isShapeRejection(kind, err) {
   return !!err && err.status === 400 && FIELD_NAMED[kind].test(msg) && !TEMPERATURE_NAMED.test(msg);
 }
 
+// Sentinel cached per instance+mode+model once a model is known/found not switchable.
+const UNSUPPORTED = '\u0000unsupported';
+
 /**
  * Send a request with the `thinkingMode` field applied, walking the shape ladder on a 400 that names
- * the field. Order: the instance cache (a shape that already worked for this mode+model), else the
- * table's known-good shape, else the ladder's first; then the remaining shapes in ladder order. A
- * known-not-switchable model throws BEFORE any request. Every shape rejected ⇒ a loud ValidationError.
- * A 400 that does not name the field (or any non-400) is an ordinary error and propagates untouched.
+ * the field. Order: the instance cache (a shape that already worked for this mode+model, or the
+ * UNSUPPORTED sentinel), else the table's known-good shape, else the ladder's first; then the remaining
+ * shapes in ladder order. The call ALWAYS runs: a known-not-switchable model gets ONE plain request (no
+ * thinking field), and every shape rejected ⇒ ONE more plain request; both set `track.unsupported = true`
+ * (and cache it, so later calls skip straight to the plain request). A 400 that does not name the field
+ * (or any non-400) is an ordinary error and propagates untouched.
  *
  * @param {object} p
  * @param {LadderKind} p.kind
  * @param {'on'|'off'} p.mode
  * @param {string} p.model
- * @param {string} p.label - provider class name
  * @param {Record<string, any>} p.body - the base body (NOT mutated; each attempt gets a patched copy)
  * @param {(body: Record<string, any>) => Promise<any>} p.request
  * @param {Map<string, string>} p.cache - per provider instance
- * @returns {Promise<any>} the reply data of the accepted shape
+ * @param {{ unsupported: boolean }} p.track - written: `unsupported` is set true when the call ran without our field
+ * @returns {Promise<any>} the reply data
  */
-async function requestWithThinkingMode({ kind, mode, model, label, body, request, cache }) {
+async function requestWithThinkingMode({ kind, mode, model, body, request, cache, track }) {
   const ladder = LADDERS[kind][mode];
   const facts = lookupModel(kind, model);
-  if (facts && facts[mode] === null) {
-    throw invalid(`[${label}] thinkingMode '${mode}' is not supported by ${kind} model ${model} (measured: the API rejects every ${mode} shape for it) — no request was sent.`,
-      { provider: kind, model, mode, tried: [], sent: false });
-  }
   const cacheKey = `${mode}|${model}`;
-  const preferredKey = cache.get(cacheKey) || (facts && facts[mode]) || null;
+  const cached = cache.get(cacheKey);
+  track.unsupported = false;
+  if (cached === UNSUPPORTED || (facts && facts[mode] === null)) {
+    track.unsupported = true;
+    if (cached !== UNSUPPORTED) cache.set(cacheKey, UNSUPPORTED);
+    return request(body);
+  }
+  const preferredKey = cached || (facts && facts[mode]) || null;
   const ordered = [...ladder].sort((a, b) => (a.key === preferredKey ? -1 : b.key === preferredKey ? 1 : 0));
 
-  /** @type {string[]} */
-  const tried = [];
-  let lastMessage = '';
   for (const s of ordered) {
     const patched = s.apply(body);
-    if (patched === null) { tried.push(`${s.id} (not applicable to this request)`); continue; }
+    if (patched === null) continue; // shape cannot apply to this body (e.g. max_tokens too small)
     try {
       const data = await request(patched);
       cache.set(cacheKey, s.key);
       return data;
     } catch (err) {
       if (!isShapeRejection(kind, err)) throw err;
-      tried.push(s.id);
-      lastMessage = err.message;
     }
   }
-  throw invalid(`[${label}] thinkingMode '${mode}' is not supported by ${kind} model ${model} (tried: ${tried.join('; ')})` +
-    (lastMessage ? ` — last API error: ${lastMessage}` : ''),
-    { provider: kind, model, mode, tried, sent: tried.length > 0 });
+  // Every shape rejected: the call still runs, plain, and the result says unsupported.
+  cache.set(cacheKey, UNSUPPORTED);
+  track.unsupported = true;
+  return request(body);
+}
+
+/**
+ * The DeepSeek body for thinking-ON + a forced tool choice: thinking-on is impossible there (the API
+ * 400s), so the request goes out with `thinking:{type:'disabled'}` — the only shape that works with a
+ * forced tool_choice (measured) — and the caller reports `unsupported`.
+ * @param {Record<string, any>} body
+ * @returns {Record<string, any>}
+ */
+function deepseekDisabledBody(body) {
+  return LADDERS.deepseek.off[0].apply(body) || body;
 }
 
 /** @param {any} v @returns {boolean} */
@@ -298,36 +314,76 @@ function readThinkingSignal(kind, data) {
   }
 }
 
+/** @typedef {'applied'|'unsupported'|'ignored'|'unknown'} ThinkingStatus */
+
+/** @type {Record<ThinkingStatus, boolean|null>} */
+const APPLIED_OF = { applied: true, ignored: false, unsupported: false, unknown: null };
+
 /**
- * The `thinkingApplied` verdict for a reply whose request was accepted. 'on' ⇒ `true` (an adaptive
- * model may legitimately choose not to think, so 'on' is never flagged). 'off' ⇒ `true` when the reply
- * shows zero thinking, `false` when thinking happened anyway, `null` when the signal is unreadable.
- * On `false` it warns ONCE per `owner` (the provider instance) and never throws — the round is paid.
+ * Derive the legacy `thinkingApplied` boolean from a status (applied⇒true, ignored/unsupported⇒false, unknown⇒null).
+ * @param {ThinkingStatus} status
+ * @returns {boolean|null}
+ */
+function appliedOf(status) {
+  return APPLIED_OF[status];
+}
+
+/**
+ * Warn ONCE per provider instance when the requested mode did not (fully) take effect.
+ * @param {object} p
+ * @param {any} p.owner - provider instance (holds the warn-once flag)
+ * @param {string} p.label
+ * @param {string} p.model
+ * @param {'on'|'off'} p.mode
+ * @param {ThinkingStatus} p.status
+ * @param {string} [p.reason] - 'forced-tool': the request was sent with thinking explicitly disabled
+ */
+function warnThinkingStatus({ owner, label, model, mode, status, reason }) {
+  if (status !== 'unsupported' && status !== 'ignored') return;
+  if (owner._warnedThinkingNotApplied) return;
+  owner._warnedThinkingNotApplied = true;
+  const why = status === 'unsupported' && reason === 'forced-tool'
+    ? 'thinking can\'t be on with a forced tool choice — the call ran with thinking disabled'
+    : status === 'unsupported'
+    ? 'this provider/model cannot do the requested mode — the call ran WITHOUT a thinking field (the model\'s default behavior)'
+    : 'the switch was accepted but the reply shows thinking happened anyway';
+  console.warn(`[${label}] thinkingMode '${mode}' for ${model}: thinkingStatus '${status}' — ${why}. The result is kept. Further occurrences from this provider instance are silent.`);
+}
+
+/**
+ * The outcome of a thinkingMode call: `{thinkingStatus, thinkingApplied}` ready to spread onto a
+ * GenerateResult. `unsupported` ⇒ the call ran without our field. Otherwise 'on' ⇒ 'applied' (an
+ * adaptive model may legitimately choose not to think, so 'on' is never flagged); 'off' ⇒ 'applied'
+ * when the reply shows zero thinking, 'ignored' when thinking happened anyway, 'unknown' when the
+ * signal is unreadable. Warns ONCE per `owner` on unsupported/ignored and never throws.
  * @param {object} p
  * @param {LadderKind} p.kind
  * @param {'on'|'off'} p.mode
  * @param {any} p.data
- * @param {any} p.owner - provider instance (holds the warn-once flag)
+ * @param {boolean} [p.unsupported]
+ * @param {string} [p.reason] - why it is unsupported, when the wording differs (see warnThinkingStatus)
+ * @param {any} p.owner
  * @param {string} p.label
  * @param {string} p.model
- * @returns {boolean|null}
+ * @returns {{ thinkingStatus: ThinkingStatus, thinkingApplied: boolean|null }}
  */
-function assessThinkingApplied({ kind, mode, data, owner, label, model }) {
-  if (mode === 'on') return true;
-  const signal = readThinkingSignal(kind, data);
-  if (signal === 'none') return true;
-  if (signal === 'unknown') return null;
-  if (!owner._warnedThinkingNotApplied) {
-    owner._warnedThinkingNotApplied = true;
-    console.warn(`[${label}] thinkingMode 'off' was sent for ${model} but the reply shows thinking happened — the switch did not take effect (the result is kept; thinkingApplied:false). Further occurrences from this provider instance are silent.`);
+function assessThinking({ kind, mode, data, unsupported, reason, owner, label, model }) {
+  /** @type {ThinkingStatus} */
+  let status;
+  if (unsupported) status = 'unsupported';
+  else if (mode === 'on') status = 'applied';
+  else {
+    const signal = readThinkingSignal(kind, data);
+    status = signal === 'none' ? 'applied' : signal === 'thinking' ? 'ignored' : 'unknown';
   }
-  return false;
+  warnThinkingStatus({ owner, label, model, mode, status, reason });
+  return { thinkingStatus: status, thinkingApplied: APPLIED_OF[status] };
 }
 
 /**
  * What bare-agent knows about switching a model's thinking on/off, with no network. Measured models
  * answer true/false; a model not in the measured table on a provider with a shape ladder answers
- * 'unverified' (the ladder will try the shapes at runtime and fail loudly if all are rejected);
+ * 'unverified' (the ladder will try the shapes at runtime; if all are rejected the call runs plain and reports thinkingStatus 'unsupported');
  * clipipe and unknown providers answer false.
  * @param {'anthropic'|'openai'|'deepseek'|'gemini'|'ollama'|'clipipe'|string} provider
  * @param {string} [model]
@@ -340,12 +396,13 @@ function assessThinkingApplied({ kind, mode, data, owner, label, model }) {
  */
 function thinkingSupport(provider, model) {
   if (provider === 'clipipe') {
-    return { switchable: false, off: null, on: null, note: 'CLIPipe has no thinking-mode mechanism; thinkingMode throws a ValidationError.' };
+    return { switchable: false, off: null, on: null, note: 'CLIPipe has no thinking-mode mechanism; thinkingMode runs the call unchanged and reports thinkingStatus \'unsupported\'.' };
   }
-  const kind = /** @type {LadderKind} */ (provider);
   if (typeof provider !== 'string' || !Object.prototype.hasOwnProperty.call(LADDERS, provider)) {
     return { switchable: false, off: null, on: null, note: `Unknown provider '${String(provider)}'.` };
   }
+  // The request path detects DeepSeek by model id (isDeepSeek) and sends DeepSeek's shape — the lookup must too.
+  const kind = /** @type {LadderKind} */ (provider === 'openai' && isDeepSeek(model, null) ? 'deepseek' : provider);
   const idOf = (/** @type {'on'|'off'} */ mode, /** @type {string|null} */ key) =>
     key === null ? null : (LADDERS[kind][mode].find((s) => s.key === key) || LADDERS[kind][mode][0]).id;
   const facts = lookupModel(kind, /** @type {string} */ (model));
@@ -356,7 +413,7 @@ function thinkingSupport(provider, model) {
       on: LADDERS[kind].on[0].id,
       note: kind === 'ollama'
         ? 'Shapes known (think:true/false) but NOT live-verified; the reply signal is message.thinking.'
-        : `Model not in the measured table; the shape ladder is tried at runtime (off: ${LADDERS[kind].off.map((s) => s.id).join(' → ')}; on: ${LADDERS[kind].on.map((s) => s.id).join(' → ')}) and fails loudly if all are rejected.`,
+        : `Model not in the measured table; the shape ladder is tried at runtime (off: ${LADDERS[kind].off.map((s) => s.id).join(' → ')}; on: ${LADDERS[kind].on.map((s) => s.id).join(' → ')}) and, if all are rejected, the call runs without the field and reports thinkingStatus 'unsupported'.`,
     };
   }
   const switchable = facts.off !== null && facts.on !== null;
@@ -366,7 +423,7 @@ function thinkingSupport(provider, model) {
     on: idOf('on', facts.on),
     note: switchable
       ? 'Measured: both modes work.'
-      : `Measured: ${facts.off === null ? "'off'" : "'on'"} is rejected by the API for this model — requesting it throws before any request is sent.`,
+      : `Measured: ${facts.off === null ? "'off'" : "'on'"} is rejected by the API for this model — requesting it sends the call without a thinking field and reports thinkingStatus 'unsupported'.`,
   };
 }
 
@@ -376,7 +433,10 @@ module.exports = {
   normalizeThinkingMode,
   resolveThinkingMode,
   requestWithThinkingMode,
-  assessThinkingApplied,
+  assessThinking,
+  appliedOf,
+  warnThinkingStatus,
+  deepseekDisabledBody,
   readThinkingSignal,
   isShapeRejection,
   isDeepSeek,
