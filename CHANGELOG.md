@@ -40,6 +40,9 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ### Fixed
 
+- `thinkingMode`: a 400 is now a shape rejection only if it names the field AND contains a rejection phrase (`not supported|unsupported|invalid|unknown|unrecognized|not allowed|does not support|not permitted|only works`, bounded, case-insensitive). Before, any 400 that merely mentioned `thinking` (e.g. a broken-transcript "final assistant message must start with a thinking block") walked the ladder and ended as a plain resend reporting `'unsupported'`, hiding the real error; it is now thrown as-is after ONE request. Every real 400 recorded in `poc/results/thinking-mode-verify.json` still classifies as a rejection.
+- `thinkingMode` warn-once is now per status: an `'unsupported'` warning no longer silences a later, more serious `'ignored'` on the same provider instance.
+- The temperature-drop warning no longer says "unsupported/deprecated" when the drop was the thinking-conflict retry; it now says "'temperature' must be 1 while thinking is on — retrying without it". Each reason warns once per instance (the deprecated path's text is unchanged).
 - `thinkingSupport('openai', 'deepseek-flash')` reported OpenAI `reasoning_effort` shapes as `'unverified'` while the request
   path sends DeepSeek's shape (selected by model id). The lookup now uses the same `deepseek-*` model-id detection for
   provider `'openai'`. A test pins `thinkingSupport`'s off/on shape against what each provider's request path actually sends.

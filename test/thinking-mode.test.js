@@ -746,7 +746,7 @@ describe('requestWithThinkingMode: shapes are copy-on-write (never mutate the ca
         const body = { model: 'not-in-table', max_tokens: 4096, messages: [{ role: 'user', content: 'hi' }], generationConfig: { temperature: 0.5 } };
         const snapshot = structuredClone(body);
         const attempts = [];
-        const rejection = Object.assign(new Error('400 bad field: thinking reasoning_effort thinkingBudget think'), { status: 400 });
+        const rejection = Object.assign(new Error('400 bad field is not supported: thinking reasoning_effort thinkingBudget think'), { status: 400 });
         await requestWithThinkingMode({
           kind, mode, model: 'not-in-table', body, cache: new Map(), track: { unsupported: false },
           request: async (b) => { attempts.push(structuredClone(b)); if (b !== body) throw rejection; return {}; },
@@ -759,4 +759,87 @@ describe('requestWithThinkingMode: shapes are copy-on-write (never mutate the ca
       });
     }
   }
+});
+
+describe('thinkingMode: a 400 is a shape rejection only if it names the field AND says it was refused', () => {
+  const { isShapeRejection } = require('../src/thinking-mode');
+  const rej = (msg) => Object.assign(new Error(msg), { status: 400 });
+  // Verbatim 400s recorded in poc/results/thinking-mode-verify.json (live-measured).
+  const RECORDED = [
+    ['anthropic', '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'],
+    ['anthropic', '"thinking.type.disabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'],
+    ['anthropic', 'adaptive thinking is not supported on this model'],
+    ['openai', "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."],
+    ['openai', "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."],
+    ['gemini', 'Budget 0 is invalid. This model only works in thinking mode.'],
+    ['deepseek', 'Thinking mode does not support this tool_choice (request_id: e5189e14-0428-49c8-ab48-f0348284037e)'],
+  ];
+  for (const [kind, msg] of RECORDED) {
+    it(`recorded real ${kind} rejection is a shape rejection: ${msg.slice(0, 50)}`, () => assert.equal(isShapeRejection(kind, rej(msg)), true));
+  }
+  it('a recorded text under a non-400 status is still not a rejection', () => {
+    assert.equal(isShapeRejection('anthropic', Object.assign(new Error(RECORDED[2][1]), { status: 500 })), false);
+  });
+  // ILLUSTRATIVE wording (not captured from the live API): a broken-transcript 400 that merely mentions thinking.
+  const TRANSCRIPT = 'When `thinking` is enabled, a final `assistant` message must start with a thinking block';
+  it('a 400 that merely mentions thinking (illustrative broken-transcript text) is NOT a rejection', () => {
+    assert.equal(isShapeRejection('anthropic', rej(TRANSCRIPT)), false);
+    assert.equal(isShapeRejection('deepseek', rej(TRANSCRIPT)), false);
+  });
+  it('wire: that 400 is thrown as-is — ONE request, no ladder walk, not a ValidationError', async () => {
+    await withServer([err400(TRANSCRIPT)], async (s) => {
+      await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on' }),
+        (e) => !(e instanceof ValidationError) && e.status === 400 && /final `assistant` message/.test(e.message));
+      assert.equal(s.state.bodies.length, 1);
+    });
+  });
+});
+
+describe('thinkingMode: warn-once is per status', () => {
+  it("'unsupported' then 'ignored' on one instance ⇒ two warnings; a second 'ignored' stays silent", async () => {
+    const rej = P.anthropic.reject('thinking.type.adaptive');
+    await withServer([rej, rej, P.anthropic.ok(), P.anthropic.thinks()], async (s) => {
+      const p = P.anthropic.make(s, { model: 'claude-future-1' });
+      const { value: [r1, r2, r3], warns } = await captureWarn(async () => [
+        await p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }),
+        await p.generate(MSGS, [], { thinkingMode: 'off' }),
+        await p.generate(MSGS, [], { thinkingMode: 'off' }),
+      ]);
+      assert.equal(r1.thinkingStatus, 'unsupported');
+      assert.equal(r2.thinkingStatus, 'ignored');
+      assert.equal(r3.thinkingStatus, 'ignored');
+      assert.equal(warns.length, 2);
+      assert.match(warns[0], /thinkingStatus 'unsupported'/);
+      assert.match(warns[1], /thinkingStatus 'ignored'/);
+    });
+  });
+});
+
+describe('temperature-drop warning names the real reason', () => {
+  const CONFLICT = '`temperature` may only be set to 1 when thinking is enabled.';
+  const DEPRECATED = '`temperature` is deprecated for this model.';
+  it('thinking-conflict retry says temperature must be 1 while thinking is on', async () => {
+    await withServer([err400(CONFLICT), anthropicOk(false)], async (s) => {
+      const { warns } = await captureWarn(() => P.anthropic.make(s, { thinkingMode: 'on' }).generate(MSGS, [], { temperature: 0.5 }));
+      assert.equal(warns.length, 1);
+      assert.match(warns[0], /'temperature' must be 1 while thinking is on — retrying without it/);
+      assert.doesNotMatch(warns[0], /unsupported\/deprecated/);
+    });
+  });
+  it('deprecated path keeps its original text', async () => {
+    await withServer([err400(DEPRECATED), anthropicOk(false)], async (s) => {
+      const { warns } = await captureWarn(() => P.anthropic.make(s, { thinkingMode: 'on' }).generate(MSGS, [], { temperature: 0.5 }));
+      assert.equal(warns.length, 1);
+      assert.match(warns[0], /rejected a non-default 'temperature' \(unsupported\/deprecated\) — retrying without it\./);
+    });
+  });
+  it('each reason warns once on one instance (neither hides the other)', async () => {
+    await withServer([err400(CONFLICT), anthropicOk(false), err400(DEPRECATED), anthropicOk(false), err400(CONFLICT), anthropicOk(false)], async (s) => {
+      const p = P.anthropic.make(s, { thinkingMode: 'on' });
+      const { warns } = await captureWarn(async () => {
+        for (let i = 0; i < 3; i++) await p.generate(MSGS, [], { temperature: 0.5 });
+      });
+      assert.equal(warns.length, 2);
+    });
+  });
 });

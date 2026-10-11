@@ -121,6 +121,10 @@ const FIELD_NAMED = {
   gemini: /\b(thinkingBudget|thinkingConfig|thinking_budget|thinking_config|thinking|budget)\b/i,
   ollama: /\b(thinking|think)\b/i,
 };
+// A 400 must ALSO say the field was refused (bounded alternation, no `.*` — ReDoS-safe): a 400 that
+// merely mentions the field (e.g. a broken-transcript "final assistant message must start with a
+// thinking block") is a real error to surface, not a shape to retry past.
+const REJECTION_PHRASE = /(not supported|unsupported|invalid|unknown|unrecognized|not allowed|does not support|not permitted|only works)/i;
 // A 400 that names `temperature` is the temperature fallback's business (e.g. Anthropic's "temperature
 // may only be set to 1 when thinking is enabled" names BOTH) — never a shape rejection.
 const TEMPERATURE_NAMED = /temperature/i;
@@ -201,7 +205,7 @@ function resolveThinkingMode({ label, instanceMode, options, instanceThinking = 
  */
 function isShapeRejection(kind, err) {
   const msg = err && typeof err.message === 'string' ? err.message : '';
-  return !!err && err.status === 400 && FIELD_NAMED[kind].test(msg) && !TEMPERATURE_NAMED.test(msg);
+  return !!err && err.status === 400 && FIELD_NAMED[kind].test(msg) && REJECTION_PHRASE.test(msg) && !TEMPERATURE_NAMED.test(msg);
 }
 
 // Sentinel cached per instance+mode+model once a model is known/found not switchable.
@@ -342,14 +346,16 @@ function appliedOf(status) {
  */
 function warnThinkingStatus({ owner, label, model, mode, status, reason }) {
   if (status !== 'unsupported' && status !== 'ignored') return;
-  if (owner._warnedThinkingNotApplied) return;
-  owner._warnedThinkingNotApplied = true;
+  // One once-flag PER status: an 'unsupported' warn must not silence a later, more serious 'ignored'.
+  const flag = status === 'ignored' ? '_warnedThinkingIgnored' : '_warnedThinkingUnsupported';
+  if (owner[flag]) return;
+  owner[flag] = true;
   const why = status === 'unsupported' && reason === 'forced-tool'
     ? 'thinking can\'t be on with a forced tool choice — the call ran with thinking disabled'
     : status === 'unsupported'
     ? 'this provider/model cannot do the requested mode — the call ran WITHOUT a thinking field (the model\'s default behavior)'
     : 'the switch was accepted but the reply shows thinking happened anyway';
-  console.warn(`[${label}] thinkingMode '${mode}' for ${model}: thinkingStatus '${status}' — ${why}. The result is kept. Further occurrences from this provider instance are silent.`);
+  console.warn(`[${label}] thinkingMode '${mode}' for ${model}: thinkingStatus '${status}' — ${why}. The result is kept. Further '${status}' occurrences from this provider instance are silent.`);
 }
 
 /**

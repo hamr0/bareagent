@@ -179,7 +179,7 @@ class OpenAIProvider {
         : this._request('/chat/completions', body, timeoutMs, deadlineMs),
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
     // BA-27: a successful 200 whose body carries no `choices` (some OpenAI-compat servers return a
     // 4xx-shaped error object with HTTP 200) reached `data.choices[0]` as a bare TypeError with no
@@ -223,11 +223,14 @@ class OpenAIProvider {
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[OpenAIProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[OpenAIProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[OpenAIProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

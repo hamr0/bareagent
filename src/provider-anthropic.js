@@ -181,7 +181,7 @@ class AnthropicProvider {
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
       thinkingOn: thinkingMode === 'on',
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
 
     let text = '';
@@ -232,11 +232,14 @@ class AnthropicProvider {
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[AnthropicProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[AnthropicProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[AnthropicProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

@@ -142,7 +142,7 @@ class GeminiProvider {
         : this._request(`/models/${this.model}:generateContent`, body, timeoutMs, deadlineMs),
       hadTemperature: () => body.generationConfig?.temperature != null,
       stripTemperature: () => { if (body.generationConfig) delete body.generationConfig.temperature; },
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
 
     let text = '';
@@ -177,11 +177,14 @@ class GeminiProvider {
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[GeminiProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[GeminiProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[GeminiProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**

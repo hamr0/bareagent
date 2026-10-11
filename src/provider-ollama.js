@@ -104,7 +104,7 @@ class OllamaProvider {
         : this._request('/api/chat', body, timeoutMs, deadlineMs),
       hadTemperature: () => body.options?.temperature != null,
       stripTemperature: () => { if (body.options) delete body.options.temperature; },
-      warnOnce: () => this._warnTemperatureDropped(),
+      warnOnce: (reason) => this._warnTemperatureDropped(reason),
     });
     const msg = data.message || {};
 
@@ -142,11 +142,14 @@ class OllamaProvider {
     };
   }
 
-  /** One-time warning that this model rejected `temperature` and the request was retried without it (BA-10). */
-  _warnTemperatureDropped() {
-    if (this._warnedTempDropped) return;
-    this._warnedTempDropped = true;
-    console.warn(`[OllamaProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
+  /** One-time warning (per reason) that this model rejected `temperature` and the request was retried without it (BA-10). */
+  _warnTemperatureDropped(reason = 'unsupported') {
+    const flag = reason === 'thinking' ? '_warnedTempThinking' : '_warnedTempDropped';
+    if (this[flag]) return;
+    this[flag] = true;
+    console.warn(reason === 'thinking'
+      ? `[OllamaProvider] '${this.model}': 'temperature' must be 1 while thinking is on — retrying without it. Further drops from this provider instance are silent.`
+      : `[OllamaProvider] '${this.model}' rejected a non-default 'temperature' (unsupported/deprecated) — retrying without it. Further drops from this provider instance are silent.`);
   }
 
   /**
