@@ -25,7 +25,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
     not-switchable models (`claude-opus-5-5` off, `gemini-3.1-pro-preview[-customtools]` off) throw BEFORE any request.
     A rejected attempt is a 400 with no usage, so nothing is double-metered.
   - **`GenerateResult.thinkingApplied: boolean|null`** (present only when `thinkingMode` is set; also on
-    `Loop.run()`'s return for the terminating round): `true` = accepted and, for `'off'`, zero thinking signal in the
+    `Loop.run()`'s return, **sticky-false**: once any round reports `false` the run reports `false`; otherwise the
+    latest round's `true`/`null`; key absent when no round carried it): `true` = accepted and, for `'off'`, zero thinking signal in the
     reply; `false` = `'off'` was sent but the reply shows thinking (warns once per instance, result kept — never
     throws); `null` = cannot tell. `'on'` is never flagged (adaptive models may choose not to think). "Absent ⇒ off"
     only where measured (Gemini `thoughtsTokenCount`, DeepSeek `reasoning_content`, Ollama `message.thinking`);
@@ -34,6 +35,11 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
     option (after per-call override) ⇒ `ValidationError` (no silent precedence — the raw option is untouched);
     DeepSeek `'on'` + a forced `toolChoice` ⇒ `ValidationError` before sending; `CLIPipeProvider` +
     `thinkingMode` ⇒ `ValidationError` (loud, never ignored). Unset ⇒ request body byte-identical to before.
+  - **Anthropic `'on'` + `temperature`.** With thinking enabled (e.g. haiku-4-5's `{type:'enabled'}`) the API rejects a
+    non-default `temperature`. Thinking wins: a 400 whose text names BOTH `temperature` and `thinking` (only when a
+    `thinkingMode:'on'` shape is being sent) reuses the BA-10 path — temperature dropped, retried once, receipt
+    `temperatureDropped: true`, `thinkingApplied: true`; not counted as a shape rejection. Wording live-confirmed 2026-10-11
+    (`poc/thinking-mode-shipped.mjs`: haiku-4-5 and sonnet-5 both matched and retried). `'off'`/unset unchanged.
   - **`FallbackProvider`:** per-call `thinkingMode` reaches every provider in the chain — correct for a normalized
     field; a provider that cannot honor it throws `ValidationError` and the chain falls through like any failure.
   - **`thinkingSupport(provider, model)`** exported from `bare-agent/providers` (pure, no network):

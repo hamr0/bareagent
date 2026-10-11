@@ -32,6 +32,22 @@ function isTemperatureUnsupported(err) {
   return !!err && err.status === 400 && TEMP_NAMED.test(msg) && TEMP_UNSUPPORTED.test(msg);
 }
 
+// Anthropic with thinking ENABLED rejects any non-default temperature ("`temperature` may only be set to 1
+// when thinking is enabled" — live-confirmed 2026-10-11 on haiku-4-5; sonnet-5 appends "or in adaptive mode"). Thinking-on wins: the
+// caller asked for thinking explicitly, so the temperature is what gets dropped. Narrow: a 400 that names
+// BOTH words (no `.*`, so ReDoS-safe); only consulted when the caller passes `thinkingOn`.
+const THINKING_NAMED = /thinking/i;
+
+/**
+ * Is this a 400 saying `temperature` conflicts with enabled thinking (names both)?
+ * @param {any} err
+ * @returns {boolean}
+ */
+function isTemperatureThinkingConflict(err) {
+  const msg = err && typeof err.message === 'string' ? err.message : '';
+  return !!err && err.status === 400 && TEMP_NAMED.test(msg) && THINKING_NAMED.test(msg);
+}
+
 /**
  * Issue a provider request; if it 400s because `temperature` is unsupported AND a temperature was
  * actually sent, strip it and retry ONCE. Returns whether the temperature was dropped so the caller
@@ -41,14 +57,15 @@ function isTemperatureUnsupported(err) {
  * @param {() => Promise<any>} opts.request - issues the API call (rejects `ProviderError` on 4xx).
  * @param {() => boolean} opts.hadTemperature - was a temperature actually in the request body?
  * @param {() => void} opts.stripTemperature - mutate the request body to remove the temperature.
+ * @param {boolean} [opts.thinkingOn] - a thinkingMode 'on' shape is being sent: ALSO treat a 400 naming both temperature and thinking as droppable (thinking wins). Default off ⇒ behavior unchanged.
  * @param {() => void} [opts.warnOnce] - emit the one-time degrade warning (caller dedupes per instance).
  * @returns {Promise<{ data: any, temperatureDropped: boolean }>}
  */
-async function requestWithTemperatureFallback({ request, hadTemperature, stripTemperature, warnOnce }) {
+async function requestWithTemperatureFallback({ request, hadTemperature, stripTemperature, thinkingOn, warnOnce }) {
   try {
     return { data: await request(), temperatureDropped: false };
   } catch (err) {
-    if (isTemperatureUnsupported(err) && hadTemperature()) {
+    if ((isTemperatureUnsupported(err) || (thinkingOn === true && isTemperatureThinkingConflict(err))) && hadTemperature()) {
       stripTemperature();
       if (warnOnce) warnOnce();
       return { data: await request(), temperatureDropped: true };
@@ -57,4 +74,4 @@ async function requestWithTemperatureFallback({ request, hadTemperature, stripTe
   }
 }
 
-module.exports = { isTemperatureUnsupported, requestWithTemperatureFallback };
+module.exports = { isTemperatureUnsupported, isTemperatureThinkingConflict, requestWithTemperatureFallback };

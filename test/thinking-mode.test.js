@@ -471,3 +471,65 @@ describe('thinkingSupport (pure table)', () => {
     assert.equal(thinkingSupport(undefined, undefined).switchable, false);
   });
 });
+
+describe('thinkingMode: Anthropic on + temperature (thinking wins)', () => {
+  const CONFLICT = '`temperature` may only be set to 1 when thinking is enabled.';
+  it('400 naming temperature AND thinking under on ⇒ retry without temperature, temperatureDropped, thinkingApplied', async () => {
+    await withServer([err400(CONFLICT), anthropicOk(false)], async (s) => {
+      const { value: r } = await captureWarn(() => P.anthropic.make(s, { thinkingMode: 'on' }).generate(MSGS, [], { temperature: 0.5 }));
+      assert.equal(s.state.bodies.length, 2);
+      assert.equal(s.state.bodies[0].temperature, 0.5);
+      assert.ok(s.state.bodies[0].thinking, 'first request carried the thinking shape');
+      assert.ok(!('temperature' in s.state.bodies[1]));
+      assert.ok(s.state.bodies[1].thinking, 'retry kept thinking on');
+      assert.equal(r.temperatureDropped, true);
+      assert.equal(r.thinkingApplied, true);
+    });
+  });
+  it('not counted as a shape rejection: the ladder is not walked (same shape on the retry)', async () => {
+    await withServer([err400(CONFLICT), anthropicOk(false)], async (s) => {
+      await captureWarn(() => P.anthropic.make(s, { thinkingMode: 'on', model: 'claude-haiku-4-5' }).generate(MSGS, [], { temperature: 0.5 }));
+      assert.deepEqual(s.state.bodies[0].thinking.type, 'enabled');
+      assert.deepEqual(s.state.bodies[1].thinking.type, 'enabled');
+    });
+  });
+  it("400 naming only temperature (unsupported) under on ⇒ still the normal BA-10 path", async () => {
+    await withServer([err400('`temperature` is deprecated for this model.'), anthropicOk(false)], async (s) => {
+      const { value: r } = await captureWarn(() => P.anthropic.make(s, { thinkingMode: 'on' }).generate(MSGS, [], { temperature: 0.5 }));
+      assert.equal(r.temperatureDropped, true);
+      assert.ok(!('temperature' in s.state.bodies[1]));
+    });
+  });
+  it('400 naming only temperature but NOT unsupported (out of range) under on ⇒ still throws', async () => {
+    await withServer([err400('temperature: range 0..1')], async (s) => {
+      await assert.rejects(P.anthropic.make(s, { thinkingMode: 'on' }).generate(MSGS, [], { temperature: 5 }));
+      assert.equal(s.state.bodies.length, 1);
+    });
+  });
+  it('thinkingMode unset or off + the same 400 ⇒ unchanged (raw error escapes, no retry)', async () => {
+    for (const o of [{}, { thinkingMode: 'off' }]) {
+      await withServer([err400(CONFLICT), anthropicOk(false)], async (s) => {
+        await assert.rejects(P.anthropic.make(s, o).generate(MSGS, [], { temperature: 0.5 }), (e) => e.status === 400);
+        assert.equal(s.state.bodies.length, 1);
+      });
+    }
+  });
+});
+
+describe('thinkingMode: Loop.run thinkingApplied is sticky-false across rounds', () => {
+  const run = async (flags) => {
+    let i = 0;
+    const provider = { generate: async () => {
+      const f = flags[i++];
+      const last = i === flags.length;
+      return { text: last ? 'done' : '', toolCalls: last ? [] : [{ id: `c${i}`, name: 'do_it', arguments: {} }],
+        usage: { inputTokens: 1, outputTokens: 1 }, ...(f !== undefined && { thinkingApplied: f }) };
+    } };
+    const tool = { name: 'do_it', description: 'x', parameters: { type: 'object', properties: {} }, execute: async () => 'r' };
+    return new Loop({ provider }).run(MSGS, [tool]);
+  };
+  it('false then true ⇒ false', async () => assert.equal((await run([false, true])).thinkingApplied, false));
+  it('true then true ⇒ true', async () => assert.equal((await run([true, true])).thinkingApplied, true));
+  it('true then null ⇒ null', async () => assert.equal((await run([true, null])).thinkingApplied, null));
+  it('unset ⇒ field absent', async () => assert.ok(!('thinkingApplied' in (await run([undefined, undefined])))));
+});

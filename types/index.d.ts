@@ -140,7 +140,7 @@ export interface GenerateResult {
    * `true` once accepted: an adaptive model may legitimately choose not to think); `false` — 'off' was
    * requested but the reply shows thinking happened (the provider warns once; the round is paid and kept,
    * never thrown); `null` — cannot tell (the reply's thinking signal is unreadable, e.g. OpenAI without
-   * `reasoning_tokens`). Surfaced on `Loop.run()`'s return for the terminating round.
+   * `reasoning_tokens`). Surfaced on `Loop.run()`'s return, sticky-false: any round reporting `false` makes the run `false`, else the latest round's value.
    */
   thinkingApplied?: boolean | null;
   /**

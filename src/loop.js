@@ -565,8 +565,8 @@ class Loop {
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
     let temperatureDropped = false;
-    // Normalized thinkingMode (src/thinking-mode.js): the terminating round's `thinkingApplied` verdict
-    // (true/false/null); undefined ⇒ the provider reported none (thinkingMode unset) ⇒ key absent.
+    // Normalized thinkingMode (src/thinking-mode.js): the run's `thinkingApplied` verdict — sticky-false
+    // (any round false ⇒ false), else the latest round's true/null; undefined ⇒ the provider reported none (thinkingMode unset) ⇒ key absent.
     /** @type {boolean|null|undefined} */
     let lastThinkingApplied;
     // BA-11: consecutive policy-deny counter (reset by any tool call that PASSES policy). When it reaches
@@ -865,8 +865,11 @@ class Loop {
       lastMalformedToolCall = (result.malformedToolCall && typeof result.malformedToolCall === 'object')
         ? result.malformedToolCall : null;
       if (result.temperatureDropped) temperatureDropped = true;
-      lastThinkingApplied = (result.thinkingApplied === true || result.thinkingApplied === false || result.thinkingApplied === null)
-        ? result.thinkingApplied : undefined;
+      // Sticky-false: once ANY round reports false (thinking happened despite 'off'), the run stays false;
+      // otherwise the latest round's true/null wins; a round without the field leaves it untouched.
+      if (result.thinkingApplied === true || result.thinkingApplied === false || result.thinkingApplied === null) {
+        if (lastThinkingApplied !== false) lastThinkingApplied = result.thinkingApplied;
+      }
       // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
       // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
       // pressure on the NEXT round's trim. Symmetric with lending ctx.summarize; the Loop stays unaware of

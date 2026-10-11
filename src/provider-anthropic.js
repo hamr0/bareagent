@@ -178,6 +178,7 @@ class AnthropicProvider {
         : this._request(body, timeoutMs, deadlineMs),
       hadTemperature: () => body.temperature != null,
       stripTemperature: () => { delete body.temperature; },
+      thinkingOn: thinkingMode === 'on',
       warnOnce: () => this._warnTemperatureDropped(),
     });
 

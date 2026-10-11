@@ -64,6 +64,28 @@ for (const p of PROVIDERS) {
   }
 }
 
+// thinking-on + non-default temperature (live-confirms the "thinking wins" drop; prints the raw first 400).
+if (process.env.ANTHROPIC_API_KEY) {
+  for (const model of ['claude-haiku-4-5', 'claude-sonnet-5']) {
+    const tag = `anthropic/${model} thinkingMode=on temperature=0.5`;
+    const provider = new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY, model, exposeErrorBody: true });
+    const orig = provider._request.bind(provider);
+    let first400 = null;
+    provider._request = async (...a) => {
+      try { return await orig(...a); } catch (e) { if (e && e.status === 400 && first400 === null) first400 = `${e.message}${e.body ? ' | body=' + JSON.stringify(e.body) : ''}`; throw e; }
+    };
+    ran++;
+    try {
+      const r = await provider.generate(MSGS, [], { thinkingMode: 'on', temperature: 0.5, maxTokens: MAX });
+      console.log(`  info ${tag}: temperatureDropped=${r.temperatureDropped === true} first400=${first400 === null ? '(none)' : first400}`);
+      if (r.thinkingApplied !== true) fail(`${tag}: thinkingApplied=${r.thinkingApplied} (expected true)`);
+      else console.log(`  ok   ${tag}: no throw, thinkingApplied=true`);
+    } catch (e) {
+      fail(`${tag}: threw ${e && e.name}: ${e && e.message} (first400=${first400})`);
+    }
+  }
+}
+
 if (ran === 0) { console.log(`\nALL SKIPPED (${skipped} providers) — no key set, nothing was proven. Exiting non-zero.`); process.exit(2); }
 if (failures > 0) { console.log(`\n${failures} FAILURE(s) over ${ran} case(s) (${skipped} provider(s) skipped).`); process.exit(1); }
 console.log(`\nPASS: ${ran} case(s)${skipped ? `; ${skipped} provider(s) SKIPPED (not proven)` : ''}.`);
