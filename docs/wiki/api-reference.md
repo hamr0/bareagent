@@ -183,6 +183,8 @@ All implement: `generate(messages, tools, options) -> { text, toolCalls, usage }
 
 OpenAI / Anthropic / Ollama also accept `{ exposeErrorBody: true }` — attach the full upstream response to `err.body` on HTTP errors (off by default since v0.11.0; the API message is always on `err.message`). (prd.md:2383)
 
+Anthropic / OpenAI (incl. DeepSeek) / Gemini / Ollama also accept `{ thinkingMode: 'on' | 'off' }` (constructor or per call; `null` suppresses) — the normalized thinking switch: ladder of measured request shapes, `ValidationError` if none is accepted or the model is not switchable, and `GenerateResult.thinkingApplied` (`true`/`false`/`null`, also on `Loop.run()` — sticky-false across rounds; Anthropic `'on'` + a non-default `temperature` drops the temperature and retries once, `temperatureDropped: true`). The raw `thinking` option is separate; setting both throws. CLIPipe throws. `thinkingSupport(provider, model)` (from `bare-agent/providers`) reports what is known offline. See `src/thinking-mode.js`.
+
 OpenAI / Ollama also accept `{ exposeMalformedArgs: true }` — on a malformed tool-call JSON round, attach the FULL raw `function.arguments` string (verbatim, uncapped since 0.50.0) to `malformedToolCall.rawArguments`; off by default, independent of `exposeErrorBody`. `rawTruncated` is deprecated and never set.
 
 ```javascript

@@ -455,7 +455,7 @@ class Loop {
    *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
    *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean, thinkingApplied?: boolean|null}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -565,6 +565,10 @@ class Loop {
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
     let temperatureDropped = false;
+    // Normalized thinkingMode (src/thinking-mode.js): the run's `thinkingApplied` verdict — sticky-false
+    // (any round false ⇒ false), else the latest round's true/null; undefined ⇒ the provider reported none (thinkingMode unset) ⇒ key absent.
+    /** @type {boolean|null|undefined} */
+    let lastThinkingApplied;
     // BA-11: consecutive policy-deny counter (reset by any tool call that PASSES policy). When it reaches
     // this.maxConsecutiveDenials the run short-circuits cleanly — see the deny block below.
     let consecutiveDenials = 0;
@@ -597,7 +601,7 @@ class Loop {
         sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
         this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
         this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
       return null;
     };
@@ -844,7 +848,7 @@ class Loop {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
         // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -861,6 +865,11 @@ class Loop {
       lastMalformedToolCall = (result.malformedToolCall && typeof result.malformedToolCall === 'object')
         ? result.malformedToolCall : null;
       if (result.temperatureDropped) temperatureDropped = true;
+      // Sticky-false: once ANY round reports false (thinking happened despite 'off'), the run stays false;
+      // otherwise the latest round's true/null wins; a round without the field leaves it untouched.
+      if (result.thinkingApplied === true || result.thinkingApplied === false || result.thinkingApplied === null) {
+        if (lastThinkingApplied !== false) lastThinkingApplied = result.thinkingApplied;
+      }
       // Publish the latest measured usage to ctx (non-enumerable, fail-open) so a transcript-bound seam —
       // e.g. F2 stash auto-compaction — can read EXACT provider-counted `inputTokens` to gauge context
       // pressure on the NEXT round's trim. Symmetric with lending ctx.summarize; the Loop stays unaware of
@@ -944,7 +953,7 @@ class Loop {
         sealDanglingToolCalls(msgs, `[halted:${session.error}]`);
         this._reportError('session', new Error(`provider session terminated: ${session.error}`), { rule: session.error, sessionTurns: session.turns ?? null });
         this._safeEmit({ type: 'loop:done', data: { text: lastText, rule: session.error, sessionTurns: session.turns ?? null, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: session.error, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: session.error, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
 
       // BA-13: classify this round's terminal signal against the neutral stop-reason vocabulary. BA-6
@@ -1009,7 +1018,7 @@ class Loop {
           msgs.push({ role: 'assistant', content: result.text });
         }
         this._safeEmit({ type: 'loop:done', data: { text: lastText, ...(terminal === 'truncated' && { truncated: true }), terminal, stopReason: lastStopReason, droppedToolCalls: dropped, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: errorTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: errorTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
 
       // No tool calls — LLM gave a final text response
@@ -1029,7 +1038,7 @@ class Loop {
           try { await flush(msgs, ctx); }
           catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
         }
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
 
       // Execute tool calls
@@ -1138,7 +1147,7 @@ class Loop {
               sealDanglingToolCalls(msgs, `[halted:${denyTag}]`);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
               this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
-              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
             }
             continue;
           }
@@ -1212,7 +1221,7 @@ class Loop {
         // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
         // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
         this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
       }
       throw err;
     }
@@ -1242,20 +1251,20 @@ class Loop {
             const rule = err.rule || 'unknown';
             this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
             this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
           }
           this._reportError('trim-flush', err, { phase: 'stop' });
         }
       }
       this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
-      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: lastText, warning, cost: totalCost } });
-    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }) };
+    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...(lastThinkingApplied !== undefined && { thinkingApplied: lastThinkingApplied }) };
   }
 
   /**
@@ -1328,7 +1337,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean, thinkingApplied?: boolean|null}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });

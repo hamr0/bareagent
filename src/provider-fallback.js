@@ -15,6 +15,9 @@
  * NOTE: per-call `generate()` options (incl. `thinking`, `toolChoice`) are forwarded UNCHANGED to EVERY provider in the chain. For a
  * mixed-vendor chain (e.g. OpenAI-compat DeepSeek + Anthropic) set `thinking` on each provider's CONSTRUCTOR instead of per-call,
  * or a value shaped for one vendor lands in another's `body.thinking` on fallback.
+ * The normalized `thinkingMode: 'on'|'off'` is the exception: reaching every provider is CORRECT for it (each maps it to its own
+ * request shape); a provider that cannot honor it (CLIPipe, a measured non-switchable model) throws `ValidationError`, which the chain
+ * treats like any failure.
  */
 class FallbackProvider {
   /**

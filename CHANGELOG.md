@@ -2,6 +2,49 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.51.0] - 2026-10-11
+
+### Added
+
+- **Normalized `thinkingMode: 'on' | 'off'`** on `AnthropicProvider`, `OpenAIProvider` (incl. DeepSeek), `GeminiProvider`
+  and `OllamaProvider` — constructor option and per-call `generate(..., { thinkingMode })` (per-call overrides; `null`
+  suppresses an instance default). bare-agent sends the right per-provider/per-model request field; callers stop
+  hand-shaping `thinking` / `reasoning_effort` / `thinkingBudget` / `think`. Design rule: **try the known shapes, fail
+  loudly, check every reply.** New module `src/thinking-mode.js` (per-provider shape ladders, a table of MEASURED
+  per-model facts from `poc/thinking-mode-verify.mjs`, the signal readers); provider files only call into it.
+  - **Shapes (measured live).** Anthropic: off `thinking:{type:'disabled'}` (sonnet-5 still thinks if the field is
+    omitted), on `{type:'adaptive'}` (sonnet-5, opus-5-5) or `{type:'enabled',budget_tokens:N}` (haiku-4-5). OpenAI: off
+    `reasoning_effort:'none'` (gpt-5.1/5.2/5.4/5.4-mini/5.4-nano/5.5) or `'minimal'` (gpt-5, gpt-5-mini), on `'medium'`.
+    Gemini: off `generationConfig.thinkingConfig.thinkingBudget:0`, on `-1`. DeepSeek (OpenAIProvider, selected by
+    `deepseek-*` model id or a `deepseek.com` baseUrl): off `thinking:{type:'disabled'}`, on = field omitted. Ollama:
+    `think:false`/`true` (**NOT live-verified**).
+  - **Ladder.** The cached or table-known shape goes first; on a 400 whose error text NAMES the field (and not
+    `temperature`) the remaining shapes are tried once each; the shape that worked is cached per provider instance +
+    model. A 400 that does not name the field, or any non-400, is an ordinary error (no ladder). Every shape rejected ⇒
+    `ValidationError` "thinkingMode 'off' is not supported by <provider> model <m> (tried: …)". Measured
+    not-switchable models (`claude-opus-5-5` off, `gemini-3.1-pro-preview[-customtools]` off) throw BEFORE any request.
+    A rejected attempt is a 400 with no usage, so nothing is double-metered.
+  - **`GenerateResult.thinkingApplied: boolean|null`** (present only when `thinkingMode` is set; also on
+    `Loop.run()`'s return, **sticky-false**: once any round reports `false` the run reports `false`; otherwise the
+    latest round's `true`/`null`; key absent when no round carried it): `true` = accepted and, for `'off'`, zero thinking signal in the
+    reply; `false` = `'off'` was sent but the reply shows thinking (warns once per instance, result kept — never
+    throws); `null` = cannot tell. `'on'` is never flagged (adaptive models may choose not to think). "Absent ⇒ off"
+    only where measured (Gemini `thoughtsTokenCount`, DeepSeek `reasoning_content`, Ollama `message.thinking`);
+    Anthropic counts `thinking`/`redacted_thinking` blocks; OpenAI without `reasoning_tokens` ⇒ `null`.
+  - **Validation.** Any value but `'on'`/`'off'` ⇒ `ValidationError`; `thinkingMode` together with the raw `thinking`
+    option (after per-call override) ⇒ `ValidationError` (no silent precedence — the raw option is untouched);
+    DeepSeek `'on'` + a forced `toolChoice` ⇒ `ValidationError` before sending; `CLIPipeProvider` +
+    `thinkingMode` ⇒ `ValidationError` (loud, never ignored). Unset ⇒ request body byte-identical to before.
+  - **Anthropic `'on'` + `temperature`.** With thinking enabled (e.g. haiku-4-5's `{type:'enabled'}`) the API rejects a
+    non-default `temperature`. Thinking wins: a 400 whose text names BOTH `temperature` and `thinking` (only when a
+    `thinkingMode:'on'` shape is being sent) reuses the BA-10 path — temperature dropped, retried once, receipt
+    `temperatureDropped: true`, `thinkingApplied: true`; not counted as a shape rejection. Wording live-confirmed 2026-10-11
+    (`poc/thinking-mode-shipped.mjs`: haiku-4-5 and sonnet-5 both matched and retried). `'off'`/unset unchanged.
+  - **`FallbackProvider`:** per-call `thinkingMode` reaches every provider in the chain — correct for a normalized
+    field; a provider that cannot honor it throws `ValidationError` and the chain falls through like any failure.
+  - **`thinkingSupport(provider, model)`** exported from `bare-agent/providers` (pure, no network):
+    `{ switchable: true|false|'unverified', off, on, note }`; also manifested in `primitives.json`.
+
 ## [0.50.0] - 2026-10-11
 
 ### Changed

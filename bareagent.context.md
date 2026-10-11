@@ -513,6 +513,14 @@ new OpenAIProvider({ baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash
 
 > **Fallback caveat:** per-call options (incl. `thinking`) are forwarded to EVERY provider in a `FallbackProvider` chain. For a mixed-vendor chain set `thinking` on each provider's constructor, not per-call.
 
+**Normalized `thinkingMode: 'on' | 'off'`.** Say "on"/"off"; bare-agent sends the right field for the provider/model (`AnthropicProvider`, `OpenAIProvider` incl. DeepSeek, `GeminiProvider`, `OllamaProvider`): constructor option, overridable per call (`generate(..., { thinkingMode })` / `loop.run(msgs, tools, { thinkingMode })`), `null` suppresses. It is a NEW field — the raw `thinking` option above is untouched, and setting both is a `ValidationError`. It tries the known request shapes (a 400 naming the field walks the ladder; the winner is cached), throws a `ValidationError` naming what it tried if every shape is rejected, and throws before sending when the model is measured as not switchable (`claude-opus-5-5` off, `gemini-3.1-pro-preview` off). Every reply is checked: `result.thinkingApplied` is `true` (accepted; for `'off'`, zero thinking seen), `false` (`'off'` sent but the model thought anyway — warns once, the result is kept), or `null` (cannot tell; e.g. OpenAI without `reasoning_tokens`). On `loop.run()` it is sticky-false: any round `false` ⇒ the run is `false`. Anthropic `'on'` + a non-default `temperature` (the API rejects it with thinking enabled): the temperature is dropped and retried once, `temperatureDropped: true`. `'on'` is never flagged (adaptive models may skip thinking). `thinkingSupport(provider, model)` from `bare-agent/providers` tells you, offline, what is known. DeepSeek `'on'` + a forced `toolChoice` is a `ValidationError`; CLIPipe has no mechanism and throws. Ollama's `think` is not live-verified.
+
+```js
+const p = new AnthropicProvider({ apiKey, model: 'claude-sonnet-5', thinkingMode: 'off' });
+const r = await p.generate(msgs, [], {});            // r.thinkingApplied === true
+await p.generate(msgs, [], { thinkingMode: 'on' });  // per-call override
+```
+
 > **Honesty note, and we mean it.** This is a **protocol/data-loss fix, not a capability fix.** A head-to-head with thinking fully preserved vs. stock bare-agent produced **indistinguishable** outcomes. Do not adopt 0.27 expecting better reasoning — you will not get it, and we have the measurement.
 
 Legacy `wrapTool` / `wrapTools` are retained as deprecation shims (one-shot console warning, removal in 1.0). Migration: replace `wrapTools(tools)` at `loop.run()` with `filterTools(tools)` once upfront + `onLlmResult` / `onToolResult` on `new Loop({...})` to pick up LLM-cost recording and `_ctx` threading.

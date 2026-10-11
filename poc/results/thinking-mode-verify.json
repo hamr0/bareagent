@@ -1,0 +1,1594 @@
+{
+  "when": "2026-10-11T09:10:33.402Z",
+  "reps": 3,
+  "providers": {
+    "anthropic": {
+      "status": "ran",
+      "models": {
+        "claude-sonnet-5": {
+          "shapes": [
+            {
+              "name": "OFF thinking:{type:'disabled'}",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=480"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=497"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=500"
+                }
+              ]
+            },
+            {
+              "name": "OFF omit thinking",
+              "role": "off",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=435"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=407"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=397"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{type:'adaptive'}",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=456"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=438"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=433"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{enabled,budget 2048}",
+              "role": "on",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinking:{type:'disabled'}; ON via: ON thinking:{type:'adaptive'}"
+        },
+        "claude-haiku-4-5": {
+          "shapes": [
+            {
+              "name": "OFF thinking:{type:'disabled'}",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=303"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=329"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=276"
+                }
+              ]
+            },
+            {
+              "name": "OFF omit thinking",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=374"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=322"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "out_tok=281"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{type:'adaptive'}",
+              "role": "on",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "adaptive thinking is not supported on this model"
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "adaptive thinking is not supported on this model"
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "adaptive thinking is not supported on this model"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{enabled,budget 2048}",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=552"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=475"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=574"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinking:{type:'disabled'} | OFF omit thinking; ON via: ON thinking:{enabled,budget 2048}"
+        },
+        "claude-opus-5-5": {
+          "shapes": [
+            {
+              "name": "OFF thinking:{type:'disabled'}",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                }
+              ]
+            },
+            {
+              "name": "OFF omit thinking",
+              "role": "off",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=376"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=382"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=396"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{type:'adaptive'}",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=394"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=478"
+                },
+                {
+                  "http": 200,
+                  "signal": 1,
+                  "extra": "out_tok=343"
+                }
+              ]
+            },
+            {
+              "name": "ON thinking:{enabled,budget 2048}",
+              "role": "on",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."
+                }
+              ]
+            }
+          ],
+          "verdict": "NOT-SWITCHABLE",
+          "why": "no OFF shape reached 0 on all reps: OFF thinking:{type:'disabled'}=rejected; OFF omit thinking=thinks"
+        }
+      }
+    },
+    "openai": {
+      "status": "ran",
+      "models": {
+        "gpt-5": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=172"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=203"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=193"
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 832,
+                  "extra": "compl_tok=968"
+                },
+                {
+                  "http": 200,
+                  "signal": 448,
+                  "extra": "compl_tok=650"
+                },
+                {
+                  "http": 200,
+                  "signal": 704,
+                  "extra": "compl_tok=859"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'minimal'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5-mini": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'none' with this model. Supported values are: 'minimal', 'low', 'medium', and 'high'."
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=212"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=205"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=153"
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 384,
+                  "extra": "compl_tok=516"
+                },
+                {
+                  "http": 200,
+                  "signal": 384,
+                  "extra": "compl_tok=541"
+                },
+                {
+                  "http": 200,
+                  "signal": 384,
+                  "extra": "compl_tok=567"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'minimal'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.1": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=282"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=258"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=274"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', and 'high'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', and 'high'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 175,
+                  "extra": "compl_tok=471"
+                },
+                {
+                  "http": 200,
+                  "signal": 223,
+                  "extra": "compl_tok=558"
+                },
+                {
+                  "http": 200,
+                  "signal": 197,
+                  "extra": "compl_tok=245"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.2": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=215"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=258"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=193"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 89,
+                  "extra": "compl_tok=332"
+                },
+                {
+                  "http": 200,
+                  "signal": 96,
+                  "extra": "compl_tok=316"
+                },
+                {
+                  "http": 200,
+                  "signal": 89,
+                  "extra": "compl_tok=323"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.4": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=207"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=174"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=186"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 28,
+                  "extra": "compl_tok=308"
+                },
+                {
+                  "http": 200,
+                  "signal": 127,
+                  "extra": "compl_tok=359"
+                },
+                {
+                  "http": 200,
+                  "signal": 134,
+                  "extra": "compl_tok=308"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.4-mini": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=130"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=202"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=198"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 143,
+                  "extra": "compl_tok=329"
+                },
+                {
+                  "http": 200,
+                  "signal": 198,
+                  "extra": "compl_tok=367"
+                },
+                {
+                  "http": 200,
+                  "signal": 171,
+                  "extra": "compl_tok=348"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.4-nano": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=293"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=316"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=299"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 143,
+                  "extra": "compl_tok=444"
+                },
+                {
+                  "http": 200,
+                  "signal": 179,
+                  "extra": "compl_tok=481"
+                },
+                {
+                  "http": 200,
+                  "signal": 142,
+                  "extra": "compl_tok=461"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        },
+        "gpt-5.5": {
+          "shapes": [
+            {
+              "name": "OFF reasoning_effort:'none'",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=179"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=122"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "compl_tok=154"
+                }
+              ]
+            },
+            {
+              "name": "OFF reasoning_effort:'minimal'",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Unsupported value: 'reasoning_effort' does not support 'minimal' with this model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+                }
+              ]
+            },
+            {
+              "name": "ON reasoning_effort:'medium'",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 88,
+                  "extra": "compl_tok=266"
+                },
+                {
+                  "http": 200,
+                  "signal": 109,
+                  "extra": "compl_tok=239"
+                },
+                {
+                  "http": 200,
+                  "signal": 96,
+                  "extra": "compl_tok=202"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF reasoning_effort:'none'; ON via: ON reasoning_effort:'medium'"
+        }
+      }
+    },
+    "gemini": {
+      "status": "ran",
+      "models": {
+        "gemini-2.5-flash": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 922,
+                  "extra": "thoughts=922"
+                },
+                {
+                  "http": 200,
+                  "signal": 1386,
+                  "extra": "thoughts=1386"
+                },
+                {
+                  "http": 200,
+                  "signal": 1436,
+                  "extra": "thoughts=1436"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinkingBudget:0; ON via: ON thinkingBudget:-1 (dynamic)"
+        },
+        "gemini-2.5-pro": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "model-not-found",
+              "reps": [
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                },
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                },
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "model-not-found",
+              "reps": [
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                },
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                },
+                {
+                  "http": 404,
+                  "signal": null,
+                  "extra": "",
+                  "err": "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started)."
+                }
+              ]
+            }
+          ],
+          "verdict": "MODEL-NOT-FOUND",
+          "why": "API returned 404 for this id"
+        },
+        "gemini-3-flash-preview": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 570,
+                  "extra": "thoughts=570"
+                },
+                {
+                  "http": 200,
+                  "signal": 619,
+                  "extra": "thoughts=619"
+                },
+                {
+                  "http": 200,
+                  "signal": 641,
+                  "extra": "thoughts=641"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1439,
+                  "extra": "thoughts=1439"
+                },
+                {
+                  "http": 200,
+                  "signal": 719,
+                  "extra": "thoughts=719"
+                },
+                {
+                  "http": 200,
+                  "signal": 635,
+                  "extra": "thoughts=635"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinkingBudget:0; ON via: ON thinkingBudget:-1 (dynamic)"
+        },
+        "gemini-3.1-flash-lite": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 142,
+                  "extra": "thoughts=142"
+                },
+                {
+                  "http": 200,
+                  "signal": 124,
+                  "extra": "thoughts=124"
+                },
+                {
+                  "http": 200,
+                  "signal": 120,
+                  "extra": "thoughts=120"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1326,
+                  "extra": "thoughts=1326"
+                },
+                {
+                  "http": 200,
+                  "signal": 1403,
+                  "extra": "thoughts=1403"
+                },
+                {
+                  "http": 200,
+                  "signal": 1288,
+                  "extra": "thoughts=1288"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinkingBudget:0; ON via: ON thinkingBudget:-1 (dynamic)"
+        },
+        "gemini-3.1-flash-lite-preview": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 122,
+                  "extra": "thoughts=122"
+                },
+                {
+                  "http": 200,
+                  "signal": 137,
+                  "extra": "thoughts=137"
+                },
+                {
+                  "http": 200,
+                  "signal": 127,
+                  "extra": "thoughts=127"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1437,
+                  "extra": "thoughts=1437"
+                },
+                {
+                  "http": 200,
+                  "signal": 1438,
+                  "extra": "thoughts=1438"
+                },
+                {
+                  "http": 200,
+                  "signal": 1273,
+                  "extra": "thoughts=1273"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinkingBudget:0; ON via: ON thinkingBudget:-1 (dynamic)"
+        },
+        "gemini-3.1-pro-preview": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 470,
+                  "extra": "thoughts=470"
+                },
+                {
+                  "http": 200,
+                  "signal": 433,
+                  "extra": "thoughts=433"
+                },
+                {
+                  "http": 200,
+                  "signal": 487,
+                  "extra": "thoughts=487"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1065,
+                  "extra": "thoughts=1065"
+                },
+                {
+                  "http": 200,
+                  "signal": 1148,
+                  "extra": "thoughts=1148"
+                },
+                {
+                  "http": 200,
+                  "signal": 1438,
+                  "extra": "thoughts=1438"
+                }
+              ]
+            }
+          ],
+          "verdict": "NOT-SWITCHABLE",
+          "why": "no OFF shape reached 0 on all reps: OFF thinkingBudget:0=rejected; lowest-only available: LOWEST thinkingLevel:'low' (gemini-3* only)=thinks"
+        },
+        "gemini-3.1-pro-preview-customtools": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "rejected",
+              "reps": [
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                },
+                {
+                  "http": 400,
+                  "signal": null,
+                  "extra": "",
+                  "err": "Budget 0 is invalid. This model only works in thinking mode."
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 490,
+                  "extra": "thoughts=490"
+                },
+                {
+                  "http": 200,
+                  "signal": 442,
+                  "extra": "thoughts=442"
+                },
+                {
+                  "http": 200,
+                  "signal": 640,
+                  "extra": "thoughts=640"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 826,
+                  "extra": "thoughts=826"
+                },
+                {
+                  "http": 200,
+                  "signal": 1439,
+                  "extra": "thoughts=1439"
+                },
+                {
+                  "http": 200,
+                  "signal": 1179,
+                  "extra": "thoughts=1179"
+                }
+              ]
+            }
+          ],
+          "verdict": "NOT-SWITCHABLE",
+          "why": "no OFF shape reached 0 on all reps: OFF thinkingBudget:0=rejected; lowest-only available: LOWEST thinkingLevel:'low' (gemini-3* only)=thinks"
+        },
+        "gemini-3.5-flash": {
+          "shapes": [
+            {
+              "name": "OFF thinkingBudget:0",
+              "role": "off",
+              "cls": "off",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                },
+                {
+                  "http": 200,
+                  "signal": 0,
+                  "extra": "thoughts=absent(derived)"
+                }
+              ]
+            },
+            {
+              "name": "LOWEST thinkingLevel:'low' (gemini-3* only)",
+              "role": "lowest",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 418,
+                  "extra": "thoughts=418"
+                },
+                {
+                  "http": 200,
+                  "signal": 415,
+                  "extra": "thoughts=415"
+                },
+                {
+                  "http": 200,
+                  "signal": 506,
+                  "extra": "thoughts=506"
+                }
+              ]
+            },
+            {
+              "name": "ON thinkingBudget:-1 (dynamic)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1089,
+                  "extra": "thoughts=1089"
+                },
+                {
+                  "http": 200,
+                  "signal": 1437,
+                  "extra": "thoughts=1437"
+                },
+                {
+                  "http": 200,
+                  "signal": 1044,
+                  "extra": "thoughts=1044"
+                }
+              ]
+            }
+          ],
+          "verdict": "SWITCHABLE",
+          "why": "OFF via: OFF thinkingBudget:0; ON via: ON thinkingBudget:-1 (dynamic)"
+        }
+      }
+    },
+    "deepseek": {
+      "status": "ran",
+      "models": {
+        "deepseek-flash": {
+          "shapes": [
+            {
+              "name": "OFF thinking:{type:'disabled'}",
+              "role": "off",
+              "cls": "no-signal",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                },
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                },
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                }
+              ]
+            },
+            {
+              "name": "ON omit thinking (default)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1013,
+                  "extra": "rc_len=1013"
+                },
+                {
+                  "http": 200,
+                  "signal": 908,
+                  "extra": "rc_len=908"
+                },
+                {
+                  "http": 200,
+                  "signal": 972,
+                  "extra": "rc_len=972"
+                }
+              ]
+            }
+          ],
+          "verdict": "NOT-SWITCHABLE",
+          "why": "no OFF shape reached 0 on all reps: OFF thinking:{type:'disabled'}=no-signal (some OFF shapes had NO signal field -- unproven, not off)"
+        },
+        "deepseek-v4-pro": {
+          "shapes": [
+            {
+              "name": "OFF thinking:{type:'disabled'}",
+              "role": "off",
+              "cls": "no-signal",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                },
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                },
+                {
+                  "http": 200,
+                  "signal": null,
+                  "extra": "rc_len=absent"
+                }
+              ]
+            },
+            {
+              "name": "ON omit thinking (default)",
+              "role": "on",
+              "cls": "thinks",
+              "reps": [
+                {
+                  "http": 200,
+                  "signal": 1973,
+                  "extra": "rc_len=1973"
+                },
+                {
+                  "http": 200,
+                  "signal": 1960,
+                  "extra": "rc_len=1960"
+                },
+                {
+                  "http": 200,
+                  "signal": 1557,
+                  "extra": "rc_len=1557"
+                }
+              ]
+            }
+          ],
+          "verdict": "NOT-SWITCHABLE",
+          "why": "no OFF shape reached 0 on all reps: OFF thinking:{type:'disabled'}=no-signal (some OFF shapes had NO signal field -- unproven, not off)"
+        }
+      },
+      "toolChoiceConflict": {
+        "deepseek-flash": {
+          "on": {
+            "http": 400,
+            "toolCalled": false,
+            "err": "Thinking mode does not support this tool_choice (request_id: e5189e14-0428-49c8-ab48-f0348284037e)"
+          },
+          "off": {
+            "http": 200,
+            "toolCalled": true
+          },
+          "conflictConfirmed": true
+        },
+        "deepseek-v4-pro": {
+          "on": {
+            "http": 400,
+            "toolCalled": false,
+            "err": "Thinking mode does not support this tool_choice (request_id: be3351e5-4bb2-453b-bf48-7f6485a66c48)"
+          },
+          "off": {
+            "http": 200,
+            "toolCalled": true
+          },
+          "conflictConfirmed": true
+        }
+      }
+    },
+    "ollama": {
+      "status": "skipped",
+      "reason": "unreachable http://localhost:11434"
+    }
+  }
+}

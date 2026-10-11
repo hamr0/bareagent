@@ -7,6 +7,7 @@ const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
 const { hasUsageSignal } = require('./provider-usage');
+const { normalizeThinkingMode, resolveThinkingMode, requestWithThinkingMode, assessThinkingApplied } = require('./thinking-mode');
 
 // BA-24: raw Gemini usageMetadata fields. Any present (even 0) ⇒ a usage signal; none ⇒ null.
 const GEMINI_USAGE_KEYS = ['promptTokenCount', 'candidatesTokenCount', 'thoughtsTokenCount', 'cachedContentTokenCount'];
@@ -27,6 +28,8 @@ function isLoopbackHost(hostname) {
  * @property {string} [apiKey] - Google AI Studio (Gemini) API key.
  * @property {string} [model='gemini-2.5-flash'] - Model ID.
  * @property {string} [baseUrl='https://generativelanguage.googleapis.com/v1beta'] - API base (override for proxies; posts to `${baseUrl}/models/${model}:generateContent`).
+ * @property {'on'|'off'|null} [thinkingMode] - Normalized thinking switch: `'on'` or `'off'`, and bare-agent sends the right `generationConfig.thinkingConfig.thinkingBudget` request field for the provider/model, retries the known alternative shapes if the API rejects the field by name, and THROWS a `ValidationError` (naming what it tried) if every shape is rejected — or before any request when the model is measured as not switchable. Every reply is checked: `GenerateResult.thinkingApplied` is `true`/`false`/`null` (`false` = 'off' was sent but the reply shows thinking happened — warns once per instance, result kept). Unset ⇒ request body byte-identical to before. Overridable per call via `generate(..., { thinkingMode })`; `null` suppresses an instance default. Any value but 'on'/'off' ⇒ `ValidationError`. A NEW field: it does not change the raw `thinking` option; setting both (after per-call override) ⇒ `ValidationError`. See `src/thinking-mode.js` / `thinkingSupport()`.
+ *   Per-call `thinkingMode` reaches EVERY provider in a `FallbackProvider` chain — correct for a normalized field (each provider maps it to its own shape; one that cannot — CLIPipe, a non-switchable model — throws `ValidationError`, which the chain treats like any failure and falls through).
  * @property {boolean} [exposeErrorBody=false] - Attach the full upstream response to `err.body` on HTTP errors (off by default; `err.message` still carries the API error).
  * @property {number} [timeoutMs=600000] - BA-18: request/idle timeout in ms. Bounds a silent or never-answering socket on inactivity so `generate()` rejects with a retryable `TimeoutError` (`code: 'ETIMEDOUT'`, `context.bound: 'idle'`) instead of hanging until the OS TCP timeout (~2h). `0`/`Infinity` disables it (pre-BA-18 behaviour). Overridable per call via `generate(..., { timeoutMs })`.
  * @property {number} [deadlineMs=0] - BA-19: TOTAL call-duration deadline in ms, beside `timeoutMs`. The idle bound resets on any socket activity, so a response that trickles a byte forever never trips it and hangs for hours. This is an absolute, non-resetting ceiling; on trip, `generate()` rejects with a TERMINAL `TimeoutError` (`code: 'EDEADLINE'`, `context.bound: 'deadline'`, `retryable: false`). DISABLED by default; `0`/`Infinity` disable. Overridable per call via `generate(..., { deadlineMs })`.
@@ -52,6 +55,10 @@ class GeminiProvider {
     this.model = options.model || 'gemini-2.5-flash';
     this.baseUrl = options.baseUrl || 'https://generativelanguage.googleapis.com/v1beta';
     this.exposeErrorBody = options.exposeErrorBody === true;
+    // Normalized on/off switch (src/thinking-mode.js). Gemini has no raw `thinking` option to conflict with.
+    this.thinkingMode = normalizeThinkingMode(options.thinkingMode, 'GeminiProvider');
+    /** @type {Map<string, string>} shape that worked per mode+model (no re-probing) */
+    this._thinkingShapes = new Map();
     // BA-18: request/idle timeout (ms). Resolved at call time (default 600000; 0/Infinity disable).
     this.timeoutMs = options.timeoutMs;
     // BA-19: total call-duration deadline (ms). Resolved at call time (default 0 = disabled).
@@ -62,7 +69,7 @@ class GeminiProvider {
    * Generate a response from the Gemini API.
    * @param {Message[]} messages - Conversation messages (OpenAI format, auto-converted).
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
-   * @param {Record<string, any>} [options={}] - Options (temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19).
+   * @param {Record<string, any>} [options={}] - Options (thinkingMode — per-call override of the constructor's, `null` suppresses; temperature, maxTokens, timeoutMs — a per-call override of the constructor's `timeoutMs`, see BA-18; deadlineMs — a per-call override of the constructor's `deadlineMs`, see BA-19).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[GeminiProvider] ...` — on HTTP errors (4xx/5xx) or invalid JSON response.
    */
@@ -124,10 +131,13 @@ class GeminiProvider {
 
     // BA-10: graceful degrade if a model rejects a non-default `temperature` (Gemini nests it under
     // generationConfig). Keyed off the API error text, so dormant on models that accept temperature.
+    const thinkingMode = resolveThinkingMode({ label: 'GeminiProvider', instanceMode: this.thinkingMode, options });
     const timeoutMs = resolveTimeoutMs(this.timeoutMs, options.timeoutMs);
     const deadlineMs = resolveTimeoutMs(this.deadlineMs, options.deadlineMs, 0, 'deadlineMs');
     const { data, temperatureDropped } = await requestWithTemperatureFallback({
-      request: () => this._request(`/models/${this.model}:generateContent`, body, timeoutMs, deadlineMs),
+      request: () => thinkingMode
+        ? requestWithThinkingMode({ kind: 'gemini', mode: thinkingMode, model: this.model, label: 'GeminiProvider', body, cache: this._thinkingShapes, request: (b) => this._request(`/models/${this.model}:generateContent`, b, timeoutMs, deadlineMs) })
+        : this._request(`/models/${this.model}:generateContent`, body, timeoutMs, deadlineMs),
       hadTemperature: () => body.generationConfig?.temperature != null,
       stripTemperature: () => { if (body.generationConfig) delete body.generationConfig.temperature; },
       warnOnce: () => this._warnTemperatureDropped(),
@@ -161,6 +171,7 @@ class GeminiProvider {
       stopReason: normalizeStopReason(data.candidates?.[0]?.finishReason, 'gemini', { hasToolCalls: toolCalls.length > 0 }),
       usage: this._normalizeUsage(data.usageMetadata),
       ...(temperatureDropped && { temperatureDropped: true }),
+      ...(thinkingMode && { thinkingApplied: assessThinkingApplied({ kind: 'gemini', mode: thinkingMode, data, owner: this, label: 'GeminiProvider', model: this.model }) }),
     };
   }
 
