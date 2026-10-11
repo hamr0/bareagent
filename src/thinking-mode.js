@@ -240,9 +240,10 @@ async function requestWithThinkingMode({ kind, mode, model, body, request, cache
   const preferredKey = cached || (facts && facts[mode]) || null;
   const ordered = [...ladder].sort((a, b) => (a.key === preferredKey ? -1 : b.key === preferredKey ? 1 : 0));
 
+  let skipped = false;
   for (const s of ordered) {
     const patched = s.apply(body);
-    if (patched === null) continue; // shape cannot apply to this body (e.g. max_tokens too small)
+    if (patched === null) { skipped = true; continue; } // shape cannot apply to this body (e.g. max_tokens too small)
     try {
       const data = await request(patched);
       cache.set(cacheKey, s.key);
@@ -251,8 +252,9 @@ async function requestWithThinkingMode({ kind, mode, model, body, request, cache
       if (!isShapeRejection(kind, err)) throw err;
     }
   }
-  // Every shape rejected: the call still runs, plain, and the result says unsupported.
-  cache.set(cacheKey, UNSUPPORTED);
+  // Every shape rejected: the call still runs, plain, and the result says unsupported. Cached ONLY if
+  // every shape was actually sent and rejected — a body-dependent skip says nothing about the model.
+  if (!skipped) cache.set(cacheKey, UNSUPPORTED);
   track.unsupported = true;
   return request(body);
 }

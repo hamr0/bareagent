@@ -11,6 +11,13 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   request path uses (no copied regex; `isDeepSeek` stays unexported). Lets apps resolve support from wire shape + model +
   baseUrl before any provider instance exists. No `opts` ⇒ unchanged. A non-object `opts` (incl. `null`) throws a
   `ValidationError` naming the type only. A test pins the lookup's off shape against what `OpenAIProvider({model, baseUrl})` sends.
+- **`GenerateResult.thinkingStatus: 'applied'|'unsupported'|'ignored'|'unknown'`** (present only when `thinkingMode` is set;
+  unset ⇒ body and result byte-identical to before). `applied` = a shape was accepted and, for `'off'`, the reply shows no
+  thinking; `unsupported` = the call ran without our field; `ignored` = `'off'` accepted but the reply shows thinking
+  anyway; `unknown` = accepted, signal unreadable. `thinkingApplied` is kept and DERIVED (applied⇒`true`,
+  ignored/unsupported⇒`false`, unknown⇒`null`). `Loop.run()` surfaces the WORST status across rounds (ignored >
+  unsupported > unknown > applied; absent if no round carried it) and derives its `thinkingApplied` from it (so
+  `[applied, unknown]` is now `unknown`/`null` in either order; `false`-sticky is unchanged).
 
 ### Changed
 
@@ -30,16 +37,6 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   set together at the same level.
 - **`FallbackProvider`:** a not-switchable member no longer throws, so the chain no longer falls through on it — the first
   member just runs and reports `'unsupported'`.
-
-### Added
-
-- **`GenerateResult.thinkingStatus: 'applied'|'unsupported'|'ignored'|'unknown'`** (present only when `thinkingMode` is set;
-  unset ⇒ body and result byte-identical to before). `applied` = a shape was accepted and, for `'off'`, the reply shows no
-  thinking; `unsupported` = the call ran without our field; `ignored` = `'off'` accepted but the reply shows thinking
-  anyway; `unknown` = accepted, signal unreadable. `thinkingApplied` is kept and DERIVED (applied⇒`true`,
-  ignored/unsupported⇒`false`, unknown⇒`null`). `Loop.run()` surfaces the WORST status across rounds (ignored >
-  unsupported > unknown > applied; absent if no round carried it) and derives its `thinkingApplied` from it (so
-  `[applied, unknown]` is now `unknown`/`null` in either order; `false`-sticky is unchanged).
 
 ### Fixed
 

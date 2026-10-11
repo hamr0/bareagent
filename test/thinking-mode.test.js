@@ -296,6 +296,18 @@ describe('thinkingMode: ladder (try all shapes; if none works the call still run
       assert.equal(r.thinkingStatus, 'unsupported');
     });
   });
+  it('a body-dependent skip does NOT poison the cache: small max_tokens ⇒ unsupported for THIS call only; a later roomy call sends enabled and is applied', async () => {
+    await withServer([P.anthropic.reject('thinking.type.adaptive'), anthropicOk(), anthropicOk(true)], async (s) => {
+      const p = P.anthropic.make(s, { model: 'claude-haiku-4-5' });
+      const { value: r1 } = await captureWarn(() => p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 1000 }));
+      assert.equal(r1.thinkingStatus, 'unsupported');
+      assert.equal(s.state.bodies.length, 2, 'adaptive (rejected) + plain; enabled never sent');
+      const { value: r2 } = await captureWarn(() => p.generate(MSGS, [], { thinkingMode: 'on', maxTokens: 4096 }));
+      assert.equal(s.state.bodies.length, 3);
+      assert.equal(s.state.bodies[2].thinking.type, 'enabled');
+      assert.equal(r2.thinkingStatus, 'applied');
+    });
+  });
   it('a 400 that does NOT name the field is an ordinary error — no ladder', async () => {
     await withServer([err400('messages: text content blocks must be non-empty')], async (s) => {
       await assert.rejects(P.anthropic.make(s, { model: 'claude-future-1' }).generate(MSGS, [], { thinkingMode: 'on' }),

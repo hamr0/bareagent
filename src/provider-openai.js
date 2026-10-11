@@ -2,7 +2,7 @@
 
 const https = require('https');
 const http = require('http');
-const { ProviderError, ValidationError } = require('./errors');
+const { ProviderError } = require('./errors');
 const { requestWithTemperatureFallback } = require('./provider-temperature');
 const { normalizeStopReason } = require('./provider-stop-reason');
 const { resolveTimeoutMs, applyRequestBounds, guardResponseSettles } = require('./provider-http');
