@@ -7,6 +7,7 @@ const { OllamaProvider } = require('./provider-ollama');
 const { CLIPipeProvider } = require('./provider-clipipe');
 const { FallbackProvider } = require('./provider-fallback');
 const { JevProvider } = require('./provider-jev');
+const { thinkingSupport } = require('./thinking-mode');
 
 module.exports = {
   // Short names (canonical — used throughout docs and the integration guide)
@@ -26,4 +27,6 @@ module.exports = {
   CLIPipeProvider,
   FallbackProvider,
   JevProvider,
+  // Pure lookup (no network): what bare-agent knows about switching a model's thinking on/off.
+  thinkingSupport,
 };

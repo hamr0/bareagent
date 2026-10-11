@@ -1,7 +1,7 @@
 'use strict';
 
 const { spawn } = require('child_process');
-const { ProviderError, HaltError } = require('./errors');
+const { ProviderError, HaltError, ValidationError } = require('./errors');
 const { buildToolSystemPrompt, renderTranscript, resolveToolProtocol, mapClaudeMeta } = require('./provider-clipipe-tools');
 const { createBridge, resolveSessionError, runSession } = require('./provider-clipipe-mcp');
 
@@ -21,6 +21,7 @@ const { createBridge, resolveSessionError, runSession } = require('./provider-cl
  * @property {string[]} [args=[]] - Arguments to pass to the command.
  * @property {string} [cwd] - Working directory for the child process.
  * @property {Record<string, string>} [env] - Environment variables for the child process.
+ * @property {any} [thinkingMode] - NOT supported: any non-null value throws `ValidationError` (CLIPipe has no thinking switch). Declared so the loud failure is typed, not silent.
  * @property {number} [timeout=30000] - Timeout in milliseconds.
  * @property {string} [systemPromptFlag] - CLI flag for system prompt (e.g. '--system'). When set, system messages are extracted and passed via this flag instead of stdin.
  * @property {(chunk: string) => void} [onChunk] - Called with each stdout chunk as it streams.
@@ -107,6 +108,10 @@ function subtractUsage(total, streamed) {
   return out;
 }
 
+const CLIPIPE_NO_THINKING_MODE = () => new ValidationError(
+  '[CLIPipeProvider] thinkingMode is not supported — a CLI subprocess has no thinking switch bare-agent can set. Remove thinkingMode (see thinkingSupport(\'clipipe\')).',
+  { context: { lib: 'bare-agent', provider: 'clipipe' } });
+
 class CLIPipeProvider {
   /**
    * Provider that pipes prompts to a CLI command via stdin and reads stdout.
@@ -119,6 +124,8 @@ class CLIPipeProvider {
    */
   constructor(options = {}) {
     if (!options.command) throw new Error('[CLIPipeProvider] requires command');
+    // thinkingMode has NO mechanism here — loud, never silently ignored.
+    if (options.thinkingMode != null) throw CLIPIPE_NO_THINKING_MODE();
     this.command = options.command;
     this.args = options.args || [];
     this.cwd = options.cwd || undefined;
@@ -177,7 +184,7 @@ class CLIPipeProvider {
    * failure for a genuinely tool-incapable model lives in the tool-mode capability probe.
    * @param {Message[]} messages - Conversation messages in OpenAI format.
    * @param {ToolDef[]} [tools=[]] - Caller tools. Honored only in tool mode (`toolProtocol` set).
-   * @param {Record<string, any>} [options={}] - Unused.
+   * @param {Record<string, any>} [options={}] - Unused, except `thinkingMode` (any non-null value throws `ValidationError`: CLIPipe has no thinking switch).
    * @returns {Promise<GenerateResult>}
    * @throws {Error} `[CLIPipeProvider] failed to spawn "cmd": ...` — when the command cannot be found or executed.
    * @throws {Error} `[CLIPipeProvider] process exited with code N: ...` — on non-zero exit.
@@ -185,6 +192,7 @@ class CLIPipeProvider {
    * @throws {Error} `[CLIPipeProvider] process produced no output` — when stdout is empty.
    */
   async generate(messages, tools = [], options = {}) {
+    if (options && options.thinkingMode != null) throw CLIPIPE_NO_THINKING_MODE();
     if (Array.isArray(tools) && tools.length > 0) {
       if (this.nativeTools) return this._generateWithMcp(messages, tools, options);
       if (this.toolProtocol) return this._generateWithTools(messages, tools);

@@ -135,6 +135,15 @@ export interface GenerateResult {
    */
   temperatureDropped?: boolean;
   /**
+   * Present ONLY when `thinkingMode` ('on'|'off') was set on the provider/call. The post-reply check:
+   * `true` — a shape was accepted and, for 'off', the reply shows zero thinking signal (for 'on' always
+   * `true` once accepted: an adaptive model may legitimately choose not to think); `false` — 'off' was
+   * requested but the reply shows thinking happened (the provider warns once; the round is paid and kept,
+   * never thrown); `null` — cannot tell (the reply's thinking signal is unreadable, e.g. OpenAI without
+   * `reasoning_tokens`). Surfaced on `Loop.run()`'s return for the terminating round.
+   */
+  thinkingApplied?: boolean | null;
+  /**
    * BA-27 — present ONLY when the model emitted a tool call whose `function.arguments` was
    * syntactically-broken JSON (an extra brace, a truncated object). The billed round already
    * succeeded, so rather than throw (which loses the round's usage and hangs metering), the provider
