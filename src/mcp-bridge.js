@@ -652,6 +652,7 @@ function validateAllow(allow) {
   const out = new Map();
   for (const [server, list] of entries) {
     if (!Array.isArray(list)) throw bad(`allow values must be arrays of tool names (got ${typeName(list)})`);
+    if (list.length === 0) throw bad('allow values must be non-empty arrays of tool names (got an empty array)');
     for (const t of list) {
       if (typeof t !== 'string' || t === '') {
         throw bad(`allow tool names must be non-empty strings (got ${t === '' ? 'empty string' : typeName(t)})`);
@@ -764,7 +765,7 @@ async function createAllowBridge(allow, o) {
  *   during default discovery. Off by default: a project config in an untrusted repo can auto-spawn
  *   arbitrary commands. Implied true when a `confirmServer` hook is present (it vets each command).
  * @param {Record<string, string[]>} [opts.allow] - Signed allow-list `{ [serverName]: rawMcpToolNames[] }`
- *   (raw MCP names, NOT the `server_tool` prefixed form). Switches to an IN-MEMORY mode: never reads or
+ *   (raw MCP names, NOT the `server_tool` prefixed form; each list must be non-empty). Switches to an IN-MEMORY mode: never reads or
  *   writes `.mcp-bridge.json` (no cache, no TTL; `bridgePath`/`refresh`/`servers` are ignored); server
  *   definitions come only from `discoverServers(configPaths)`; only servers named here are spawned (still
  *   vetted by `confirmServer`); each connects ONCE and exposes signed ∩ listed — every other tool is ABSENT

@@ -153,7 +153,7 @@ describe('createMCPBridge({ allow }) — signed in-memory allow-list', () => {
   it('validates allow with ValidationError naming the type only', async () => {
     const SECRET = 'sekrit-value';
     const cases = [
-      null, 'str', 42, [], {}, { mock: 'read_file' }, { mock: [1] }, { mock: [''] }, { mock: null },
+      null, 'str', 42, [], {}, { mock: [] }, { mock: 'read_file' }, { mock: [1] }, { mock: [''] }, { mock: null },
       { [SECRET]: SECRET }, { mock: [SECRET, {}] }, new Map(),
     ];
     for (const allow of cases) {

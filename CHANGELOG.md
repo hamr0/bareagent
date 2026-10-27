@@ -16,7 +16,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   throw). `denied` is always `[]`; `systemContext` has no "Restricted tools" section and no `.mcp-bridge.json` line (the model is
   never told other tools exist); nothing is written to stdout (stderr warnings unchanged). `mcp_invoke` on a name the server
   lists but `allow` excludes throws `ToolError` `mcp_invoke: "<name>" is not on this run's allowed list` with
-  `context: { denied: true, server, tool }`; a truly unknown name keeps the `unknown tool` error. A malformed `allow` throws
+  `context: { denied: true, server, tool }`; a truly unknown name keeps the `unknown tool` error. A malformed `allow` (incl. an empty tool list) throws
   `ValidationError` naming the type only. `buildMetaTools(tools, discoveredAt, excluded?)` gained the optional third arg.
   Without `allow` everything is byte-identical (no `missing` field).
 
