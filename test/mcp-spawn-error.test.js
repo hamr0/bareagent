@@ -114,6 +114,104 @@ describe('MCP spawn errors + handshake timeout context', () => {
     }
   });
 
+  describe('synchronous spawn() throw (empty command, NUL byte)', () => {
+    const cases = [
+      ['empty command', '', [SECRET], ''],
+      ['NUL in command', 'a\0b', [SECRET], 'a\\u0000b'],
+      ['NUL in an arg', 'node', ['x\0y', SECRET], 'node'],
+    ];
+    const label = (e, shown) => {
+      assert.ok(e instanceof ToolError, `expected ToolError, got ${e && e.constructor.name}: ${e && e.message}`);
+      const code = e.context.code;
+      assert.match(code, /^[A-Z_0-9]+$/);
+      assert.equal(e.message, `MCP server "s" failed to start: command "${shown}" (${code})`);
+      assert.deepEqual(e.context, { spawnError: true, server: 's', code });
+      assert.equal(e.message.includes(SECRET), false);
+      assert.equal(JSON.stringify(e.context).includes(SECRET), false);
+      assert.equal(/[\u0000-\u001f]/.test(e.message), false, 'no raw control characters in the message');
+    };
+    for (const [title, command, args, shown] of cases) {
+      it(`${title}: listServerTools`, async () => {
+        await assert.rejects(listServerTools({ server: 's', ...common(cfgFor(command, args)) }), (e) => { label(e, shown); return true; });
+      });
+      it(`${title}: allow mode`, async () => {
+        const b = await createMCPBridge({ ...common(cfgFor(command, args)), bridgePath: bp(), allow: { s: ['x'] } });
+        try {
+          assert.equal(b.errors.length, 1);
+          assert.match(b.errors[0].error, /^MCP server "s" failed to start: command ".*" \([A-Z_0-9]+\)$/);
+          assert.equal(b.errors[0].error.includes(SECRET), false);
+          assert.deepEqual(b.missing, [{ server: 's', tool: 'x' }]);
+        } finally { await b.close(); }
+      });
+      it(`${title}: bulk mode`, async () => {
+        const b = await createMCPBridge({ ...common(cfgFor(command, args)), bridgePath: bp() });
+        try {
+          assert.equal(b.errors.length, 1);
+          assert.match(b.errors[0].error, /^MCP server "s" failed to start: command ".*" \([A-Z_0-9]+\)$/);
+          assert.equal(b.errors[0].error.includes(SECRET), false);
+        } finally { await b.close(); }
+      });
+    }
+  });
+
+  describe('unvetted-spawn warning never prints args', () => {
+    async function captureWarn(fn) {
+      const lines = [];
+      const prev = console.warn;
+      console.warn = (...a) => { lines.push(a.map(String).join(' ')); };
+      try { await fn(); } finally { console.warn = prev; }
+      return lines.join('\n');
+    }
+    const cfg = () => cfgFor('no-such-cmd-zz', ['--token', 'SECRET-XYZ'], { TOK: 'ENV-SECRET-QQ' });
+    const noConfirm = (c) => ({ configPaths: [c], timeout: 3000 });
+    const check = (out) => {
+      assert.match(out, /spawning 1 server command/);
+      assert.match(out, /no-such-cmd-zz/);
+      assert.equal(out.includes('SECRET-XYZ'), false);
+      assert.equal(out.includes('--token'), false);
+      assert.equal(out.includes('ENV-SECRET-QQ'), false);
+    };
+    it('bulk', async () => {
+      let b; check(await captureWarn(async () => { b = await createMCPBridge({ ...noConfirm(cfg()), bridgePath: bp() }); }));
+      await b.close();
+    });
+    it('allow', async () => {
+      let b; check(await captureWarn(async () => { b = await createMCPBridge({ ...noConfirm(cfg()), bridgePath: bp(), allow: { s: ['x'] } }); }));
+      await b.close();
+    });
+    it('listServerTools', async () => {
+      check(await captureWarn(async () => { await listServerTools({ server: 's', ...noConfirm(cfg()) }).catch(() => {}); }));
+    });
+  });
+
+  describe('post-spawn child error does not mark a live server failed', () => {
+    it('emitting error on a LIVE child leaves rpc working and the host alive', async () => {
+      // createRpcClient is not exported: wrap child_process.spawn BEFORE loading a fresh copy of
+      // the module so the REAL client runs against the REAL mock server, and we capture its child.
+      const cp = require('node:child_process');
+      const realSpawn = cp.spawn;
+      const children = [];
+      cp.spawn = (...a) => { const c = realSpawn(...a); children.push(c); return c; };
+      const modPath = require.resolve('../src/mcp-bridge');
+      const saved = require.cache[modPath];
+      delete require.cache[modPath];
+      let fresh;
+      try { fresh = require('../src/mcp-bridge'); } finally {
+        cp.spawn = realSpawn;
+        delete require.cache[modPath];
+        if (saved) require.cache[modPath] = saved;
+      }
+      const b = await fresh.createMCPBridge({ ...common(cfgFor('node', [MOCK_SERVER])), bridgePath: bp() });
+      try {
+        assert.ok(children.length >= 1 && children.every(c => c.pid !== undefined), 'all spawned children are live');
+        assert.ok(b.tools.length > 0, 'live server connected');
+        for (const c of children) c.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' }));
+        const r = await b.tools.find(t => t.name === 's_read_file').execute({ path: '/x' });
+        assert.ok(r !== undefined, 'rpc after a post-spawn error still succeeds');
+      } finally { await b.close(); }
+    });
+  });
+
   describe('handshake timeout context', () => {
     function assertTimeout(e, method, timeoutMs) {
       assert.ok(e instanceof ToolError);

@@ -49,6 +49,40 @@ for (const [code, command] of cases) {
   r = check(b.errors.length === 1 && b.errors[0].error === want, `bulk shape ${JSON.stringify(b.errors)}`);
   await b.close(); rows.push([code, 'bulk', r]);
 }
+// Synchronous spawn() throws (empty command, NUL byte): no child 'error' event ever fires.
+const syncRe = /^MCP server "s" failed to start: command "(.*)" \(([A-Z_0-9]+)\)$/;
+for (const [label, command, shown] of [['empty', '', ''], ['NUL', 'a\0b', 'a\\u0000b']]) {
+  const cfg = join(dir, `sync-${label}.json`);
+  writeFileSync(cfg, JSON.stringify({ mcpServers: { s: { command, args: [SECRET] } } }));
+  const common = { configPaths: [cfg], confirmServer: () => true, timeout: 3000 };
+  const okErr = (m, c) => { const x = syncRe.exec(m); return !!x && x[1] === shown && x[2] === c && !m.includes(SECRET) && !/[\u0000-\u001f]/.test(m); };
+  let r;
+  try { await listServerTools({ server: 's', ...common }); r = check(false, `${label} list did not throw`); }
+  catch (e) { r = check(e.name === 'ToolError' && e.context && e.context.spawnError === true && okErr(e.message, e.context.code), `${label} list: ${e.name} ${JSON.stringify(e.message)}`); }
+  rows.push([label, 'list', r]);
+  const a = await createMCPBridge({ ...common, bridgePath: join(dir, `sa-${label}.json`), allow: { s: ['x'] } });
+  r = check(a.errors.length === 1 && okErr(a.errors[0].error, /\(([A-Z_0-9]+)\)$/.exec(a.errors[0].error)?.[1]) && a.missing.length === 1, `${label} allow ${JSON.stringify(a.errors)}`);
+  await a.close(); rows.push([label, 'allow', r]);
+  const b = await createMCPBridge({ ...common, bridgePath: join(dir, `sb-${label}.json`) });
+  r = check(b.errors.length === 1 && okErr(b.errors[0].error, /\(([A-Z_0-9]+)\)$/.exec(b.errors[0].error)?.[1]), `${label} bulk ${JSON.stringify(b.errors)}`);
+  await b.close(); rows.push([label, 'bulk', r]);
+}
+
+// Unvetted-spawn warning (no confirmServer) must name the command but never the args/env values.
+{
+  const cfg = join(dir, 'unvetted.json');
+  writeFileSync(cfg, JSON.stringify({ mcpServers: { s: { command: 'no-such-cmd-zz', args: ['--token', 'SECRET-XYZ'] } } }));
+  for (const mode of ['list', 'allow', 'bulk']) {
+    const lines = []; console.warn = (...x) => lines.push(x.map(String).join(' '));
+    const o = { configPaths: [cfg], timeout: 3000 };
+    try {
+      if (mode === 'list') await listServerTools({ server: 's', ...o }).catch(() => {});
+      else { const g = await createMCPBridge({ ...o, bridgePath: join(dir, `u-${mode}.json`), ...(mode === 'allow' && { allow: { s: ['x'] } }) }); await g.close(); }
+    } finally { console.warn = () => {}; }
+    const out = lines.join('\n');
+    rows.push(['args-secret', mode, check(out.includes('no-such-cmd-zz') && !out.includes('SECRET-XYZ') && !out.includes('--token'), `unvetted warn ${mode}: ${JSON.stringify(out)}`)]);
+  }
+}
 await new Promise((r) => setTimeout(r, 300)); // let any late unhandled event surface
 console.warn = warn;
 rmSync(dir, { recursive: true, force: true });
