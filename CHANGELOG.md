@@ -2,6 +2,32 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`createMCPBridge({ allow })` — signed, in-memory allow-list.** `allow = { [serverName]: rawMcpToolName[] }` (raw MCP
+  names, not the `server_tool` form). When given: NOTHING is read from or written to `.mcp-bridge.json` (no cache, no TTL;
+  `bridgePath`/`refresh`/`servers` are ignored — a cache file is a command-injection surface this mode never touches), server
+  definitions come ONLY from `discoverServers(configPaths)`, only servers named in `allow` are spawned (still vetted by
+  `confirmServer`), each connects ONCE, and the exposed set is exactly signed ∩ listed — every other tool is ABSENT (not in
+  `tools`, the `metaTools` catalog or `systemContext`). New RETURN field `missing: Array<{server, tool}>` = signed tools the server
+  does not list, plus every signed tool of a server that was not found / failed / was rejected by `confirmServer` (never a
+  throw). `denied` is always `[]`; `systemContext` has no "Restricted tools" section and no `.mcp-bridge.json` line (the model is
+  never told other tools exist); nothing is written to stdout (stderr warnings unchanged). `mcp_invoke` on a name the server
+  lists but `allow` excludes throws `ToolError` `mcp_invoke: "<name>" is not on this run's allowed list` with
+  `context: { denied: true, server, tool }`; a truly unknown name keeps the `unknown tool` error. A malformed `allow` throws
+  `ValidationError` naming the type only. `buildMetaTools(tools, discoveredAt, excluded?)` gained the optional third arg.
+  Without `allow` everything is byte-identical (no `missing` field).
+
+### Changed
+
+- **`tools/call` timeout error is labelled (all modes).** It now throws `ToolError` with message
+  `MCP server "<server>" tool "<tool>" timed out after <ms>ms` and `context: { timeout: true, server, tool, timeoutMs, stderr }`.
+  The server-stderr tail (last 500 chars) moved OUT of the message into `context.stderr`. Code matching the old
+  `... "tools/call" timed out after Nms. stderr: ...` text should switch to `err.context.timeout`. Handshake
+  (`initialize`/`tools/list`) timeout messages are unchanged. `callTimeout` (default 120000, `0` = unbounded) is unchanged.
+
 ## [0.52.0] - 2026-10-11
 
 ### Added

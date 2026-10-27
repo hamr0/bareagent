@@ -95,8 +95,25 @@ const bridge = await createMCPBridge({
 
 - `servers` — limit discovery/wiring to specific server names, omit to wire all discovered servers (usage-guide.md:1091).
 - `timeout` — per-server init timeout, default 15s (usage-guide.md:1092).
+- `allow` — signed in-memory allow-list `{ [server]: string[] }` (see below); `.mcp-bridge.json` is not used.
 - `refresh` — force re-discovery regardless of the `.mcp-bridge.json` TTL (usage-guide.md:1093).
 - `policy` — an async function for runtime, argument-dependent checks layered on top of the file-based allow/deny list (usage-guide.md:1094-1100).
+
+## Signed allow-list (`allow`, in-memory)
+
+For a per-run, operator-signed tool set, pass `allow` instead of relying on `.mcp-bridge.json`:
+
+```javascript
+const bridge = await createMCPBridge({
+  configPaths: ['/etc/myapp/mcp.json'],
+  allow: { filesystem: ['read_file', 'list_directory'] },   // raw MCP tool names
+});
+// bridge.tools / bridge.metaTools expose ONLY signed ∩ listed; bridge.missing = signed tools the server did not list
+```
+
+In this mode the bridge never reads or writes `.mcp-bridge.json` (no cache, no TTL; `bridgePath`, `refresh` and `servers` are ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only servers named in `allow` (still vetted by `confirmServer`), and connects once. Unsigned tools are absent from `tools`, the `metaTools` catalog and `systemContext`; `denied` is always `[]`; nothing is printed to stdout. Signed tools the server does not list — or whose server was not found, failed, or was rejected — are returned in `missing: [{server, tool}]`, never thrown. `mcp_invoke` on a name the server lists but `allow` excludes throws a `ToolError` with `context: { denied: true, server, tool }`. A malformed `allow` throws `ValidationError`.
+
+A `tools/call` timeout (any mode, `callTimeout`, default 120000 ms) throws `MCP server "<server>" tool "<tool>" timed out after <ms>ms` with `context: { timeout: true, server, tool, timeoutMs, stderr }`.
 
 ## File-based deny vs runtime policy
 
@@ -107,7 +124,7 @@ Two distinct gating mechanisms, applied at two different times (usage-guide.md:1
 
 ## systemContext — LLM awareness
 
-The bridge generates a `bridge.systemContext` string describing which tools are available and which are restricted. Pass it into the Loop's system prompt so the agent is aware of its own constraints (usage-guide.md:1109-1111):
+The bridge generates a `bridge.systemContext` string describing which tools are available and which are restricted (in `allow` mode: only the available ones — the model is never told other tools exist). Pass it into the Loop's system prompt so the agent is aware of its own constraints (usage-guide.md:1109-1111):
 
 ```javascript
 const loop = new Loop({

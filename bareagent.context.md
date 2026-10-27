@@ -431,7 +431,9 @@ every command it is about to spawn — `confirmServer` is how you actually *gate
 server that never answers can't hang the bridge or the loop. `opts.timeout`
 (default 15 s) bounds the handshake (`initialize` + `tools/list`);
 `opts.callTimeout` (default 120 s, `0` disables) bounds each `tools/call`. A
-timed-out tool call rejects with a `timed out after Nms` `ToolError` rather
+timed-out tool call rejects with a labelled `ToolError`
+(`MCP server "s" tool "t" timed out after Nms`, `context: { timeout: true, server, tool, timeoutMs, stderr }` —
+stderr is in `context`, not the message) rather
 than blocking forever; a server that breaks its stdin pipe surfaces as a
 failed connection, never an uncaught `EPIPE` crash.
 
@@ -1508,7 +1510,7 @@ const { createMCPBridge } = require('bare-agent/mcp');
 const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
 
 const bridge = await createMCPBridge();
-// bridge = { tools, servers, denied, systemContext, errors, close }
+// bridge = { tools, servers, denied, systemContext, errors, close }  (+ missing when `allow` is given)
 
 const loop = new Loop({
   provider,
@@ -1527,6 +1529,8 @@ try {
 ```
 
 **Governance via `.mcp-bridge.json`.** On first run, the bridge writes `.mcp-bridge.json` in the cwd listing every discovered server and tool with permission `"allow"`. Edit any entry to `"deny"` and the tool is dropped from the next run's tool array; the LLM sees it listed in `systemContext` as restricted, with instructions not to retry it. Re-discovery happens automatically after TTL expiry (default `24h`, settable via `ttl` field in the file).
+
+**Signed per-run allow-list (`allow`).** `createMCPBridge({ allow: { server: ['raw_tool_name', ...] } })` skips `.mcp-bridge.json` entirely (never read or written — no cache, no TTL; `bridgePath`/`refresh`/`servers` ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only the named servers (still `confirmServer`-vetted), connects once and exposes signed ∩ listed. Everything else is absent from `tools`, the `metaTools` catalog and `systemContext` (no "Restricted tools" text, `denied: []`), nothing goes to stdout. The return gains `missing: [{server, tool}]` (signed tools the server did not list, or whose server was not found/failed/rejected) — never a throw. `mcp_invoke` of a listed-but-unsigned name throws `ToolError` with `context.denied === true`. Bad `allow` shape throws `ValidationError`.
 
 ```json
 {
