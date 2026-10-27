@@ -231,3 +231,5 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 - Shared budget across siblings is bareguard's problem — backed by a file with `proper-lockfile`; parent passes `BAREGUARD_BUDGET_FILE` via env. (prd.md:1551-1553)
 - Communication between agents is JSONL on stdio — no bus, no broker, no shared state beyond the audit log and explicit files. (prd.md:1554-1556)
 - The two `tools` keys are intentional, not a naming bug — `agent.tools` is a code registry, `gate.tools` is gov rules. (prd.md:1557-1558)
+
+- 2026-10-27 — MCP child reaping + audit `errorContext`: a malformed `tools/list` reply (no `tools` array) is rejected inside `connectAndListTools`'s kill-on-failure path and connect paths track the child before processing (leak proven by live pid-liveness tests, mutation-checked). `wireGate.onToolResult` forwards an ALLOW-LISTED `errorContext` (type-checked, strings ≤200) — never `error.context` wholesale, because `stderr` lives there and bareguard audits `result` verbatim.

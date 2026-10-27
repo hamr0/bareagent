@@ -433,7 +433,8 @@ server that never answers can't hang the bridge or the loop. `opts.timeout`
 `opts.callTimeout` (default 120 s, `0` disables) bounds each `tools/call`. A
 timed-out tool call rejects with a labelled `ToolError`
 (`MCP server "s" tool "t" timed out after Nms`, `context: { timeout: true, server, tool, timeoutMs, stderr }` —
-stderr is in `context`, not the message) rather
+stderr is in `context`, not the message; `wireGate`'s `onToolResult` forwards only the
+non-stderr label fields to the audit row as an allow-listed `errorContext`) rather
 than blocking forever; a server that breaks its stdin pipe surfaces as a
 failed connection, never an uncaught `EPIPE` crash.
 
@@ -478,6 +479,8 @@ if (result.error?.startsWith('halt:')) {
 ```
 
 **Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). It also fires for the out-of-band `ctx.summarize` call (R-C6) tagged `kind:'summarize'`; main-loop rounds carry `kind:'turn'` — so summary-window tokens count against the budget too, and a consumer can tell the two apart. `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
+
+`onToolResult` on a tool ERROR records `{error, durationMs}` plus an allow-listed `errorContext` copied from `error.context` — `timeout`/`denied` (boolean), `server`/`tool` (string, ≤200 chars), `timeoutMs` (finite number); wrong-typed values are dropped and `stderr`/everything else is never forwarded (the gate writes the record verbatim into the audit row). The key is absent when no allowed field is present.
 
 Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
 

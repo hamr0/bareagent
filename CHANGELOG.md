@@ -20,6 +20,23 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `ValidationError` naming the type only. `buildMetaTools(tools, discoveredAt, excluded?)` gained the optional third arg.
   Without `allow` everything is byte-identical (no `missing` field).
 
+- **`wireGate().onToolResult` forwards an allow-listed `errorContext`.** On a tool error the `gate.record` payload is
+  `{error, durationMs}` as before, plus `errorContext` ONLY when `error.context` carries an allowed key with the exact type:
+  `timeout`/`denied` (boolean), `server`/`tool` (string, capped at 200 chars), `timeoutMs` (finite number). Wrong-typed values
+  are dropped; every other context field — notably the MCP `stderr` tail — is NEVER forwarded (bareguard writes `result`
+  verbatim into the audit row). So an MCP `tools/call` timeout / allow-list denial is now distinguishable in the audit log;
+  every other error's record is byte-identical to before (no `errorContext` key).
+
+### Fixed
+
+- **MCP bridge: a server child could leak when its `tools/list` reply was processed.** A server answering `tools/list`
+  without a `tools` array (e.g. `{}`) made the post-connect processing throw AFTER the child was spawned but BEFORE it was
+  tracked, so `close()` never reaped it and the live child held the event loop open. `connectAndListTools` now rejects a
+  malformed reply inside its reap-on-failure path (the server lands in `errors`; in `allow` mode all its signed tools land in
+  `missing`), and both the allow and bulk connect paths track the child immediately after connect, before any processing.
+  Same class fixed on the bulk path's discovery phase: discovery connections are now killed in a `finally`, so a throwing
+  config merge/write can no longer strand them.
+
 ### Changed
 
 - **`tools/call` timeout error is labelled (all modes).** It now throws `ToolError` with message
