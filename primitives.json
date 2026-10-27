@@ -263,6 +263,15 @@
       "example": "gate.annotate(judgeToAnnotation(await judge({ request, artifact, provider })));"
     },
     {
+      "name": "listServerTools",
+      "category": "mcp",
+      "when": "you want to list one MCP server's tools and their annotation hints before deciding what to allow — no bridge, no cache file, no tools kept alive",
+      "import": "import { listServerTools } from 'bare-agent/mcp'",
+      "signature": "listServerTools(opts: object) => Promise<Array<{name: string, description: string, annotations?: Record<string, any>}>>",
+      "fails": "throws (never returns []) when the server is not found, confirmServer declines or throws, the connect/handshake fails or times out, the total deadline trips, or the reply is malformed; the child is always reaped.",
+      "example": "const tools = await listServerTools({ server: 'files', configPaths: [cfg] });"
+    },
+    {
       "name": "litectxCorpus",
       "category": "integration",
       "when": "you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding scan/partition",

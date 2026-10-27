@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const { readFileSync, writeFileSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { homedir } = require('node:os');
-const { ToolError, ValidationError } = require('./errors');
+const { ToolError, ValidationError, TimeoutError } = require('./errors');
 
 /** @typedef {import('../types').ToolDef} ToolDef */
 
@@ -23,6 +23,8 @@ const { ToolError, ValidationError } = require('./errors');
  * @property {string} name
  * @property {string} [description]
  * @property {Record<string, any>} [inputSchema]
+ * @property {Record<string, any>} [annotations] - Server-supplied behavioural HINTS (readOnlyHint,
+ *   destructiveHint, ...). Untrusted metadata from the server: never an authorization signal.
  */
 
 /**
@@ -370,6 +372,14 @@ function unwrapContent(content) {
 
 // --- Tool wrapping ---
 
+/**
+ * A server "sent annotations" only when it sent a non-null, non-array object. Anything else
+ * (absent, null, a string) is treated as none, so the key stays absent downstream.
+ * @param {any} a
+ * @returns {boolean}
+ */
+const hasAnnotations = (a) => a !== null && typeof a === 'object' && !Array.isArray(a);
+
 // Runtime arg-dependent policy has moved to Loop-level (new Loop({ policy })).
 // mcp-bridge retains only the static .mcp-bridge.json allow/deny filter below —
 // that decides which tools are exposed to the Loop in the first place.
@@ -385,6 +395,8 @@ function wrapTools(serverName, mcpTools, rpc, callTimeout = 0) {
     name: `${serverName}_${t.name}`,
     description: t.description || '',
     parameters: t.inputSchema || { type: 'object', properties: {} },
+    // Server `annotations` ride through as the SAME object, unmodified; key ABSENT when none sent.
+    ...(hasAnnotations(t.annotations) && { annotations: t.annotations }),
     execute: async (args) => {
       const result = await rpc('tools/call', { name: t.name, arguments: args }, callTimeout, { server: serverName, tool: t.name });
       if (result.isError) {
@@ -440,36 +452,79 @@ async function killServer(child) {
 
 // --- Connect + list tools from a server ---
 
+// tools/list pagination cap. A server that keeps handing out cursors past this is faulty or
+// hostile; we THROW (never truncate silently — a partial catalog reads as a complete one).
+const MAX_LIST_PAGES = 100;
+
 /**
  * @param {string} name
  * @param {ServerDef} def
- * @param {number} [timeout]
+ * @param {number} [timeout] - Bound on EACH round-trip (initialize, every tools/list page).
+ * @param {{ deadlineMs?: number }} [o] - Optional ONE total wall-clock ceiling over the whole
+ *   connect+list (internal; used by listServerTools). On trip the child is killed and a labelled
+ *   TimeoutError rejects. The timer is always cleared.
  * @returns {Promise<{mcpTools: McpTool[], client: RpcClient}>}
  */
-async function connectAndListTools(name, def, timeout = 15000) {
+async function connectAndListTools(name, def, timeout = 15000, o = {}) {
   const client = createRpcClient(name, def);
+  /** @type {NodeJS.Timeout | undefined} */
+  let deadlineTimer;
 
   try {
-    // Both handshake round-trips are bounded by `timeout`. tools/list used to be
-    // unbounded — a server that answered initialize but never replied to
-    // tools/list would hang discovery (and the whole bridge) indefinitely.
-    await client.rpc('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'bare-agent', version: '0.5.0' },
-    }, timeout);
-    client.notify('notifications/initialized');
+    const work = (async () => {
+      // Every round-trip is bounded by `timeout`. tools/list used to be
+      // unbounded — a server that answered initialize but never replied to
+      // tools/list would hang discovery (and the whole bridge) indefinitely.
+      await client.rpc('initialize', {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'bare-agent', version: '0.5.0' },
+      }, timeout);
+      client.notify('notifications/initialized');
 
-    const listed = await client.rpc('tools/list', {}, timeout);
-    // A reply without a `tools` array is a protocol-violating server, not an empty one: fail the
-    // connect HERE (inside the try, so the child is reaped) rather than let every caller's
-    // `.map`/`.filter` throw after the child is already running but before it is tracked.
-    const mcpTools = listed && listed.tools;
-    if (!Array.isArray(mcpTools)) {
-      throw new Error(`MCP server "${name}" returned a malformed tools/list reply (no tools array)`);
-    }
+      // Follow `nextCursor` until the server stops sending one. A reply without a `tools` array is a
+      // protocol-violating server, not an empty one: fail the connect HERE (inside the try, so the
+      // child is reaped) rather than let every caller's `.map`/`.filter` throw after the child is
+      // already running but before it is tracked.
+      /** @type {McpTool[]} */
+      const mcpTools = [];
+      /** @type {Set<string>} */
+      const seenCursors = new Set();
+      /** @type {string | undefined} */
+      let cursor;
+      for (let pages = 1; ; pages++) {
+        const listed = await client.rpc('tools/list', cursor === undefined ? {} : { cursor }, timeout);
+        if (!listed || !Array.isArray(listed.tools)) {
+          throw new Error(`MCP server "${name}" returned a malformed tools/list reply (no tools array)`);
+        }
+        mcpTools.push(...listed.tools);
+        const next = listed.nextCursor;
+        if (typeof next !== 'string' || next === '') break;
+        if (seenCursors.has(next)) {
+          throw new Error(`MCP server "${name}" repeated a tools/list cursor (pagination loop)`);
+        }
+        if (pages >= MAX_LIST_PAGES) {
+          throw new Error(`MCP server "${name}" exceeded the tools/list page cap (${MAX_LIST_PAGES} pages); refusing to return a truncated catalog`);
+        }
+        seenCursors.add(next);
+        cursor = next;
+      }
 
-    return { mcpTools, client };
+      return { mcpTools, client };
+    })();
+
+    if (!o.deadlineMs) return await work;
+    // The loser of the race must not surface as an unhandled rejection.
+    work.catch(() => {});
+    const deadline = new Promise((_, reject) => {
+      deadlineTimer = setTimeout(() => {
+        reject(new TimeoutError(
+          `MCP server "${name}" exceeded the total deadline of ${o.deadlineMs}ms for connect + tools/list`,
+          { context: { timeout: true, bound: 'deadline', server: name, deadlineMs: o.deadlineMs } },
+        ));
+      }, o.deadlineMs);
+    });
+    return await Promise.race([work, deadline]);
   } catch (err) {
     // Connect failed (init timeout, tools/list error, etc.) — the child was
     // spawned but never returned to the caller, so the caller can't track it
@@ -477,6 +532,8 @@ async function connectAndListTools(name, def, timeout = 15000) {
     // alive and hangs the process on exit (notably node:test's file wrapper).
     await killServer(client.child);
     throw err;
+  } finally {
+    clearTimeout(deadlineTimer);
   }
 }
 
@@ -565,6 +622,7 @@ function buildMetaTools(tools, discoveredAt, excluded) {
       schema: t.parameters || { type: 'object', properties: {} },
       server: sep > 0 ? t.name.slice(0, sep) : t.name,
       tool: sep > 0 ? t.name.slice(sep + 1) : '',
+      ...(hasAnnotations(t.annotations) && { annotations: t.annotations }),
     };
   });
   const byName = new Map(tools.map(t => [t.name, t]));
@@ -634,6 +692,45 @@ function buildMetaTools(tools, discoveredAt, excluded) {
   };
 
   return [mcpDiscover, mcpInvoke];
+}
+
+// --- Server vetting (shared by createMCPBridge and listServerTools) ---
+
+/**
+ * Vet a server before spawning its command. `=== true` proceeds; anything else, or a throw, denies
+ * (fail-closed). No hook ⇒ trust all.
+ * @param {((name: string, def: ServerDef) => boolean | Promise<boolean>) | null} confirmServer
+ * @returns {(name: string, def: ServerDef) => Promise<boolean>}
+ */
+function makeVetServer(confirmServer) {
+  return async (name, def) => {
+    if (!confirmServer) return true;
+    try { return (await confirmServer(name, def)) === true; }
+    catch { return false; }
+  };
+}
+
+/**
+ * Connecting to a server EXECUTES its `command`. The project-cwd `.mcp.json` is excluded from
+ * default discovery (see TRUSTED_CONFIG_PATHS / includeProjectConfig), so the untrusted-repo
+ * path is closed by default; this warning (stderr) covers the residual case where home/IDE configs
+ * (or an explicit opt-in) contribute commands and no confirmServer hook is present to vet them.
+ * Warns ONCE per returned function, BEFORE the first spawn.
+ * @param {Function | null} confirmServer
+ * @returns {(specs: Array<{name: string, command: string, args?: string[]}>) => void}
+ */
+function makeUnvettedWarner(confirmServer) {
+  let warned = false;
+  return (specs) => {
+    if (confirmServer || warned || specs.length === 0) return;
+    warned = true;
+    const cmds = specs.map(s => `${s.name} → ${s.command} ${(s.args || []).join(' ')}`.trim());
+    console.warn(
+      `[MCP Bridge] spawning ${specs.length} server command(s) without a confirmServer hook:\n  ` +
+      cmds.join('\n  ') +
+      `\n  Pass { confirmServer } to vet each command before it runs.`,
+    );
+  };
 }
 
 // --- Signed allow-list mode (opts.allow) ---
@@ -816,31 +913,8 @@ async function createMCPBridge(opts = {}) {
   // Vet a server before spawning its command. Fail-closed: an undefined hook
   // trusts all (unchanged behavior); a throw denies.
   const confirmServer = typeof opts.confirmServer === 'function' ? opts.confirmServer : null;
-  /** @param {string} name @param {ServerDef} def @returns {Promise<boolean>} */
-  const vetServer = async (name, def) => {
-    if (!confirmServer) return true;
-    try { return (await confirmServer(name, def)) === true; }
-    catch { return false; }
-  };
-
-  // Connecting to a server EXECUTES its `command`. The project-cwd `.mcp.json` is excluded from
-  // default discovery (see TRUSTED_CONFIG_PATHS / includeProjectConfig), so the untrusted-repo
-  // path is closed by default; this warning covers the residual case where home/IDE configs (or an
-  // explicit opt-in) contribute commands and no confirmServer hook is present to vet them.
-  // Warn ONCE per call, BEFORE the first spawn — and the first spawn is the
-  // discovery phase on a cold/refresh run, not the main-connect phase below.
-  let warnedUnvetted = false;
-  /** @param {Array<{name: string, command: string, args?: string[]}>} specs */
-  const warnUnvettedSpawn = (specs) => {
-    if (confirmServer || warnedUnvetted || specs.length === 0) return;
-    warnedUnvetted = true;
-    const cmds = specs.map(s => `${s.name} → ${s.command} ${(s.args || []).join(' ')}`.trim());
-    console.warn(
-      `[MCP Bridge] spawning ${specs.length} server command(s) without a confirmServer hook:\n  ` +
-      cmds.join('\n  ') +
-      `\n  Pass { confirmServer } to vet each command before it runs.`,
-    );
-  };
+  const vetServer = makeVetServer(confirmServer);
+  const warnUnvettedSpawn = makeUnvettedWarner(confirmServer);
 
   if (opts.allow !== undefined) {
     const allow = validateAllow(opts.allow);
@@ -1014,4 +1088,90 @@ async function createMCPBridge(opts = {}) {
   };
 }
 
-module.exports = { createMCPBridge, discoverServers, buildMetaTools };
+// --- listServerTools: one-shot read-only listing ---
+
+// Total-deadline multiplier for listServerTools. `timeout` bounds EACH round-trip; a server that
+// answers every page just under it could otherwise stretch a call to (1 + pages) × timeout. The one
+// total ceiling is 4 × timeout = initialize plus three further maximally-slow round-trips: a normal
+// server answers in milliseconds and a handful of pages never approaches it, while a server that
+// needs more than that is slow enough to treat as faulty. Derived, not a new option.
+const LIST_DEADLINE_MULTIPLIER = 4;
+
+/**
+ * @param {string} msg
+ * @returns {ValidationError}
+ */
+const listBad = (msg) => new ValidationError(`[MCP Bridge] listServerTools: ${msg}`, { context: { lib: 'bare-agent' } });
+
+/**
+ * List one configured MCP server's tools WITHOUT building a bridge: discover, vet, connect, list
+ * (following pagination), then always kill the child. Never reads or writes `.mcp-bridge.json`
+ * and prints nothing to stdout. `annotations` are the server's own HINTS, passed through unmodified
+ * (key absent when the server sent none) — never an authorization signal.
+ *
+ * Total wall-clock ceiling is DERIVED: 4 × `timeout` (initialize + three maximally slow pages) over
+ * the connect + list, excluding `confirmServer` (caller code, possibly interactive). On trip the
+ * child is killed and a TimeoutError naming the total deadline rejects.
+ *
+ * @param {object} opts
+ * @param {string} opts.server - Server name as it appears in the discovered configs.
+ * @param {string[]} [opts.configPaths] - Explicit config paths; omitted ⇒ trusted $HOME/IDE defaults.
+ * @param {(name: string, def: ServerDef) => boolean | Promise<boolean>} [opts.confirmServer] - Same semantics as createMCPBridge: `=== true` proceeds, a throw denies. Implies includeProjectConfig.
+ * @param {boolean} [opts.includeProjectConfig=false] - Also scan `./.mcp.json` during default discovery.
+ * @param {number} [opts.timeout=15000] - Per-round-trip bound in ms (initialize and each tools/list page).
+ * @returns {Promise<Array<{name: string, description: string, annotations?: Record<string, any>}>>}
+ * @when you want to list one MCP server's tools and their annotation hints before deciding what to allow — no bridge, no cache file, no tools kept alive
+ * @fails throws (never returns []) when the server is not found, confirmServer declines or throws, the connect/handshake fails or times out, the total deadline trips, or the reply is malformed; the child is always reaped.
+ * @example
+ *   const tools = await listServerTools({ server: 'files', configPaths: [cfg] });
+ */
+async function listServerTools(opts) {
+  if (opts === null || typeof opts !== 'object' || Array.isArray(opts)) {
+    throw listBad(`opts must be an object (got ${typeName(opts)})`);
+  }
+  const { server, configPaths, confirmServer, includeProjectConfig, timeout = 15000 } = opts;
+  if (typeof server !== 'string' || server === '') {
+    throw listBad(`server must be a non-empty string (got ${server === '' ? 'empty string' : typeName(server)})`);
+  }
+  if (configPaths !== undefined) {
+    if (!Array.isArray(configPaths)) throw listBad(`configPaths must be an array of strings (got ${typeName(configPaths)})`);
+    for (const p of configPaths) {
+      if (typeof p !== 'string' || p === '') throw listBad(`configPaths entries must be non-empty strings (got ${p === '' ? 'empty string' : typeName(p)})`);
+    }
+  }
+  if (confirmServer !== undefined && typeof confirmServer !== 'function') {
+    throw listBad(`confirmServer must be a function (got ${typeName(confirmServer)})`);
+  }
+  if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) {
+    throw listBad(`timeout must be a positive finite number (got ${typeName(timeout)})`);
+  }
+
+  const confirm = typeof confirmServer === 'function' ? confirmServer : null;
+  const discovered = discoverServers(configPaths, { includeProjectConfig: includeProjectConfig === true || !!confirm });
+  const def = discovered.get(server);
+  if (!def) {
+    throw new ToolError(`MCP server "${server}" not found in discovered MCP configs`, { context: { server, notFound: true } });
+  }
+  makeUnvettedWarner(confirm)([{ name: server, command: def.command, args: def.args }]);
+  if (!(await makeVetServer(confirm)(server, def))) {
+    throw new ToolError(`MCP server "${server}" was not approved by confirmServer`, { context: { server, denied: true } });
+  }
+
+  const { mcpTools, client } = await connectAndListTools(server, def, timeout, { deadlineMs: timeout * LIST_DEADLINE_MULTIPLIER });
+  try {
+    return mcpTools.map(t => {
+      if (t === null || typeof t !== 'object' || typeof t.name !== 'string' || t.name === '') {
+        throw new ToolError(`MCP server "${server}" returned a malformed tools/list entry (no string name)`, { context: { server } });
+      }
+      return {
+        name: t.name,
+        description: t.description || '',
+        ...(hasAnnotations(t.annotations) && { annotations: t.annotations }),
+      };
+    });
+  } finally {
+    await killServer(client.child);
+  }
+}
+
+module.exports = { createMCPBridge, discoverServers, buildMetaTools, listServerTools };
