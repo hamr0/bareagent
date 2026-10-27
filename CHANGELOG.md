@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## Unreleased
+## [0.53.0] - 2026-10-27
 
 ### Added
 
@@ -18,14 +18,16 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   lists but `allow` excludes throws `ToolError` `mcp_invoke: "<name>" is not on this run's allowed list` with
   `context: { denied: true, server, tool }`; a truly unknown name keeps the `unknown tool` error. A malformed `allow` (incl. an empty tool list) throws
   `ValidationError` naming the type only. `buildMetaTools(tools, discoveredAt, excluded?)` gained the optional third arg.
-  Without `allow` everything is byte-identical (no `missing` field).
+  Without `allow`, the return shape and cache behaviour are unchanged (no `missing` field); see Changed for the two all-mode changes.
 
 - **`wireGate().onToolResult` forwards an allow-listed `errorContext`.** On a tool error the `gate.record` payload is
   `{error, durationMs}` as before, plus `errorContext` ONLY when `error.context` carries an allowed key with the exact type:
   `timeout`/`denied` (boolean), `server`/`tool` (string, capped at 200 chars), `timeoutMs` (finite number). Wrong-typed values
   are dropped; every other context field — notably the MCP `stderr` tail — is NEVER forwarded (bareguard writes `result`
   verbatim into the audit row). So an MCP `tools/call` timeout / allow-list denial is now distinguishable in the audit log;
-  every other error's record is byte-identical to before (no `errorContext` key).
+  the `errorContext` key is added whenever the error carries at least one allowed field (most tool errors now do: the Loop
+  wraps every non-ToolError tool throw as a `ToolError` with context `{tool}`, and an MCP `isError` result carries
+  `{server, tool}`) and is absent only when none is present; `stderr` and any other key are never forwarded.
 
 ### Fixed
 
@@ -38,6 +40,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   config merge/write can no longer strand them.
 
 ### Changed
+
+- **MCP bridge (non-allow mode): a `tools/list` reply with no `tools` array is now a connect error.** A server answering
+  `tools/list` with `{}` or `{tools:null}` used to be treated as an empty server and cached in `.mcp-bridge.json`. It now lands
+  in `errors` with a warning, is absent from the config, and is retried on each run.
 
 - **`tools/call` timeout error is labelled (all modes).** It now throws `ToolError` with message
   `MCP server "<server>" tool "<tool>" timed out after <ms>ms` and `context: { timeout: true, server, tool, timeoutMs, stderr }`.
