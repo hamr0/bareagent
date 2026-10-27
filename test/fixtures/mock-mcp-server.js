@@ -15,6 +15,8 @@
  *                            (stay alive) — exercises the tools/list timeout
  *   MOCK_HANG_ON_CALL=1    — connect fully, but never reply to tools/call
  *                            (stay alive) — exercises the per-call timeout
+ *   MOCK_STDERR=<text>     — write this text to stderr at startup (lets a test assert
+ *                            server stderr lands in error context, not the message)
  *   MOCK_CLOSE_STDIN_AFTER_INIT=1 — answer `initialize`, then close our stdin
  *                            read-end and stay alive. The parent's follow-up
  *                            write (`notifications/initialized`) then hits a
@@ -30,6 +32,8 @@ process.stdin.setEncoding('utf8');
 if (process.env.MOCK_PID_FILE) {
   require('fs').writeFileSync(process.env.MOCK_PID_FILE, String(process.pid));
 }
+
+if (process.env.MOCK_STDERR) process.stderr.write(process.env.MOCK_STDERR + '\n');
 
 const TOOLS = [
   { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
