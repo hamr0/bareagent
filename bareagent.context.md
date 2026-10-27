@@ -72,7 +72,7 @@ Eight entry points:
 | Read/write files, list directories, run shell commands, grep | createShellTools (shell_read/grep/**write**/**edit**/run/exec) + Loop({ policy }) — gate `shell_write`/`shell_edit` via `fs.writeScope` with an actionTranslator |
 | Change one span of a big file without re-emitting the whole thing | `shell_edit({path, oldText, newText})` — anchored exact-once replace; the surgical alternative to whole-file `shell_write` (BA-13). Gate it as `{type:'edit'}` |
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
-| Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
+| Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` (or per-run `{ allow }`) |
 | Gate every tool call with one policy hook | `wireGate(gate).policy` → `Loop({ policy })` |
 | Route policy decisions per user / tenant / chat | `wireGate(gate).policy` + `loop.run(msgs, tools, { ctx })` (ctx routes to bareguard's check via `_ctx`) |
 | Cap total USD spend per run | `new Gate({ budget: { maxCostUsd: 0.50 } })` |
@@ -1533,7 +1533,7 @@ try {
 
 **Governance via `.mcp-bridge.json`.** On first run, the bridge writes `.mcp-bridge.json` in the cwd listing every discovered server and tool with permission `"allow"`. Edit any entry to `"deny"` and the tool is dropped from the next run's tool array; the LLM sees it listed in `systemContext` as restricted, with instructions not to retry it. Re-discovery happens automatically after TTL expiry (default `24h`, settable via `ttl` field in the file).
 
-**Signed per-run allow-list (`allow`).** `createMCPBridge({ allow: { server: ['raw_tool_name', ...] } })` skips `.mcp-bridge.json` entirely (never read or written — no cache, no TTL; `bridgePath`/`refresh`/`servers` ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only the named servers (still `confirmServer`-vetted), connects once and exposes signed ∩ listed. Everything else is absent from `tools`, the `metaTools` catalog and `systemContext` (no "Restricted tools" text, `denied: []`), nothing goes to stdout. The return gains `missing: [{server, tool}]` (signed tools the server did not list, or whose server was not found/failed/rejected) — never a throw. `mcp_invoke` of a listed-but-unsigned name throws `ToolError` with `context.denied === true`. Bad `allow` shape (including an empty tool list) throws `ValidationError`.
+**Signed per-run allow-list (`allow`).** `createMCPBridge({ allow: { server: ['raw_tool_name', ...] } })` skips `.mcp-bridge.json` entirely (never read or written — no cache, no TTL; `bridgePath`/`refresh`/`servers` ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only the named servers (still `confirmServer`-vetted), connects once and exposes signed ∩ listed. Everything else is absent from `tools`, the `metaTools` catalog and `systemContext` (no "Restricted tools" text, `denied: []`), nothing goes to stdout. The return gains `missing: [{server, tool}]` (signed tools the server did not list, or whose server was not found/failed/rejected) — never a throw. `mcp_invoke` of a listed-but-unsigned name throws `ToolError` with `context.denied === true`. Bad `allow` shape (including an empty tool list) throws `ValidationError`. In every mode (not only `allow`), a server whose `tools/list` reply has no `tools` array (e.g. `{}`) now fails its connect — it lands in `errors`, its child is killed — where it used to read as a working empty server.
 
 ```json
 {
@@ -1603,6 +1603,8 @@ MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `
 | `servers` | all discovered | Limit to a subset by name |
 | `timeout` | `15000` | Per-server init timeout in ms |
 | `refresh` | `false` | Force re-discovery regardless of TTL |
+| `allow` | none | Signed per-run allow-list `{ server: [rawToolNames] }` — in-memory, no `.mcp-bridge.json`; see "Signed per-run allow-list" above |
+| `callTimeout` | `120000` | Per-`tools/call` timeout in ms (`0` disables) |
 
 ### Recipe 10: beeperbox — multi-messenger reach via MCP bridge
 
