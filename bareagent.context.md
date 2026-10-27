@@ -72,7 +72,7 @@ Eight entry points:
 | Read/write files, list directories, run shell commands, grep | createShellTools (shell_read/grep/**write**/**edit**/run/exec) + Loop({ policy }) — gate `shell_write`/`shell_edit` via `fs.writeScope` with an actionTranslator |
 | Change one span of a big file without re-emitting the whole thing | `shell_edit({path, oldText, newText})` — anchored exact-once replace; the surgical alternative to whole-file `shell_write` (BA-13). Gate it as `{type:'edit'}` |
 | Auto-discover MCP servers from IDE configs | createMCPBridge |
-| Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` |
+| Gate MCP tools with allow/deny lists | createMCPBridge + `.mcp-bridge.json` (or per-run `{ allow }`) |
 | Gate every tool call with one policy hook | `wireGate(gate).policy` → `Loop({ policy })` |
 | Route policy decisions per user / tenant / chat | `wireGate(gate).policy` + `loop.run(msgs, tools, { ctx })` (ctx routes to bareguard's check via `_ctx`) |
 | Cap total USD spend per run | `new Gate({ budget: { maxCostUsd: 0.50 } })` |
@@ -431,7 +431,10 @@ every command it is about to spawn — `confirmServer` is how you actually *gate
 server that never answers can't hang the bridge or the loop. `opts.timeout`
 (default 15 s) bounds the handshake (`initialize` + `tools/list`);
 `opts.callTimeout` (default 120 s, `0` disables) bounds each `tools/call`. A
-timed-out tool call rejects with a `timed out after Nms` `ToolError` rather
+timed-out tool call rejects with a labelled `ToolError`
+(`MCP server "s" tool "t" timed out after Nms`, `context: { timeout: true, server, tool, timeoutMs, stderr }` —
+stderr is in `context`, not the message; `wireGate`'s `onToolResult` forwards only the
+non-stderr label fields to the audit row as an allow-listed `errorContext`) rather
 than blocking forever; a server that breaks its stdin pipe surfaces as a
 failed connection, never an uncaught `EPIPE` crash.
 
@@ -476,6 +479,8 @@ if (result.error?.startsWith('halt:')) {
 ```
 
 **Why four pieces (`policy` + `onLlmResult` + `onToolResult` + `filterTools`).** `policy` runs `gate.check` *before* every tool call. `onLlmResult` fires after every successful `provider.generate` — without it, `budget.maxCostUsd` never sees LLM cost and is silently undercounted for token-heavy / tool-light workloads (every chatbot). It also fires for the out-of-band `ctx.summarize` call (R-C6) tagged `kind:'summarize'`; main-loop rounds carry `kind:'turn'` — so summary-window tokens count against the budget too, and a consumer can tell the two apart. `onToolResult` fires after every `tool.execute` and carries the per-run `ctx` opaque blob into `gate.record` so per-principal accounting works. `filterTools` is a `gate.allows` pre-filter — denied tools are dropped from the catalog the LLM ever sees, no `gate.check` round-trip per call.
+
+`onToolResult` on a tool ERROR records `{error, durationMs}` plus an allow-listed `errorContext` copied from `error.context` — `timeout`/`denied` (boolean), `server`/`tool` (string, ≤200 chars), `timeoutMs` (finite number); wrong-typed values are dropped and `stderr`/everything else is never forwarded (the gate writes the record verbatim into the audit row). The key is absent when no allowed field is present.
 
 Halt-severity decisions exit the loop cleanly via a typed `HaltError` — full mechanics (sealed `msgs`, `halt:<rule>` error token, `loop:done{halted:true}` event, `throwOnError:true` interaction, `halt:unknown` coalesce) are in the **Halt decisions throw `HaltError`** paragraph below. Short version: check `result.error?.startsWith('halt:')` after the run.
 
@@ -1508,7 +1513,7 @@ const { createMCPBridge } = require('bare-agent/mcp');
 const provider = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' });
 
 const bridge = await createMCPBridge();
-// bridge = { tools, servers, denied, systemContext, errors, close }
+// bridge = { tools, servers, denied, systemContext, errors, close }  (+ missing when `allow` is given)
 
 const loop = new Loop({
   provider,
@@ -1527,6 +1532,8 @@ try {
 ```
 
 **Governance via `.mcp-bridge.json`.** On first run, the bridge writes `.mcp-bridge.json` in the cwd listing every discovered server and tool with permission `"allow"`. Edit any entry to `"deny"` and the tool is dropped from the next run's tool array; the LLM sees it listed in `systemContext` as restricted, with instructions not to retry it. Re-discovery happens automatically after TTL expiry (default `24h`, settable via `ttl` field in the file).
+
+**Signed per-run allow-list (`allow`).** `createMCPBridge({ allow: { server: ['raw_tool_name', ...] } })` skips `.mcp-bridge.json` entirely (never read or written — no cache, no TTL; `bridgePath`/`refresh`/`servers` ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only the named servers (still `confirmServer`-vetted), connects once and exposes signed ∩ listed. Everything else is absent from `tools`, the `metaTools` catalog and `systemContext` (no "Restricted tools" text, `denied: []`), nothing goes to stdout. The return gains `missing: [{server, tool}]` (signed tools the server did not list, or whose server was not found/failed/rejected) — never a throw. `mcp_invoke` of a listed-but-unsigned name throws `ToolError` with `context.denied === true`. Bad `allow` shape (including an empty tool list) throws `ValidationError`. In every mode (not only `allow`), a server whose `tools/list` reply has no `tools` array (e.g. `{}`) now fails its connect — it lands in `errors`, its child is killed — where it used to read as a working empty server.
 
 ```json
 {
@@ -1596,6 +1603,8 @@ MCP tools arrive with the server name prepended (`beeperbox_send_message`, not `
 | `servers` | all discovered | Limit to a subset by name |
 | `timeout` | `15000` | Per-server init timeout in ms |
 | `refresh` | `false` | Force re-discovery regardless of TTL |
+| `allow` | none | Signed per-run allow-list `{ server: [rawToolNames] }` — in-memory, no `.mcp-bridge.json`; see "Signed per-run allow-list" above |
+| `callTimeout` | `120000` | Per-`tools/call` timeout in ms (`0` disables) |
 
 ### Recipe 10: beeperbox — multi-messenger reach via MCP bridge
 

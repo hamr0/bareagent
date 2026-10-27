@@ -41,6 +41,38 @@ function safeStringify(value) {
   }
 }
 
+// Keys of a tool error's `context` that onToolResult may forward to gate.record (and so into the
+// audit row), with the exact type each must have. ALLOW-LIST, never the whole object: MCP timeout
+// errors carry `stderr` (server output, possibly secret-bearing) in `context`, and gate.record writes
+// its result verbatim to the audit log. Anything not listed here, or of the wrong type, is dropped.
+const ERROR_CONTEXT_KEYS = /** @type {const} */ ({
+  timeout: 'boolean', denied: 'boolean', server: 'string', tool: 'string', timeoutMs: 'number',
+});
+const ERROR_CONTEXT_MAX_STR = 200;
+
+/**
+ * @param {any} error
+ * @returns {Record<string, boolean|string|number>|undefined} undefined when no allowed key is present
+ */
+function pickErrorContext(error) {
+  /** @type {Record<string, boolean|string|number>} */
+  const out = {};
+  try {
+    const ctx = error?.context;
+    if (ctx === null || typeof ctx !== 'object') return undefined;
+    for (const [key, type] of Object.entries(ERROR_CONTEXT_KEYS)) {
+      if (!Object.prototype.hasOwnProperty.call(ctx, key)) continue;
+      const v = ctx[key];
+      if (typeof v !== type) continue;
+      if (type === 'number' && !Number.isFinite(v)) continue;
+      out[key] = type === 'string' ? v.slice(0, ERROR_CONTEXT_MAX_STR) : v;
+    }
+  } catch {
+    return undefined; // a throwing getter / exotic context must never break the audit write
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 // Module-scope so a process that spawns many child agents (each with its own
 // wireGate call) only prints the wrapTool deprecation warning once.
 let warnedWrap = false;
@@ -98,6 +130,10 @@ let warnedWrap = false;
  *   (`tools.allowlist:['shell_read']`) keeps matching even though `type` is now `'read'`. This
  *   activates `fs`/`bash` scoping automatically (`fs.readScope`/`fs.writeScope` deny by default
  *   when unset — see CHANGELOG) — override when a different shape is needed.
+ *   `onToolResult` on a tool error records `{error: message, durationMs}` plus, only when present, an
+ *   allow-listed `errorContext` copied from `error.context` (`timeout`/`denied` booleans, `server`/`tool`
+ *   strings capped at 200 chars, finite `timeoutMs`; wrong-typed values dropped) — so an MCP timeout is
+ *   distinguishable in the audit row. `stderr` and every other context field are NEVER forwarded.
  * @returns {{policy: Function, onLlmResult: Function, onToolResult: Function, filterTools: Function, wrapTool: Function, wrapTools: Function}}
  * @when you have a bareguard Gate and want to wire it into a Loop as the policy + metering chokepoint in one line
  * @fails never throws; a gate halt surfaces as a HaltError the Loop catches and exits cleanly, and a deny is an advisory string fed back to the model.
@@ -201,8 +237,10 @@ function wireGate(gate, options = {}) {
   const onToolResult = async ({ name, args, result, error, durationMs, ctx }) => {
     const action = translate(name, args, ctx);
     if (error) {
+      const errorContext = pickErrorContext(error);
       await gate.record(action, {
         error: error?.message || String(error),
+        ...(errorContext && { errorContext }),
         durationMs: durationMs ?? null,
       });
     } else {

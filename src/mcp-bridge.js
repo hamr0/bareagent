@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const { readFileSync, writeFileSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 const { homedir } = require('node:os');
-const { ToolError } = require('./errors');
+const { ToolError, ValidationError } = require('./errors');
 
 /** @typedef {import('../types').ToolDef} ToolDef */
 
@@ -54,7 +54,7 @@ const { ToolError } = require('./errors');
 /**
  * JSON-RPC stdio client over a spawned MCP server.
  * @typedef {object} RpcClient
- * @property {(method: string, params?: object, timeoutMs?: number) => Promise<any>} rpc
+ * @property {(method: string, params?: object, timeoutMs?: number, label?: {server: string, tool: string}) => Promise<any>} rpc
  * @property {(method: string, params?: object) => void} notify
  * @property {import('node:child_process').ChildProcessWithoutNullStreams} child
  * @property {string} stderr
@@ -309,9 +309,11 @@ function createRpcClient(name, def) {
    * @param {string} method
    * @param {object} [params]
    * @param {number} [timeoutMs=0] - Reject if no response arrives within this many ms (0 = no limit).
+   * @param {{server: string, tool: string}} [label] - tools/call only: when given, a timeout throws a
+   *   labelled ToolError (`context: {timeout, server, tool, timeoutMs, stderr}`, stderr kept OUT of the message).
    * @returns {Promise<any>}
    */
-  function rpc(method, params = {}, timeoutMs = 0) {
+  function rpc(method, params = {}, timeoutMs = 0, label) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
       if (!child.stdin.writable) {
@@ -321,7 +323,14 @@ function createRpcClient(name, def) {
       let timer = null;
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
-          settle(id, false, new ToolError(`MCP server "${name}" "${method}" timed out after ${timeoutMs}ms. stderr: ${stderrBuf.slice(-500)}`));
+          if (label) {
+            settle(id, false, new ToolError(
+              `MCP server "${label.server}" tool "${label.tool}" timed out after ${timeoutMs}ms`,
+              { context: { timeout: true, server: label.server, tool: label.tool, timeoutMs, stderr: stderrBuf.slice(-500) } },
+            ));
+          } else {
+            settle(id, false, new ToolError(`MCP server "${name}" "${method}" timed out after ${timeoutMs}ms. stderr: ${stderrBuf.slice(-500)}`));
+          }
         }, timeoutMs);
         timer.unref?.();
       }
@@ -367,7 +376,7 @@ function unwrapContent(content) {
 /**
  * @param {string} serverName
  * @param {McpTool[]} mcpTools
- * @param {(method: string, params?: object, timeoutMs?: number) => Promise<any>} rpc
+ * @param {(method: string, params?: object, timeoutMs?: number, label?: {server: string, tool: string}) => Promise<any>} rpc
  * @param {number} [callTimeout=0] - Per-invocation timeout (ms) for tools/call; 0 = no limit.
  * @returns {ToolDef[]}
  */
@@ -377,7 +386,7 @@ function wrapTools(serverName, mcpTools, rpc, callTimeout = 0) {
     description: t.description || '',
     parameters: t.inputSchema || { type: 'object', properties: {} },
     execute: async (args) => {
-      const result = await rpc('tools/call', { name: t.name, arguments: args }, callTimeout);
+      const result = await rpc('tools/call', { name: t.name, arguments: args }, callTimeout, { server: serverName, tool: t.name });
       if (result.isError) {
         throw new ToolError(unwrapContent(result.content) || 'MCP tool error', {
           context: { server: serverName, tool: t.name },
@@ -451,7 +460,14 @@ async function connectAndListTools(name, def, timeout = 15000) {
     }, timeout);
     client.notify('notifications/initialized');
 
-    const { tools: mcpTools } = await client.rpc('tools/list', {}, timeout);
+    const listed = await client.rpc('tools/list', {}, timeout);
+    // A reply without a `tools` array is a protocol-violating server, not an empty one: fail the
+    // connect HERE (inside the try, so the child is reaped) rather than let every caller's
+    // `.map`/`.filter` throw after the child is already running but before it is tracked.
+    const mcpTools = listed && listed.tools;
+    if (!Array.isArray(mcpTools)) {
+      throw new Error(`MCP server "${name}" returned a malformed tools/list reply (no tools array)`);
+    }
 
     return { mcpTools, client };
   } catch (err) {
@@ -470,9 +486,10 @@ async function connectAndListTools(name, def, timeout = 15000) {
  * @param {string[]} servers
  * @param {ToolDef[]} tools
  * @param {DeniedTool[]} denied
+ * @param {boolean} [allowMode] - Signed allow-list mode: say nothing about restricted/other tools or the cache file.
  * @returns {string}
  */
-function buildSystemContext(servers, tools, denied) {
+function buildSystemContext(servers, tools, denied, allowMode = false) {
   /** @type {string[]} */
   const lines = [];
   lines.push(`MCP Bridge: ${tools.length} tools available from ${servers.length} server(s): ${servers.join(', ')}.`);
@@ -488,6 +505,8 @@ function buildSystemContext(servers, tools, denied) {
   for (const [server, toolNames] of Object.entries(byServer)) {
     lines.push(`  ${server}: ${toolNames.join(', ')}`);
   }
+
+  if (allowMode) return lines.join('\n');
 
   if (denied.length > 0) {
     lines.push(`Restricted tools (${denied.length}, not available to you):`);
@@ -526,13 +545,16 @@ function buildSystemContext(servers, tools, denied) {
  *
  * @param {ToolDef[]} tools - The bulk-loaded, name-prefixed tools array.
  * @param {string} [discoveredAt] - ISO timestamp from .mcp-bridge.json.
+ * @param {Map<string, {server: string, tool: string}>} [excluded] - Allow mode only: names the server
+ *   LISTS but the signed allow-list excludes. mcp_invoke refuses them with `context.denied === true`;
+ *   they never appear in the catalog. Omitted ⇒ unchanged behaviour.
  * @returns {ToolDef[]} [mcp_discover, mcp_invoke]
  * @when you want the two bulk MCP meta-tools (mcp_discover, mcp_invoke) instead of exposing every discovered tool individually — one gate-check per invocation
  * @fails returns [mcp_discover, mcp_invoke]; a tool name does not travel as action.type (a deliberate v0.9 trade for one gate-check per call).
  * @example
  *   const metaTools = buildMetaTools(tools);
  */
-function buildMetaTools(tools, discoveredAt) {
+function buildMetaTools(tools, discoveredAt, excluded) {
   // Catalog descriptors: same info the LLM would see for bulk-loaded tools,
   // but exposed via mcp_discover instead of taking up tool-array slots upfront.
   const catalog = tools.map(t => {
@@ -596,6 +618,12 @@ function buildMetaTools(tools, discoveredAt) {
     },
     execute: async (/** @type {{ name: string, args?: object }} */ { name, args }) => {
       const tool = byName.get(name);
+      const ex = !tool && excluded ? excluded.get(name) : undefined;
+      if (ex) {
+        throw new ToolError(`mcp_invoke: "${name}" is not on this run's allowed list`, {
+          context: { denied: true, server: ex.server, tool: ex.tool },
+        });
+      }
       if (!tool) {
         throw new ToolError(`mcp_invoke: unknown tool "${name}". Call mcp_discover for the current catalog.`, {
           context: { name, knownNames: [...byName.keys()] },
@@ -606,6 +634,118 @@ function buildMetaTools(tools, discoveredAt) {
   };
 
   return [mcpDiscover, mcpInvoke];
+}
+
+// --- Signed allow-list mode (opts.allow) ---
+
+/** @param {any} v @returns {string} */
+const typeName = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+
+/**
+ * Validate `opts.allow`. Messages name the TYPE only — never echo a value.
+ * @param {any} allow
+ * @returns {Map<string, string[]>} server name -> de-duplicated signed raw tool names
+ */
+function validateAllow(allow) {
+  const bad = (/** @type {string} */ msg) =>
+    new ValidationError(`[MCP Bridge] ${msg}`, { context: { lib: 'bare-agent' } });
+  const proto = allow !== null && typeof allow === 'object' ? Object.getPrototypeOf(allow) : undefined;
+  if (typeof allow !== 'object' || allow === null || Array.isArray(allow) || (proto !== Object.prototype && proto !== null)) {
+    throw bad(`allow must be a plain object of { serverName: string[] } (got ${typeName(allow)})`);
+  }
+  const entries = Object.entries(allow);
+  if (entries.length === 0) throw bad('allow must name at least one server (got an empty object)');
+  /** @type {Map<string, string[]>} */
+  const out = new Map();
+  for (const [server, list] of entries) {
+    if (!Array.isArray(list)) throw bad(`allow values must be arrays of tool names (got ${typeName(list)})`);
+    if (list.length === 0) throw bad('allow values must be non-empty arrays of tool names (got an empty array)');
+    for (const t of list) {
+      if (typeof t !== 'string' || t === '') {
+        throw bad(`allow tool names must be non-empty strings (got ${t === '' ? 'empty string' : typeName(t)})`);
+      }
+    }
+    out.set(server, [...new Set(list)]);
+  }
+  return out;
+}
+
+/**
+ * allow-mode body of createMCPBridge: in memory only (no .mcp-bridge.json read or write, no TTL),
+ * server definitions come ONLY from discoverServers(), one connect per signed server, expose
+ * signed ∩ listed, silent on stdout, and the model is never told other tools exist.
+ * @param {Map<string, string[]>} allow
+ * @param {object} o
+ * @param {string[]} [o.configPaths]
+ * @param {boolean} o.includeProjectConfig
+ * @param {number} o.timeout
+ * @param {number} o.callTimeout
+ * @param {(name: string, def: ServerDef) => Promise<boolean>} o.vetServer
+ * @param {(specs: Array<{name: string, command: string, args?: string[]}>) => void} o.warnUnvettedSpawn
+ */
+async function createAllowBridge(allow, o) {
+  const discovered = discoverServers(o.configPaths, { includeProjectConfig: o.includeProjectConfig });
+  /** @type {Array<[string, ServerDef]>} */
+  const toConnect = [];
+  /** @type {Array<{server: string, error: string}>} */
+  const errors = [];
+  for (const name of allow.keys()) {
+    const def = discovered.get(name);
+    if (def) toConnect.push([name, def]);
+    else errors.push({ server: name, error: 'server not found in discovered MCP configs' });
+  }
+  o.warnUnvettedSpawn(toConnect.map(([name, def]) => ({ name, command: def.command, args: def.args })));
+
+  /** @type {ToolDef[]} */
+  const tools = [];
+  /** @type {import('node:child_process').ChildProcess[]} */
+  const children = [];
+  /** @type {string[]} */
+  const connected = [];
+  /** @type {Array<{server: string, tool: string}>} */
+  const missing = [];
+  /** @type {Map<string, {server: string, tool: string}>} */
+  const excluded = new Map();
+  /** @type {Set<string>} */
+  const listedOk = new Set();
+
+  await Promise.all(toConnect.map(async ([name, def]) => {
+    try {
+      if (!(await o.vetServer(name, def))) return;
+      const { mcpTools, client } = await connectAndListTools(name, def, o.timeout);
+      // Track the child BEFORE any processing so close() reaps it even if what follows throws.
+      children.push(client.child);
+      const signed = new Set(allow.get(name));
+      const listed = new Set(mcpTools.map(t => t.name));
+      tools.push(...wrapTools(name, mcpTools.filter(t => signed.has(t.name)), client.rpc, o.callTimeout));
+      for (const t of mcpTools) {
+        if (!signed.has(t.name)) excluded.set(`${name}_${t.name}`, { server: name, tool: t.name });
+      }
+      for (const t of signed) if (!listed.has(t)) missing.push({ server: name, tool: t });
+      connected.push(name);
+      listedOk.add(name);
+    } catch (err) {
+      errors.push({ server: name, error: err.message });
+    }
+  }));
+
+  // Every signed tool of a server that was not found / failed / was rejected by confirmServer is missing.
+  for (const [server, list] of allow) {
+    if (!listedOk.has(server)) for (const tool of list) missing.push({ server, tool });
+  }
+
+  if (errors.length > 0) console.warn('[MCP Bridge] Some servers failed to connect:', errors);
+
+  return {
+    tools,
+    metaTools: buildMetaTools(tools, undefined, excluded),
+    servers: connected,
+    denied: [],
+    systemContext: buildSystemContext(connected, tools, [], true),
+    errors,
+    missing,
+    close: async () => { await Promise.all(children.map(killServer)); },
+  };
 }
 
 // --- Main entry point ---
@@ -632,7 +772,16 @@ function buildMetaTools(tools, discoveredAt) {
  * @param {boolean} [opts.includeProjectConfig=false] - Also scan the project-cwd `./.mcp.json`
  *   during default discovery. Off by default: a project config in an untrusted repo can auto-spawn
  *   arbitrary commands. Implied true when a `confirmServer` hook is present (it vets each command).
- * @param {string[]} [opts.servers] - Limit to these server names.
+ * @param {Record<string, string[]>} [opts.allow] - Signed allow-list `{ [serverName]: rawMcpToolNames[] }`
+ *   (raw MCP names, NOT the `server_tool` prefixed form; each list must be non-empty). Switches to an IN-MEMORY mode: never reads or
+ *   writes `.mcp-bridge.json` (no cache, no TTL; `bridgePath`/`refresh`/`servers` are ignored); server
+ *   definitions come only from `discoverServers(configPaths)`; only servers named here are spawned (still
+ *   vetted by `confirmServer`); each connects ONCE and exposes signed ∩ listed — every other tool is ABSENT
+ *   (not in `tools`, `metaTools` catalog or `systemContext`). Signed tools the server does not list (or whose
+ *   server was not found / failed / was rejected) come back in `missing`. `denied` is always `[]`, nothing is
+ *   written to stdout, and `mcp_invoke` on a listed-but-unsigned name throws `context.denied === true`.
+ *   Invalid shape throws `ValidationError` (type only, never values).
+ * @param {string[]} [opts.servers] - Limit to these server names (ignored when `allow` is given).
  * @param {number} [opts.timeout=15000] - Per-server handshake timeout in ms (initialize + tools/list).
  * @param {number} [opts.callTimeout=120000] - Per-invocation timeout in ms for tools/call. Bounds a
  *   server that accepts a tool call but never responds. Set 0 to disable (unbounded).
@@ -644,9 +793,9 @@ function buildMetaTools(tools, discoveredAt) {
  *   discovered server is trusted — pass this to gate command execution. Presence
  *   of this hook also opts default discovery into the project-cwd `./.mcp.json`,
  *   since each command is then vetted regardless of source.
- * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, close: Function}>}
- * @when you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution
- * @fails a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); returns tools plus a close() to shut servers down.
+ * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, missing?: Array<{server: string, tool: string}>, close: Function}>}
+ * @when you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution, or a per-run signed `allow` list that exposes only the named tools
+ * @fails a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); with `allow` it is in-memory only (no cache file read or written) and signed tools the server does not list land in `missing`, never a throw; returns tools plus a close() to shut servers down.
  * @example
  *   const { tools, close } = await createMCPBridge();
  *   const loop = new Loop({ provider, tools });
@@ -693,6 +842,15 @@ async function createMCPBridge(opts = {}) {
     );
   };
 
+  if (opts.allow !== undefined) {
+    const allow = validateAllow(opts.allow);
+    return createAllowBridge(allow, {
+      configPaths: opts.configPaths,
+      includeProjectConfig: opts.includeProjectConfig === true || !!confirmServer,
+      timeout, callTimeout, vetServer, warnUnvettedSpawn,
+    });
+  }
+
   let config = readBridgeConfig(bridgePath);
   const needsRefresh = opts.refresh || !config || isExpired(config);
 
@@ -731,8 +889,8 @@ async function createMCPBridge(opts = {}) {
           // decision, not a connection failure, so it must not land in `errors`.
           if (!(await vetServer(name, def))) return;
           const result = await connectAndListTools(name, def, timeout);
-          freshTools.set(name, result.mcpTools);
           connectResults.set(name, result.client);
+          freshTools.set(name, result.mcpTools);
         } catch (err) {
           errors.push({ server: name, error: err.message });
         }
@@ -742,20 +900,25 @@ async function createMCPBridge(opts = {}) {
         console.warn('[MCP Bridge] Some servers failed to connect:', errors);
       }
 
-      // Only write config when at least one server connected successfully.
-      // If all servers failed, retain the existing config unchanged so
-      // user-curated allow/deny settings are not destroyed on transient failures.
-      if (freshTools.size > 0) {
-        config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
-        writeBridgeConfig(bridgePath, config);
-        console.log(`[MCP Bridge] Wrote ${bridgePath}`);
-      } else if (!config) {
-        return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
-      }
+      // Discovery connections are killed in `finally`: a throw from the config merge/write (e.g. an
+      // unwritable bridgePath) must not strand the live children held only in connectResults.
+      try {
+        // Only write config when at least one server connected successfully.
+        // If all servers failed, retain the existing config unchanged so
+        // user-curated allow/deny settings are not destroyed on transient failures.
+        if (freshTools.size > 0) {
+          config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
+          writeBridgeConfig(bridgePath, config);
+          console.log(`[MCP Bridge] Wrote ${bridgePath}`);
+        } else if (!config) {
+          return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+        }
 
-      // Close the discovery connections — we'll reconnect below using the config
-      for (const client of connectResults.values()) {
-        await killServer(client.child);
+      } finally {
+        // Close the discovery connections — we'll reconnect below using the config
+        for (const client of connectResults.values()) {
+          await killServer(client.child);
+        }
       }
     }
   }
@@ -808,13 +971,14 @@ async function createMCPBridge(opts = {}) {
       // Denied by confirmServer: skip silently (the caller's decision, not a failure).
       if (!(await vetServer(name, serverConf))) return;
       const { mcpTools, client } = await connectAndListTools(name, serverConf, timeout);
+      // Track the child BEFORE any processing so close() reaps it even if what follows throws.
+      children.push(client.child);
 
       // Only wrap tools that are allowed in config
       const allowed = mcpTools.filter(t => allowedToolNames.includes(t.name));
       const wrapped = wrapTools(name, allowed, client.rpc, callTimeout);
 
       tools.push(...wrapped);
-      children.push(client.child);
       connected.push(name);
 
       // Track denied tools with descriptions from the server
