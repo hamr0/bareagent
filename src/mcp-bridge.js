@@ -890,7 +890,7 @@ async function createAllowBridge(allow, o) {
  *   discovered server is trusted — pass this to gate command execution. Presence
  *   of this hook also opts default discovery into the project-cwd `./.mcp.json`,
  *   since each command is then vetted regardless of source.
- * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, missing?: Array<{server: string, tool: string}>, close: Function}>}
+ * @returns {Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors: Array<{server: string, error: string}>, missing?: Array<{server: string, tool: string}>, close: Function}>}
  * @when you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution, or a per-run signed `allow` list that exposes only the named tools
  * @fails a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); with `allow` it is in-memory only (no cache file read or written) and signed tools the server does not list land in `missing`, never a throw; returns tools plus a close() to shut servers down.
  * @example
@@ -950,8 +950,6 @@ async function createMCPBridge(opts = {}) {
       const freshTools = new Map();
       /** @type {Map<string, RpcClient>} */
       const connectResults = new Map();
-      const errors = discoveryErrors;
-
       const reqServers = opts.servers;
       const toDiscover = reqServers
         ? [...discovered.entries()].filter(([n]) => reqServers.includes(n))
@@ -968,12 +966,12 @@ async function createMCPBridge(opts = {}) {
           connectResults.set(name, result.client);
           freshTools.set(name, result.mcpTools);
         } catch (err) {
-          errors.push({ server: name, error: err.message });
+          discoveryErrors.push({ server: name, error: err.message });
         }
       }));
 
-      if (errors.length > 0) {
-        console.warn('[MCP Bridge] Some servers failed to connect:', errors);
+      if (discoveryErrors.length > 0) {
+        console.warn('[MCP Bridge] Some servers failed to connect:', discoveryErrors);
       }
 
       // Discovery connections are killed in `finally`: a throw from the config merge/write (e.g. an
@@ -1064,12 +1062,15 @@ async function createMCPBridge(opts = {}) {
         }
       }
     } catch (err) {
-      errors.push({ server: name, error: err.message });
+      // One entry per failing server per run: a server that already failed discovery keeps its
+      // (first) discovery entry rather than being listed again by the main pass.
+      if (!errors.some(e => e.server === name)) errors.push({ server: name, error: err.message });
     }
   }));
 
-  if (errors.length > 0) {
-    console.warn('[MCP Bridge] Some servers failed to connect:', errors);
+  // The discovery pass already warned about its own failures; warn here only for new ones.
+  if (errors.length > discoveryErrors.length) {
+    console.warn('[MCP Bridge] Some servers failed to connect:', errors.slice(discoveryErrors.length));
   }
 
   const systemContext = buildSystemContext(connected, tools, denied);

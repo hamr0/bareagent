@@ -309,6 +309,44 @@ describe('MCP annotations, pagination, listServerTools', () => {
       });
     }
 
+    // Merge path: a cached .mcp-bridge.json already lists `s`, discovery fails for `s`, and the cached
+    // def fails the same way on the main connect. One entry, one warn — never `s` twice.
+    for (const [label, env, re] of [
+      ['page cap', { MOCK_ENDLESS_PAGES: '1' }, /page cap/],
+      ['repeated cursor', { MOCK_REPEAT_CURSOR: '1' }, /repeated a tools\/list cursor/],
+    ]) {
+      for (const [mode, extra, ttl] of [
+        ['refresh:true', { refresh: true }, '1h'],
+        ['expired TTL', {}, '1s'],
+      ]) {
+        it(`cached def + ${mode}, ${label}: failing server listed once, one warn, child reaped`, { timeout: 60000 }, async () => {
+          const { cfg, pidFile } = setup(env);
+          const bridgePath = join(dir, `cached${++n}.json`);
+          const def = { command: 'node', args: [MOCK_SERVER], env: { ...env, MOCK_PID_FILE: pidFile } };
+          writeFileSync(bridgePath, JSON.stringify({
+            discovered: new Date(Date.now() - 60000).toISOString(), ttl,
+            servers: { s: { ...def, tools: { t1: 'allow' } } },
+          }));
+          const warns = [];
+          const b = await (async () => {
+            const log = console.log, warn = console.warn;
+            console.log = () => {}; console.warn = (...a) => warns.push(a);
+            try { return await createMCPBridge({ bridgePath, configPaths: [cfg], timeout: 5000, ...extra }); }
+            finally { console.log = log; console.warn = warn; }
+          })();
+          try {
+            assert.deepEqual(b.tools, []);
+            assert.equal(b.errors.length, 1);
+            assert.equal(b.errors[0].server, 's');
+            assert.match(b.errors[0].error, re);
+            const failWarns = warns.filter(a => String(a[0]).includes('Some servers failed to connect'));
+            assert.ok(failWarns.length <= 1, `failure warn fired ${failWarns.length}x`);
+          } finally { await b.close(); }
+          await assertReaped(pidFile);
+        });
+      }
+    }
+
     it('a later page without a tools array is the malformed error, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_PAGES: '3', MOCK_BAD_PAGE: '1' });
       await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 5000 }), /malformed tools\/list/);

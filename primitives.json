@@ -123,7 +123,7 @@
       "category": "mcp",
       "when": "you want to auto-discover MCP servers and expose them as bareagent tools in one call — with a trust hook gating command execution, or a per-run signed `allow` list that exposes only the named tools",
       "import": "import { createMCPBridge } from 'bare-agent/mcp'",
-      "signature": "createMCPBridge(opts?: object) => Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors?: Array<{server: string, error: string}>, missing?: Array<{server: string, tool: string}>, close: Function}>",
+      "signature": "createMCPBridge(opts?: object) => Promise<{tools: ToolDef[], metaTools?: ToolDef[], servers: string[], systemContext: string, denied: DeniedTool[], errors: Array<{server: string, error: string}>, missing?: Array<{server: string, tool: string}>, close: Function}>",
       "fails": "a trust hook returning false skips a server (its command never runs) and a throw is fail-closed (deny); with `allow` it is in-memory only (no cache file read or written) and signed tools the server does not list land in `missing`, never a throw; returns tools plus a close() to shut servers down.",
       "example": "const { tools, close } = await createMCPBridge();\nconst loop = new Loop({ provider, tools });"
     },

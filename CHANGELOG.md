@@ -27,8 +27,9 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   `tools/list` pages, or repeating a `nextCursor`, used to yield only its first page (the rest was silently ignored); it now fails
   its connect, so none of its tools are exposed and the failure is an `errors` entry naming the server (plus the existing
   `console.warn`). Every bulk-mode return now carries `errors` — including the early returns for an empty/failed cold run, which
-  previously had no `errors` key (it is `[]` when nothing failed). On a cold or refresh run, `errors` also includes that run's
-  discovery-pass failures.
+  previously had no `errors` key (it is `[]` when nothing failed). `errors` is always present in bulk mode, with one entry
+  per failing server per run; on a cold or refresh run it also includes that run's discovery-pass failures (a server failing
+  both the discovery and the main connect is listed once, with the discovery message, and warned about once).
 
 ### Fixed
 
