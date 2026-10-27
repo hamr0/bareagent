@@ -2,6 +2,30 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **MCP tool `annotations` pass-through (all modes).** A server's `tools/list` `annotations` object (e.g. `readOnlyHint`,
+  `destructiveHint`) now rides on each bridged tool (`ToolDef.annotations`) and on every `mcp_discover` catalog entry, as the
+  SAME object, unmodified. The key is ABSENT (not `{}`) when the server sent none. They are server HINTS (untrusted metadata),
+  never an authorization signal; `systemContext` is unchanged.
+- **`listServerTools({ server, configPaths?, confirmServer?, includeProjectConfig?, timeout? })`** (`bare-agent/mcp`) — one-shot
+  read-only listing of one server's tools as `[{name, description, annotations?}]`, for deciding what to put in `allow`. Discovers
+  via `discoverServers`, vets with `confirmServer` (`=== true` proceeds; a throw denies; implies `includeProjectConfig`), connects,
+  lists (following pagination) and ALWAYS kills the child. Never reads or writes `.mcp-bridge.json`, prints nothing to stdout.
+  THROWS (never returns `[]`) on server not found, declined/throwing `confirmServer`, connect/handshake failure, timeout, malformed
+  reply; bad input is a type-only `ValidationError`. One total wall-clock deadline derived as 4 x `timeout` (no new option):
+  on trip the child is killed and a `TimeoutError` (`context.bound:'deadline'`) rejects. `confirmServer` time is not counted.
+
+### Fixed
+
+- **`tools/list` pagination (all modes).** `connectAndListTools` sent `tools/list` once and ignored `nextCursor`, so any tool past
+  the first page was silently missing (and an `allow`-signed tool on page 2 landed in `missing`). It now follows `nextCursor`,
+  accumulating every page. A server returning more than 100 pages, or repeating a cursor, now THROWS inside the connect (child
+  reaped; surfaces as that server's `errors` entry in the bridge) rather than returning a truncated catalog. Every page must carry a
+  `tools` array (same malformed error as before).
+
 ## [0.53.0] - 2026-10-27
 
 ### Added
