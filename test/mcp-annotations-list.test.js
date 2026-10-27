@@ -199,29 +199,31 @@ describe('MCP annotations, pagination, listServerTools', () => {
 
     it('connect failure (malformed reply): throws, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_BAD_TOOLS_LIST: '1' });
-      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 2000 }), /malformed tools\/list/);
+      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 3000 }), /malformed tools\/list/);
       await assertReaped(pidFile);
     });
 
     it('per-round-trip timeout (tools/list never answered): throws, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_NO_TOOLS_LIST: '1' });
-      // 1000ms (not 400): initialize must complete under full-suite load (node cold start) so the
-      // fixture has spawned and written its pid file before the tools/list round-trip times out.
-      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 1000 }), /timed out/);
+      // 3000ms (not 400/1000): initialize must complete under full-suite load (node cold start can
+      // exceed 1s on a busy machine) so the fixture has spawned and written its pid file before the
+      // tools/list round-trip times out.
+      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 3000 }), /timed out/);
       await assertReaped(pidFile);
     });
 
-    it('total deadline trips on a server answering every page just under the per-call timeout; child reaped', { timeout: 20000 }, async () => {
-      // 600ms/page < 1000ms timeout so no single round-trip times out (generous headroom for
-      // node startup under load); endless pages would run 100 × 600ms without the total
-      // deadline (4 × 1000 = 4000ms).
-      const { cfg, pidFile } = setup({ MOCK_ENDLESS_PAGES: '1', MOCK_PAGE_DELAY: '600' });
+    it('total deadline trips on a server answering every page just under the per-call timeout; child reaped', { timeout: 40000 }, async () => {
+      // timeout 3000 gives initialize real headroom (node cold start under full-suite load took
+      // >1000ms and tripped the handshake instead of the deadline). 1500ms/page < 3000ms so no
+      // single round-trip times out; endless pages would run 100 × 1500ms without the total
+      // deadline (4 × 3000 = 12000ms).
+      const { cfg, pidFile } = setup({ MOCK_ENDLESS_PAGES: '1', MOCK_PAGE_DELAY: '1500' });
       const t0 = Date.now();
       await assert.rejects(
-        () => listServerTools({ server: 's', configPaths: [cfg], timeout: 1000 }),
+        () => listServerTools({ server: 's', configPaths: [cfg], timeout: 3000 }),
         (e) => e instanceof TimeoutError && /total deadline/.test(e.message) && e.context.bound === 'deadline' && /"s"/.test(e.message),
       );
-      assert.ok(Date.now() - t0 < 8000, 'deadline did not bound the call');
+      assert.ok(Date.now() - t0 < 20000, 'deadline did not bound the call');
       await assertReaped(pidFile);
     });
 
