@@ -933,11 +933,19 @@ async function createMCPBridge(opts = {}) {
   /** @type {Map<string, string>} */
   const failures = new Map();
   /** @param {string} name @param {unknown} err */
-  const noteFailure = (name, err) => { if (!failures.has(name)) failures.set(name, /** @type {Error} */ (err).message); };
-  /** The one place `errors` is computed (and the one failure warn issued). @param {string[]} connected */
+  const noteFailure = (name, err) => {
+    if (failures.has(name)) return;
+    const message = err && typeof err === 'object' && 'message' in err && typeof err.message === 'string' ? err.message : String(err);
+    failures.set(name, message);
+  };
+  /** The one place `errors` is computed (and the failure warns issued). @param {string[]} connected */
   const finalErrors = (connected) => {
-    const errors = [...failures].filter(([name]) => !connected.includes(name)).map(([server, error]) => ({ server, error }));
+    const up = new Set(connected);
+    const errors = [...failures].filter(([name]) => !up.has(name)).map(([server, error]) => ({ server, error }));
     if (errors.length > 0) console.warn('[MCP Bridge] Some servers failed to connect:', errors);
+    // Discovery failed but the cached definition connected: not an error, yet the config edit was not applied.
+    const cachedUsed = [...failures].filter(([name]) => up.has(name)).map(([server, error]) => ({ server, error }));
+    if (cachedUsed.length > 0) console.warn('[MCP Bridge] Discovery failed for server(s) that connected from the cached definition (config edit not applied):', cachedUsed);
     return errors;
   };
   /** Early return: nothing connected. */

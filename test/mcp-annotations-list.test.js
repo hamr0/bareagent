@@ -368,6 +368,7 @@ describe('MCP annotations, pagination, listServerTools', () => {
       finally { console.log = log; console.warn = warn; }
     };
     const failWarns = (warns) => warns.filter(a => String(a[0]).includes('Some servers failed to connect'));
+    const cachedWarns = (warns) => warns.filter(a => String(a[0]).includes('connected from the cached definition'));
 
     for (const [mode, extra, ttl] of [['refresh:true', { refresh: true }, '1h'], ['expired TTL', {}, '1s']]) {
       it(`${mode}: discovery fails but the cached def connects, so not in errors`, { timeout: 60000 }, async () => {
@@ -380,10 +381,28 @@ describe('MCP annotations, pagination, listServerTools', () => {
           assert.deepEqual(b.servers, ['s']);
           assert.deepEqual(b.errors, []);
           assert.equal(failWarns(warns).length, 0);
+          const cw = cachedWarns(warns);
+          assert.equal(cw.length, 1, 'one cached-def warn');
+          assert.deepEqual(cw[0][1].map(e => e.server), ['s']);
+          assert.match(cw[0][1][0].error, /page cap/);
         } finally { await b.close(); }
         await assertReaped(pidFile);
       });
     }
+
+    it('healthy refresh (discovery ok): no cached-def warn', { timeout: 60000 }, async () => {
+      const pidFile = join(dir, `ok${++n}.pid`); pidFiles.push(pidFile);
+      const { b, warns } = await runCached({
+        discover: { s: goodDef(pidFile) }, cache: { s: goodDef(pidFile) }, extra: { refresh: true },
+      });
+      try {
+        assert.deepEqual(b.servers, ['s']);
+        assert.deepEqual(b.errors, []);
+        assert.equal(cachedWarns(warns).length, 0);
+        assert.equal(failWarns(warns).length, 0);
+      } finally { await b.close(); }
+      await assertReaped(pidFile);
+    });
 
     it('warm cache: a cached server that fails to connect is listed once; the healthy one is not', { timeout: 60000 }, async () => {
       const goodPid = join(dir, `ok${++n}.pid`); pidFiles.push(goodPid);

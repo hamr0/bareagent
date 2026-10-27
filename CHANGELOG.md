@@ -30,7 +30,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   previously had no `errors` key (it is `[]` when nothing failed). Bulk-mode `errors` follows one rule,
   computed once at the end of the run: it lists each server that did not connect this run, once (first failure message wins),
   and is always present. A server that failed discovery but then connected from the cached def is not listed. One
-  `console.warn` per run names the final `errors`, if any.
+  `console.warn` per run names the final `errors`, if any. A server that failed discovery but connected from the cached def draws
+  one separate `console.warn` (stderr; never in `errors`) naming it and its discovery message, so a broken config edit is not silent.
 
 ### Fixed
 

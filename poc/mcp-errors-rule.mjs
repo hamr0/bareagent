@@ -1,6 +1,6 @@
 // POC (gate): the bulk-mode `errors` RULE, driven against the REAL createMCPBridge + the real mock server.
 //   RULE: `errors` lists ONLY servers that did NOT end up connected this run (not in `servers`),
-//         exactly ONE entry per such server; working servers never appear; <=1 failure warn per run;
+//         exactly ONE entry per such server; working servers never appear; <=1 failure warn per run; a server that failed discovery but connected from the cached def draws exactly one separate cached-def warn (never in `errors`);
 //         `errors` always an array; no live child after close().
 // Prints a table, exits 1 on any violation.
 import { createRequire } from 'node:module';
@@ -30,17 +30,17 @@ const endless = () => mock({ MOCK_ENDLESS_PAGES: '1' });
 const exits = () => ({ command: 'node', args: ['-e', 'process.exit(1)'] });
 
 // scenario: discover = defs found by discovery; cache = cached defs (null = none); ttl/age; opts
-const S = (id, desc, { discover = {}, cache = null, ttl = '1h', opts = {}, servers, errors }) =>
-  ({ id, desc, discover, cache, ttl, opts, servers, errors });
+const S = (id, desc, { discover = {}, cache = null, ttl = '1h', opts = {}, servers, errors, cachedWarn = [] }) =>
+  ({ id, desc, discover, cache, ttl, opts, servers, errors, cachedWarn });
 
 const scenarios = [
   S('a', 'cold: good g + failing s', { discover: { g: good(), s: endless() }, servers: ['g'], errors: ['s'] }),
   S('b', 'cold: only failing s (early return)', { discover: { s: endless() }, servers: [], errors: ['s'] }),
   S('b2', 'cold: only s that exits at once', { discover: { s: exits() }, servers: [], errors: ['s'] }),
   S('c', 'refresh: cached s fails AND discovery s fails', { discover: { s: endless() }, cache: { s: endless() }, opts: { refresh: true }, servers: [], errors: ['s'] }),
-  S('d', 'refresh: discovery s fails, cached s connects', { discover: { s: endless() }, cache: { s: good() }, opts: { refresh: true }, servers: ['s'], errors: [] }),
+  S('d', 'refresh: discovery s fails, cached s connects', { discover: { s: endless() }, cache: { s: good() }, opts: { refresh: true }, servers: ['s'], errors: [], cachedWarn: ['s'] }),
   S('e1', 'expired TTL variant of c', { discover: { s: endless() }, cache: { s: endless() }, ttl: '1s', servers: [], errors: ['s'] }),
-  S('e2', 'expired TTL variant of d', { discover: { s: endless() }, cache: { s: good() }, ttl: '1s', servers: ['s'], errors: [] }),
+  S('e2', 'expired TTL variant of d', { discover: { s: endless() }, cache: { s: good() }, ttl: '1s', servers: ['s'], errors: [], cachedWarn: ['s'] }),
   S('f', 'warm cache: cached s fails (+ good g)', { cache: { g: good(), s: endless() }, servers: ['g'], errors: ['s'] }),
   S('g', 'warm cache: all healthy', { cache: { g: good(), s: good() }, servers: ['g', 's'], errors: [] }),
   S('h', 'discovery empty, cache exists (fall-through)', { cache: { g: good(), s: endless() }, opts: { refresh: true }, servers: ['g'], errors: ['s'] }),
@@ -79,6 +79,14 @@ for (const sc of scenarios) {
     const fw = warns.filter(a => String(a[0]).includes('Some servers failed to connect'));
     if (fw.length > 1) v.push(`failure warn x${fw.length}`);
     if (sc.errors.length === 0 && fw.length) v.push('failure warn with no final errors');
+    // cached-def warn: exactly one naming the want-set when expected, none otherwise
+    const cw = warns.filter(a => String(a[0]).includes('connected from the cached definition'));
+    if (sc.cachedWarn.length === 0) { if (cw.length) v.push(`unexpected cached-def warn x${cw.length}`); }
+    else if (cw.length !== 1) v.push(`cached-def warn x${cw.length}, want 1`);
+    else {
+      const named = (cw[0][1] || []).map(e => e.server);
+      if (JSON.stringify(named.sort()) !== JSON.stringify([...sc.cachedWarn].sort())) v.push(`cached-def warn names ${JSON.stringify(named)}`);
+    }
     await b.close();
   }
   await sleep(150);
