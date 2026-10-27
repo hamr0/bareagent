@@ -3,7 +3,7 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { join } = require('node:path');
-const { writeFileSync, mkdtempSync, readdirSync, existsSync, realpathSync, rmSync } = require('node:fs');
+const { writeFileSync, mkdtempSync, readdirSync, existsSync, realpathSync, rmSync, readFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { createMCPBridge } = require('../src/mcp-bridge');
@@ -216,5 +216,91 @@ describe('createMCPBridge without allow — unchanged', () => {
         return true;
       });
     } finally { await b.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// Child-reap guarantees: after a failed/odd connect, ZERO spawned servers may stay alive. A leak
+// must FAIL the test (liveness assertion + per-test timeout + force-kill in finally), never hang it.
+describe('createMCPBridge({ allow }) — no leaked children', () => {
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const pidsOf = (files) => files.filter(existsSync).map(f => Number(readFileSync(f, 'utf8')));
+  async function settleDead(pids) {
+    const end = Date.now() + 3000;
+    while (Date.now() < end && pids.some(alive)) await new Promise(r => setTimeout(r, 25));
+    return pids.filter(alive);
+  }
+
+  async function scenario(servers, allow, fn) {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-leak-')));
+    const pidFiles = Object.keys(servers).map(n => join(dir, `${n}.pid`));
+    const cfg = join(dir, 'servers.json');
+    const mcpServers = {};
+    Object.entries(servers).forEach(([n, env], i) => {
+      mcpServers[n] = { command: 'node', args: [MOCK_SERVER], env: { ...env, MOCK_PID_FILE: pidFiles[i] } };
+    });
+    writeFileSync(cfg, JSON.stringify({ mcpServers }));
+    let bridge;
+    try {
+      bridge = await createMCPBridge({ allow, configPaths: [cfg], bridgePath: join(dir, 'b.json'), timeout: 1500 });
+      await fn(bridge);
+      if (bridge) await bridge.close();
+      const pids = pidsOf(pidFiles);
+      assert.ok(pids.length > 0, 'fixture spawned nothing — test is vacuous');
+      const leaked = await settleDead(pids);
+      assert.deepEqual(leaked, [], 'leaked live MCP server children');
+      return pids.length;
+    } finally {
+      for (const pid of pidsOf(pidFiles)) { try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ } }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('malformed tools/list reply: server in errors, signed tools missing, child reaped', { timeout: 20000 }, async () => {
+    await scenario({ bad: { MOCK_BAD_TOOLS_LIST: '1' } }, { bad: ['read_file'] }, async (b) => {
+      assert.equal(b.errors.length, 1);
+      assert.equal(b.errors[0].server, 'bad');
+      assert.deepEqual(b.missing, [{ server: 'bad', tool: 'read_file' }]);
+      assert.deepEqual(b.servers, []);
+    });
+  });
+
+  it('half-failed multi-server allow, then close(): every child reaped', { timeout: 20000 }, async () => {
+    const n = await scenario(
+      { good: {}, bad: { MOCK_BAD_TOOLS_LIST: '1' } },
+      { good: ['read_file'], bad: ['read_file'] },
+      async (b) => {
+        assert.deepEqual(b.servers, ['good']);
+        assert.deepEqual(b.tools.map(t => t.name), ['good_read_file']);
+      },
+    );
+    assert.equal(n, 2);
+  });
+
+  it('failed connect (tools/list never answered): child reaped', { timeout: 20000 }, async () => {
+    await scenario({ stuck: { MOCK_NO_TOOLS_LIST: '1' } }, { stuck: ['read_file'] }, async (b) => {
+      assert.equal(b.errors.length, 1);
+      assert.deepEqual(b.missing, [{ server: 'stuck', tool: 'read_file' }]);
+    });
+  });
+});
+
+describe('createMCPBridge without allow — no leaked children on malformed tools/list', () => {
+  it('bulk path: malformed reply is an error, child reaped', { timeout: 20000 }, async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'mcp-leak2-')));
+    const pidFile = join(dir, 'p.pid');
+    const cfg = join(dir, 'servers.json');
+    writeFileSync(cfg, JSON.stringify({ mcpServers: { bad: { command: 'node', args: [MOCK_SERVER], env: { MOCK_BAD_TOOLS_LIST: '1', MOCK_PID_FILE: pidFile } } } }));
+    const warn = console.warn; console.warn = () => {};
+    try {
+      const b = await createMCPBridge({ configPaths: [cfg], bridgePath: join(dir, 'b.json'), timeout: 1500 });
+      await b.close();
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      const end = Date.now() + 3000;
+      const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      while (Date.now() < end && alive()) await new Promise(r => setTimeout(r, 25));
+      const leaked = alive();
+      if (leaked) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      assert.equal(leaked, false, 'leaked live MCP server child');
+    } finally { console.warn = warn; rmSync(dir, { recursive: true, force: true }); }
   });
 });

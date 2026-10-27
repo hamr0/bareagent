@@ -460,7 +460,14 @@ async function connectAndListTools(name, def, timeout = 15000) {
     }, timeout);
     client.notify('notifications/initialized');
 
-    const { tools: mcpTools } = await client.rpc('tools/list', {}, timeout);
+    const listed = await client.rpc('tools/list', {}, timeout);
+    // A reply without a `tools` array is a protocol-violating server, not an empty one: fail the
+    // connect HERE (inside the try, so the child is reaped) rather than let every caller's
+    // `.map`/`.filter` throw after the child is already running but before it is tracked.
+    const mcpTools = listed && listed.tools;
+    if (!Array.isArray(mcpTools)) {
+      throw new Error(`MCP server "${name}" returned a malformed tools/list reply (no tools array)`);
+    }
 
     return { mcpTools, client };
   } catch (err) {
@@ -706,6 +713,8 @@ async function createAllowBridge(allow, o) {
     try {
       if (!(await o.vetServer(name, def))) return;
       const { mcpTools, client } = await connectAndListTools(name, def, o.timeout);
+      // Track the child BEFORE any processing so close() reaps it even if what follows throws.
+      children.push(client.child);
       const signed = new Set(allow.get(name));
       const listed = new Set(mcpTools.map(t => t.name));
       tools.push(...wrapTools(name, mcpTools.filter(t => signed.has(t.name)), client.rpc, o.callTimeout));
@@ -713,7 +722,6 @@ async function createAllowBridge(allow, o) {
         if (!signed.has(t.name)) excluded.set(`${name}_${t.name}`, { server: name, tool: t.name });
       }
       for (const t of signed) if (!listed.has(t)) missing.push({ server: name, tool: t });
-      children.push(client.child);
       connected.push(name);
       listedOk.add(name);
     } catch (err) {
@@ -881,8 +889,8 @@ async function createMCPBridge(opts = {}) {
           // decision, not a connection failure, so it must not land in `errors`.
           if (!(await vetServer(name, def))) return;
           const result = await connectAndListTools(name, def, timeout);
-          freshTools.set(name, result.mcpTools);
           connectResults.set(name, result.client);
+          freshTools.set(name, result.mcpTools);
         } catch (err) {
           errors.push({ server: name, error: err.message });
         }
@@ -892,20 +900,25 @@ async function createMCPBridge(opts = {}) {
         console.warn('[MCP Bridge] Some servers failed to connect:', errors);
       }
 
-      // Only write config when at least one server connected successfully.
-      // If all servers failed, retain the existing config unchanged so
-      // user-curated allow/deny settings are not destroyed on transient failures.
-      if (freshTools.size > 0) {
-        config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
-        writeBridgeConfig(bridgePath, config);
-        console.log(`[MCP Bridge] Wrote ${bridgePath}`);
-      } else if (!config) {
-        return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
-      }
+      // Discovery connections are killed in `finally`: a throw from the config merge/write (e.g. an
+      // unwritable bridgePath) must not strand the live children held only in connectResults.
+      try {
+        // Only write config when at least one server connected successfully.
+        // If all servers failed, retain the existing config unchanged so
+        // user-curated allow/deny settings are not destroyed on transient failures.
+        if (freshTools.size > 0) {
+          config = mergeBridgeConfig(config, new Map(toDiscover), freshTools);
+          writeBridgeConfig(bridgePath, config);
+          console.log(`[MCP Bridge] Wrote ${bridgePath}`);
+        } else if (!config) {
+          return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+        }
 
-      // Close the discovery connections — we'll reconnect below using the config
-      for (const client of connectResults.values()) {
-        await killServer(client.child);
+      } finally {
+        // Close the discovery connections — we'll reconnect below using the config
+        for (const client of connectResults.values()) {
+          await killServer(client.child);
+        }
       }
     }
   }
@@ -958,13 +971,14 @@ async function createMCPBridge(opts = {}) {
       // Denied by confirmServer: skip silently (the caller's decision, not a failure).
       if (!(await vetServer(name, serverConf))) return;
       const { mcpTools, client } = await connectAndListTools(name, serverConf, timeout);
+      // Track the child BEFORE any processing so close() reaps it even if what follows throws.
+      children.push(client.child);
 
       // Only wrap tools that are allowed in config
       const allowed = mcpTools.filter(t => allowedToolNames.includes(t.name));
       const wrapped = wrapTools(name, allowed, client.rpc, callTimeout);
 
       tools.push(...wrapped);
-      children.push(client.child);
       connected.push(name);
 
       // Track denied tools with descriptions from the server

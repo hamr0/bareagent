@@ -113,7 +113,7 @@ const bridge = await createMCPBridge({
 
 In this mode the bridge never reads or writes `.mcp-bridge.json` (no cache, no TTL; `bridgePath`, `refresh` and `servers` are ignored), takes server definitions only from `discoverServers(configPaths)`, spawns only servers named in `allow` (still vetted by `confirmServer`), and connects once. Unsigned tools are absent from `tools`, the `metaTools` catalog and `systemContext`; `denied` is always `[]`; nothing is printed to stdout. Signed tools the server does not list — or whose server was not found, failed, or was rejected — are returned in `missing: [{server, tool}]`, never thrown. `mcp_invoke` on a name the server lists but `allow` excludes throws a `ToolError` with `context: { denied: true, server, tool }`. A malformed `allow` (including an empty tool list for a server) throws `ValidationError`.
 
-A `tools/call` timeout (any mode, `callTimeout`, default 120000 ms) throws `MCP server "<server>" tool "<tool>" timed out after <ms>ms` with `context: { timeout: true, server, tool, timeoutMs, stderr }`.
+A `tools/call` timeout (any mode, `callTimeout`, default 120000 ms) throws `MCP server "<server>" tool "<tool>" timed out after <ms>ms` with `context: { timeout: true, server, tool, timeoutMs, stderr }`. With `wireGate`, the audit row for that failed call carries `errorContext: { timeout, server, tool, timeoutMs }` only — `stderr` is never forwarded to the audit. A server whose `tools/list` reply has no `tools` array fails its connect (listed in `errors`, its signed tools in `missing`) and its child process is killed.
 
 ## File-based deny vs runtime policy
 

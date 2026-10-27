@@ -17,6 +17,8 @@
  *                            (stay alive) — exercises the per-call timeout
  *   MOCK_STDERR=<text>     — write this text to stderr at startup (lets a test assert
  *                            server stderr lands in error context, not the message)
+ *   MOCK_BAD_TOOLS_LIST=1  — answer tools/list with `{}` (no `tools` array) — a protocol-violating
+ *                            server; exercises the child-reap path when list processing fails
  *   MOCK_CLOSE_STDIN_AFTER_INIT=1 — answer `initialize`, then close our stdin
  *                            read-end and stay alive. The parent's follow-up
  *                            write (`notifications/initialized`) then hits a
@@ -76,6 +78,7 @@ async function handleMessage(msg) {
     // no response for notifications
   } else if (msg.method === 'tools/list') {
     if (process.env.MOCK_NO_TOOLS_LIST) return; // never respond → exercises tools/list timeout
+    if (process.env.MOCK_BAD_TOOLS_LIST) return respond(msg.id, {});
     respond(msg.id, { tools: TOOLS });
   } else if (msg.method === 'tools/call') {
     if (process.env.MOCK_HANG_ON_CALL) return; // never respond → exercises per-call timeout
