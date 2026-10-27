@@ -297,9 +297,23 @@ function createRpcClient(name, def) {
   // and rpc()/notify() guard writability before writing.
   child.stdin.on('error', () => { /* child gone; surfaced via close + write guards */ });
 
+  // Spawn failure (ENOENT/EACCES/...): with NO 'error' listener Node re-throws it as an uncaught
+  // exception and crashes the HOST. Record it once; it WINS over any later pipe/close error and
+  // rejects every pending and future rpc. Names the command ONLY (args/env can carry tokens).
+  /** @type {ToolError | null} */
+  let spawnErr = null;
+  child.on('error', (err) => {
+    if (spawnErr) return;
+    const code = typeof (/** @type {any} */ (err)?.code) === 'string' ? /** @type {any} */ (err).code : 'ESPAWN';
+    spawnErr = new ToolError(`MCP server "${name}" failed to start: command "${command}" (${code})`, {
+      context: { spawnError: true, server: name, code },
+    });
+    for (const id of [...pending.keys()]) settle(id, false, spawnErr);
+  });
+
   child.on('close', (code) => {
     for (const id of [...pending.keys()]) {
-      settle(id, false, new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
+      settle(id, false, spawnErr || new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
     }
   });
 
@@ -318,6 +332,7 @@ function createRpcClient(name, def) {
   function rpc(method, params = {}, timeoutMs = 0, label) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
+      if (spawnErr) return reject(spawnErr);
       if (!child.stdin.writable) {
         return reject(new ToolError(`MCP server "${name}" stdin is not writable (process exited or pipe closed). stderr: ${stderrBuf.slice(-500)}`));
       }
@@ -331,7 +346,10 @@ function createRpcClient(name, def) {
               { context: { timeout: true, server: label.server, tool: label.tool, timeoutMs, stderr: stderrBuf.slice(-500) } },
             ));
           } else {
-            settle(id, false, new ToolError(`MCP server "${name}" "${method}" timed out after ${timeoutMs}ms. stderr: ${stderrBuf.slice(-500)}`));
+            settle(id, false, new ToolError(
+              `MCP server "${name}" "${method}" timed out after ${timeoutMs}ms`,
+              { context: { timeout: true, server: name, method, timeoutMs, stderr: stderrBuf.slice(-500) } },
+            ));
           }
         }, timeoutMs);
         timer.unref?.();
@@ -340,7 +358,9 @@ function createRpcClient(name, def) {
       const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
       child.stdin.write(msg, (err) => {
         // settle() no-ops if 'close'/timeout already settled this id.
-        if (err) settle(id, false, new ToolError(`MCP server "${name}" write failed: ${err.message}. stderr: ${stderrBuf.slice(-500)}`));
+        // Deferred a tick: a failed spawn's EPIPE/destroyed-stream callback can land before the
+        // 'error' event; the recorded spawn error must win, so re-check after it has had its turn.
+        if (err) setImmediate(() => settle(id, false, spawnErr || new ToolError(`MCP server "${name}" write failed: ${err.message}. stderr: ${stderrBuf.slice(-500)}`)));
       });
     });
   }
