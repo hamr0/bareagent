@@ -239,3 +239,5 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 - The two `tools` keys are intentional, not a naming bug — `agent.tools` is a code registry, `gate.tools` is gov rules. (prd.md:1557-1558)
 
 - 2026-10-27 — MCP child reaping + audit `errorContext`: a malformed `tools/list` reply (no `tools` array) is rejected inside `connectAndListTools`'s kill-on-failure path and connect paths track the child before processing (leak proven by live pid-liveness tests, mutation-checked). `wireGate.onToolResult` forwards an ALLOW-LISTED `errorContext` (type-checked, strings ≤200) — never `error.context` wholesale, because `stderr` lives there and bareguard audits `result` verbatim.
+
+- 2026-10-27 — MCP bulk-mode `errors`: the hoist/dedupe patch chain (three review rounds, each fix causing the next bug) was replaced by ONE end-of-run rule — `errors` = servers not in the returned `servers`, once each, first message wins — proven first by `poc/mcp-errors-rule.mjs` (10 scenarios, fails on the old code, green on the redesign).

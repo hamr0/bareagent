@@ -347,6 +347,75 @@ describe('MCP annotations, pagination, listServerTools', () => {
       }
     }
 
+    // The one rule: `errors` lists each server that did NOT connect this run, once; a server that
+    // failed discovery but connected from the cached def is connected, so NOT in `errors`.
+    const failEnv = { MOCK_ENDLESS_PAGES: '1' };
+    const goodDef = (pidFile) => ({ command: 'node', args: [MOCK_SERVER], env: { MOCK_PID_FILE: pidFile } });
+    const runCached = async ({ discover, cache, ttl = '1h', extra = {} }) => {
+      const cfg = join(dir, `servers${++n}.json`);
+      writeFileSync(cfg, JSON.stringify({ mcpServers: discover }));
+      const bridgePath = join(dir, `cached${++n}.json`);
+      writeFileSync(bridgePath, JSON.stringify({
+        discovered: new Date(Date.now() - 60000).toISOString(), ttl,
+        servers: Object.fromEntries(Object.entries(cache).map(([k, d]) => [k, { ...d, tools: { t1: 'allow' } }])),
+      }));
+      const warns = [];
+      const log = console.log, warn = console.warn;
+      console.log = () => {}; console.warn = (...a) => warns.push(a);
+      try { return { b: await createMCPBridge({ bridgePath, configPaths: [cfg], timeout: 5000, ...extra }), warns }; }
+      finally { console.log = log; console.warn = warn; }
+    };
+    const failWarns = (warns) => warns.filter(a => String(a[0]).includes('Some servers failed to connect'));
+
+    for (const [mode, extra, ttl] of [['refresh:true', { refresh: true }, '1h'], ['expired TTL', {}, '1s']]) {
+      it(`${mode}: discovery fails but the cached def connects, so not in errors`, { timeout: 60000 }, async () => {
+        const pidFile = join(dir, `ok${++n}.pid`); pidFiles.push(pidFile);
+        const { b, warns } = await runCached({
+          discover: { s: { command: 'node', args: [MOCK_SERVER], env: failEnv } },
+          cache: { s: goodDef(pidFile) }, ttl, extra,
+        });
+        try {
+          assert.deepEqual(b.servers, ['s']);
+          assert.deepEqual(b.errors, []);
+          assert.equal(failWarns(warns).length, 0);
+        } finally { await b.close(); }
+        await assertReaped(pidFile);
+      });
+    }
+
+    it('warm cache: a cached server that fails to connect is listed once; the healthy one is not', { timeout: 60000 }, async () => {
+      const goodPid = join(dir, `ok${++n}.pid`); pidFiles.push(goodPid);
+      const badPid = join(dir, `bad${++n}.pid`); pidFiles.push(badPid);
+      const { b, warns } = await runCached({
+        discover: {},
+        cache: { g: goodDef(goodPid), s: { ...goodDef(badPid), env: { ...failEnv, MOCK_PID_FILE: badPid } } },
+      });
+      try {
+        assert.deepEqual(b.servers, ['g']);
+        assert.deepEqual(b.errors.map(e => e.server), ['s']);
+        assert.match(b.errors[0].error, /page cap/);
+        assert.equal(failWarns(warns).length, 1);
+      } finally { await b.close(); }
+      await assertReaped(goodPid);
+      await assertReaped(badPid);
+    });
+
+    it('discovery finds nothing but a cache exists: fall-through lists the failing cached server once', { timeout: 60000 }, async () => {
+      const goodPid = join(dir, `ok${++n}.pid`); pidFiles.push(goodPid);
+      const badPid = join(dir, `bad${++n}.pid`); pidFiles.push(badPid);
+      const { b } = await runCached({
+        discover: {},
+        cache: { g: goodDef(goodPid), s: { ...goodDef(badPid), env: { ...failEnv, MOCK_PID_FILE: badPid } } },
+        extra: { refresh: true },
+      });
+      try {
+        assert.deepEqual(b.servers, ['g']);
+        assert.deepEqual(b.errors.map(e => e.server), ['s']);
+      } finally { await b.close(); }
+      await assertReaped(goodPid);
+      await assertReaped(badPid);
+    });
+
     it('a later page without a tools array is the malformed error, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_PAGES: '3', MOCK_BAD_PAGE: '1' });
       await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 5000 }), /malformed tools\/list/);

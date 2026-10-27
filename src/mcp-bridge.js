@@ -928,8 +928,20 @@ async function createMCPBridge(opts = {}) {
   let config = readBridgeConfig(bridgePath);
   const needsRefresh = opts.refresh || !config || isExpired(config);
 
-  /** Per-server failures from this call's discovery pass (cold/refresh); carried on every bulk return. @type {Array<{server: string, error: string}>} */
-  const discoveryErrors = [];
+  // Per-server connect failures from BOTH passes (discovery, then main), first message wins. `errors`
+  // is derived from this once, at return time: servers that did not end up connected, once each.
+  /** @type {Map<string, string>} */
+  const failures = new Map();
+  /** @param {string} name @param {unknown} err */
+  const noteFailure = (name, err) => { if (!failures.has(name)) failures.set(name, /** @type {Error} */ (err).message); };
+  /** The one place `errors` is computed (and the one failure warn issued). @param {string[]} connected */
+  const finalErrors = (connected) => {
+    const errors = [...failures].filter(([name]) => !connected.includes(name)).map(([server, error]) => ({ server, error }));
+    if (errors.length > 0) console.warn('[MCP Bridge] Some servers failed to connect:', errors);
+    return errors;
+  };
+  /** Early return: nothing connected. */
+  const nothingConnected = () => ({ tools: [], servers: [], systemContext: '', denied: [], errors: finalErrors([]), close: async () => {} });
 
   if (needsRefresh) {
     // Discover from IDE configs. The project-cwd `.mcp.json` is excluded by default (untrusted-repo
@@ -938,9 +950,7 @@ async function createMCPBridge(opts = {}) {
     const includeProjectConfig = opts.includeProjectConfig === true || !!confirmServer;
     const discovered = discoverServers(opts.configPaths, { includeProjectConfig });
 
-    if (discovered.size === 0 && !config) {
-      return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
-    }
+    if (discovered.size === 0 && !config) return nothingConnected();
 
     // Only attempt connection when discovery found something.
     // If discovered.size === 0 but config exists, fall through and use the existing config
@@ -966,13 +976,9 @@ async function createMCPBridge(opts = {}) {
           connectResults.set(name, result.client);
           freshTools.set(name, result.mcpTools);
         } catch (err) {
-          discoveryErrors.push({ server: name, error: err.message });
+          noteFailure(name, err);
         }
       }));
-
-      if (discoveryErrors.length > 0) {
-        console.warn('[MCP Bridge] Some servers failed to connect:', discoveryErrors);
-      }
 
       // Discovery connections are killed in `finally`: a throw from the config merge/write (e.g. an
       // unwritable bridgePath) must not strand the live children held only in connectResults.
@@ -985,7 +991,7 @@ async function createMCPBridge(opts = {}) {
           writeBridgeConfig(bridgePath, config);
           console.log(`[MCP Bridge] Wrote ${bridgePath}`);
         } else if (!config) {
-          return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
+          return nothingConnected();
         }
 
       } finally {
@@ -999,9 +1005,7 @@ async function createMCPBridge(opts = {}) {
 
   // At this point config is guaranteed non-null: it either existed, was just
   // written by the refresh branch, or we returned early above.
-  if (!config) {
-    return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
-  }
+  if (!config) return nothingConnected();
   /** @type {BridgeConfig} */
   const cfg = config;
 
@@ -1011,9 +1015,7 @@ async function createMCPBridge(opts = {}) {
     ? reqServers2.filter(n => cfg.servers[n])
     : Object.keys(cfg.servers);
 
-  if (serverNames.length === 0) {
-    return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
-  }
+  if (serverNames.length === 0) return nothingConnected();
 
   // Warn before the main-connect spawn too. On a warm run (config exists, no
   // refresh) this is the first and only spawn; on a cold run the discovery phase
@@ -1029,8 +1031,6 @@ async function createMCPBridge(opts = {}) {
   const connected = [];
   /** @type {DeniedTool[]} */
   const denied = [];
-  /** @type {Array<{server: string, error: string}>} */
-  const errors = [...discoveryErrors];
 
   await Promise.all(serverNames.map(async (name) => {
     const serverConf = cfg.servers[name];
@@ -1062,16 +1062,9 @@ async function createMCPBridge(opts = {}) {
         }
       }
     } catch (err) {
-      // One entry per failing server per run: a server that already failed discovery keeps its
-      // (first) discovery entry rather than being listed again by the main pass.
-      if (!errors.some(e => e.server === name)) errors.push({ server: name, error: err.message });
+      noteFailure(name, err);
     }
   }));
-
-  // The discovery pass already warned about its own failures; warn here only for new ones.
-  if (errors.length > discoveryErrors.length) {
-    console.warn('[MCP Bridge] Some servers failed to connect:', errors.slice(discoveryErrors.length));
-  }
 
   const systemContext = buildSystemContext(connected, tools, denied);
   if (connected.length > 0) console.log(systemContext);
@@ -1084,7 +1077,7 @@ async function createMCPBridge(opts = {}) {
     servers: connected,
     denied,
     systemContext,
-    errors,
+    errors: finalErrors(connected),
     close: async () => {
       await Promise.all(children.map(killServer));
     },
