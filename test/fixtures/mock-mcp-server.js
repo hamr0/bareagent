@@ -20,6 +20,7 @@
  *   MOCK_BAD_TOOLS_LIST=1  — answer tools/list with `{}` (no `tools` array) — a protocol-violating
  *                            server; exercises the child-reap path when list processing fails
  *   MOCK_ANNOTATIONS=1     — read_file/write_file carry an `annotations` object; the rest carry none
+ *   MOCK_BAD_ANNOTATIONS=1 — read_file/write_file/delete_file carry a NON-object `annotations` (null / array / string)
  *   MOCK_PAGES=<n>         — paginate tools/list into n pages (tool i on page i % n; cursors "p1".."p<n-1>")
  *   MOCK_REPEAT_CURSOR=1   — every tools/list page returns the same nextCursor ("same") — a loop
  *   MOCK_ENDLESS_PAGES=1   — every page returns one tool and a fresh nextCursor, forever
@@ -57,6 +58,11 @@ const TOOLS = [
 if (process.env.MOCK_ANNOTATIONS) {
   TOOLS[0].annotations = ANNOTATIONS;
   TOOLS[1].annotations = { readOnlyHint: false, destructiveHint: true };
+}
+if (process.env.MOCK_BAD_ANNOTATIONS) {
+  TOOLS[0].annotations = null;
+  TOOLS[1].annotations = ['readOnlyHint'];
+  TOOLS[2].annotations = 'readOnlyHint';
 }
 
 let malformedSent = false;

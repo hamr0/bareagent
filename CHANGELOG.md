@@ -9,7 +9,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - **MCP tool `annotations` pass-through (all modes).** A server's `tools/list` `annotations` object (e.g. `readOnlyHint`,
   `destructiveHint`) now rides on each bridged tool (`ToolDef.annotations`) and on every `mcp_discover` catalog entry, as the
   SAME object, unmodified. The key is ABSENT (not `{}`) when the server sent none. They are server HINTS (untrusted metadata),
-  never an authorization signal; `systemContext` is unchanged.
+  never an authorization signal; `systemContext` is unchanged. A non-object `annotations` value (null, array, string) is treated
+  as absent (dropped), so the key stays absent.
 - **`listServerTools({ server, configPaths?, confirmServer?, includeProjectConfig?, timeout? })`** (`bare-agent/mcp`) — one-shot
   read-only listing of one server's tools as `[{name, description, annotations?}]`, for deciding what to put in `allow`. Discovers
   via `discoverServers`, vets with `confirmServer` (`=== true` proceeds; a throw denies; implies `includeProjectConfig`), connects,
@@ -17,12 +18,23 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   THROWS (never returns `[]`) on server not found, declined/throwing `confirmServer`, connect/handshake failure, timeout, malformed
   reply; bad input is a type-only `ValidationError`. One total wall-clock deadline derived as 4 x `timeout` (no new option):
   on trip the child is killed and a `TimeoutError` (`context.bound:'deadline'`) rejects. `confirmServer` time is not counted.
+  Because the deadline is proportional, a small `timeout` shrinks the total (`timeout: 500` => 2s total), so a server with many
+  pages near that speed can trip it.
+
+### Changed
+
+- **Bulk/cache mode: a server that pages past the cap or repeats a cursor is now dropped.** A server returning more than 100
+  `tools/list` pages, or repeating a `nextCursor`, used to yield only its first page (the rest was silently ignored); it now fails
+  its connect, so none of its tools are exposed and the failure is an `errors` entry naming the server (plus the existing
+  `console.warn`). Every bulk-mode return now carries `errors` — including the early returns for an empty/failed cold run, which
+  previously had no `errors` key (it is `[]` when nothing failed). On a cold or refresh run, `errors` also includes that run's
+  discovery-pass failures.
 
 ### Fixed
 
 - **`tools/list` pagination (all modes).** `connectAndListTools` sent `tools/list` once and ignored `nextCursor`, so any tool past
   the first page was silently missing (and an `allow`-signed tool on page 2 landed in `missing`). It now follows `nextCursor`,
-  accumulating every page. A server returning more than 100 pages, or repeating a cursor, now THROWS inside the connect (child
+  accumulating every page. A server returning more than 100 pages, or repeating a cursor, THROWS inside the connect (child
   reaped; surfaces as that server's `errors` entry in the bridge) rather than returning a truncated catalog. Every page must carry a
   `tools` array (same malformed error as before).
 

@@ -373,8 +373,8 @@ function unwrapContent(content) {
 // --- Tool wrapping ---
 
 /**
- * A server "sent annotations" only when it sent a non-null, non-array object. Anything else
- * (absent, null, a string) is treated as none, so the key stays absent downstream.
+ * A server "sent annotations" only when it sent a non-null, non-array object. A non-object
+ * `annotations` value (null, array, string, ...) is treated as absent (dropped), so the key stays absent downstream.
  * @param {any} a
  * @returns {boolean}
  */
@@ -928,6 +928,9 @@ async function createMCPBridge(opts = {}) {
   let config = readBridgeConfig(bridgePath);
   const needsRefresh = opts.refresh || !config || isExpired(config);
 
+  /** Per-server failures from this call's discovery pass (cold/refresh); carried on every bulk return. @type {Array<{server: string, error: string}>} */
+  const discoveryErrors = [];
+
   if (needsRefresh) {
     // Discover from IDE configs. The project-cwd `.mcp.json` is excluded by default (untrusted-repo
     // RCE vector); it is scanned only on explicit opt-in, or when a `confirmServer` hook is present
@@ -936,7 +939,7 @@ async function createMCPBridge(opts = {}) {
     const discovered = discoverServers(opts.configPaths, { includeProjectConfig });
 
     if (discovered.size === 0 && !config) {
-      return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+      return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
     }
 
     // Only attempt connection when discovery found something.
@@ -947,8 +950,7 @@ async function createMCPBridge(opts = {}) {
       const freshTools = new Map();
       /** @type {Map<string, RpcClient>} */
       const connectResults = new Map();
-      /** @type {Array<{server: string, error: string}>} */
-      const errors = [];
+      const errors = discoveryErrors;
 
       const reqServers = opts.servers;
       const toDiscover = reqServers
@@ -985,7 +987,7 @@ async function createMCPBridge(opts = {}) {
           writeBridgeConfig(bridgePath, config);
           console.log(`[MCP Bridge] Wrote ${bridgePath}`);
         } else if (!config) {
-          return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+          return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
         }
 
       } finally {
@@ -1000,7 +1002,7 @@ async function createMCPBridge(opts = {}) {
   // At this point config is guaranteed non-null: it either existed, was just
   // written by the refresh branch, or we returned early above.
   if (!config) {
-    return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+    return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
   }
   /** @type {BridgeConfig} */
   const cfg = config;
@@ -1012,7 +1014,7 @@ async function createMCPBridge(opts = {}) {
     : Object.keys(cfg.servers);
 
   if (serverNames.length === 0) {
-    return { tools: [], servers: [], systemContext: '', denied: [], close: async () => {} };
+    return { tools: [], servers: [], systemContext: '', denied: [], errors: discoveryErrors, close: async () => {} };
   }
 
   // Warn before the main-connect spawn too. On a warm run (config exists, no
@@ -1030,7 +1032,7 @@ async function createMCPBridge(opts = {}) {
   /** @type {DeniedTool[]} */
   const denied = [];
   /** @type {Array<{server: string, error: string}>} */
-  const errors = [];
+  const errors = [...discoveryErrors];
 
   await Promise.all(serverNames.map(async (name) => {
     const serverConf = cfg.servers[name];
@@ -1111,7 +1113,9 @@ const listBad = (msg) => new ValidationError(`[MCP Bridge] listServerTools: ${ms
  *
  * Total wall-clock ceiling is DERIVED: 4 × `timeout` (initialize + three maximally slow pages) over
  * the connect + list, excluding `confirmServer` (caller code, possibly interactive). On trip the
- * child is killed and a TimeoutError naming the total deadline rejects.
+ * child is killed and a TimeoutError naming the total deadline rejects. A SMALL `timeout` shrinks the
+ * total proportionally (timeout 500 ⇒ 2s total), so a server with many pages near that speed can trip it.
+ * A non-object `annotations` value from the server is treated as absent (dropped).
  *
  * @param {object} opts
  * @param {string} opts.server - Server name as it appears in the discovered configs.

@@ -99,6 +99,14 @@ describe('MCP annotations, pagination, listServerTools', () => {
       });
     });
 
+    it('non-object annotations (null/array/string) are treated as absent: key dropped', async () => {
+      const { cfg } = setup({ MOCK_BAD_ANNOTATIONS: '1' });
+      await withBridge({ configPaths: [cfg] }, async (b) => {
+        assert.ok(b.tools.length >= 3);
+        for (const t of b.tools) assert.equal('annotations' in t, false);
+      });
+    });
+
     it('does not change systemContext', async () => {
       const a = setup();
       const b = setup({ MOCK_ANNOTATIONS: '1' });
@@ -197,7 +205,9 @@ describe('MCP annotations, pagination, listServerTools', () => {
 
     it('per-round-trip timeout (tools/list never answered): throws, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_NO_TOOLS_LIST: '1' });
-      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 400 }), /timed out/);
+      // 1000ms (not 400): initialize must complete under full-suite load (node cold start) so the
+      // fixture has spawned and written its pid file before the tools/list round-trip times out.
+      await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 1000 }), /timed out/);
       await assertReaped(pidFile);
     });
 
@@ -282,6 +292,22 @@ describe('MCP annotations, pagination, listServerTools', () => {
       await assert.rejects(() => listServerTools({ server: 's', configPaths: [cfg], timeout: 5000 }), /repeated a tools\/list cursor/);
       await assertReaped(pidFile);
     });
+
+    for (const [label, env, re] of [
+      ['page cap', { MOCK_ENDLESS_PAGES: '1' }, /page cap/],
+      ['repeated cursor', { MOCK_REPEAT_CURSOR: '1' }, /repeated a tools\/list cursor/],
+    ]) {
+      it(`cold bulk bridge, ${label}: server dropped, errors names it, child reaped`, { timeout: 30000 }, async () => {
+        const { cfg, pidFile } = setup(env);
+        await withBridge({ configPaths: [cfg] }, async (b) => {
+          assert.deepEqual(b.tools, []);
+          assert.equal(b.errors.length, 1);
+          assert.equal(b.errors[0].server, 's');
+          assert.match(b.errors[0].error, re);
+        });
+        await assertReaped(pidFile);
+      });
+    }
 
     it('a later page without a tools array is the malformed error, child reaped', async () => {
       const { cfg, pidFile } = setup({ MOCK_PAGES: '3', MOCK_BAD_PAGE: '1' });

@@ -224,7 +224,7 @@ export interface ToolDef {
   name: string;
   description?: string;
   parameters?: Record<string, any>;
-  /** MCP tools only: the server's own behavioural hints (readOnlyHint, ...), passed through unmodified. Untrusted metadata, never an authorization signal. Absent when the server sent none. */
+  /** MCP tools only: the server's own behavioural hints (readOnlyHint, ...), passed through unmodified. Untrusted metadata, never an authorization signal. Absent when the server sent none; a non-object value from the server is treated as absent. */
   annotations?: Record<string, any>;
   execute(args: any): any | Promise<any>;
 }
