@@ -11,6 +11,12 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 
 > Coverage note: v0.16.2→v0.27.0 (eval-assist suite 0.17–0.19, RLM/`recurse` 0.20–0.24, BA-8/9/10/11/14 seams 0.22–0.30) were decided in their own PRDs (`eval-assist-prd.md`, `RLM_PRD.md`), which remain canonical for those. Entries below fold former standalone side-docs (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`) back into the main PRD; granular evidence lives in CHANGELOG/git history. (prd.md:798-810)
 
+## unreleased / MCP annotations pass-through, `listServerTools`, tools/list pagination (2026-10-27)
+- **Separate function, not a `listOnly` option:** `listServerTools` is its own one-shot read-only door instead of a flag on `createMCPBridge` — a flag would be a second mode on the bridge that returns no tools to keep alive (dead knobs, shape-varying return). It shares the vet/warn helpers, so `confirmServer` semantics (`=== true` proceeds, throw denies) cannot drift.
+- **Annotations are server HINTS:** passed through unmodified (same object, key absent when none sent) so callers can pick an `allow` list; they are never an authorization signal — the trust root stays the server/operator (`allow`, `confirmServer`, the gate). A server can lie in its annotations.
+- **Pagination cap throws:** `tools/list` follows `nextCursor`; more than 100 pages or a repeated cursor throws inside the connect (child reaped). A silently truncated catalog is indistinguishable from a complete one and would put signed tools in `missing` for the wrong reason.
+- **One derived total deadline, no new option:** `listServerTools` bounds the whole connect+list at 4 x `timeout` (initialize + three maximally slow round-trips), since per-round-trip bounds alone let a page-trickling server stretch the call to pages x timeout. Excludes `confirmServer` time (caller code, possibly interactive).
+
 ## unreleased / `createMCPBridge({ allow })` — signed in-memory allow-list (2026-10-27)
 - **One option, not four asks:** the adopter's separate asks (per-run tool list, no cache file, missing-tool reporting, hidden denied tools) are one `allow: { server: rawToolNames[] }` option, so there is a single door.
 - **In-memory, no cache:** allow mode never reads or writes `.mcp-bridge.json`. The cache file chose which command got spawned, which makes it a command-injection surface; server definitions come only from `discoverServers(configPaths)`, and `confirmServer` still vets each spawn. One connect, exposed set = signed ∩ listed.
@@ -233,3 +239,5 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 - The two `tools` keys are intentional, not a naming bug — `agent.tools` is a code registry, `gate.tools` is gov rules. (prd.md:1557-1558)
 
 - 2026-10-27 — MCP child reaping + audit `errorContext`: a malformed `tools/list` reply (no `tools` array) is rejected inside `connectAndListTools`'s kill-on-failure path and connect paths track the child before processing (leak proven by live pid-liveness tests, mutation-checked). `wireGate.onToolResult` forwards an ALLOW-LISTED `errorContext` (type-checked, strings ≤200) — never `error.context` wholesale, because `stderr` lives there and bareguard audits `result` verbatim.
+
+- 2026-10-27 — MCP bulk-mode `errors`: the hoist/dedupe patch chain (three review rounds, each fix causing the next bug) was replaced by ONE end-of-run rule — `errors` = servers not in the returned `servers`, once each, first message wins — proven first by `poc/mcp-errors-rule.mjs` (10 scenarios, fails on the old code, green on the redesign).

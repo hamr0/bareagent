@@ -19,6 +19,14 @@
  *                            server stderr lands in error context, not the message)
  *   MOCK_BAD_TOOLS_LIST=1  — answer tools/list with `{}` (no `tools` array) — a protocol-violating
  *                            server; exercises the child-reap path when list processing fails
+ *   MOCK_ANNOTATIONS=1     — read_file/write_file carry an `annotations` object; the rest carry none
+ *   MOCK_BAD_ANNOTATIONS=1 — read_file/write_file/delete_file carry a NON-object `annotations` (null / array / string)
+ *   MOCK_PAGES=<n>         — paginate tools/list into n pages (tool i on page i % n; cursors "p1".."p<n-1>")
+ *   MOCK_REPEAT_CURSOR=1   — every tools/list page returns the same nextCursor ("same") — a loop
+ *   MOCK_ENDLESS_PAGES=1   — every page returns one tool and a fresh nextCursor, forever
+ *   MOCK_BAD_PAGE=1        — with MOCK_PAGES, the second page (cursor "p1") has no `tools` array
+ *   MOCK_PAGE_DELAY=<ms>   — delay every tools/list reply by N ms (each under a per-call timeout,
+ *                            but together over a total deadline)
  *   MOCK_CLOSE_STDIN_AFTER_INIT=1 — answer `initialize`, then close our stdin
  *                            read-end and stay alive. The parent's follow-up
  *                            write (`notifications/initialized`) then hits a
@@ -37,6 +45,8 @@ if (process.env.MOCK_PID_FILE) {
 
 if (process.env.MOCK_STDERR) process.stderr.write(process.env.MOCK_STDERR + '\n');
 
+const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, title: 'Reader' };
+
 const TOOLS = [
   { name: 'read_file', description: 'Read a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
   { name: 'write_file', description: 'Write a file', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
@@ -45,7 +55,34 @@ const TOOLS = [
   { name: 'slow_tool', description: 'Responds after 200ms delay', inputSchema: { type: 'object', properties: {} } },
 ];
 
+if (process.env.MOCK_ANNOTATIONS) {
+  TOOLS[0].annotations = ANNOTATIONS;
+  TOOLS[1].annotations = { readOnlyHint: false, destructiveHint: true };
+}
+if (process.env.MOCK_BAD_ANNOTATIONS) {
+  TOOLS[0].annotations = null;
+  TOOLS[1].annotations = ['readOnlyHint'];
+  TOOLS[2].annotations = 'readOnlyHint';
+}
+
 let malformedSent = false;
+let endlessN = 0;
+
+function listReply(params) {
+  if (process.env.MOCK_ENDLESS_PAGES) {
+    endlessN++;
+    return { tools: [{ name: `t${endlessN}`, description: `tool ${endlessN}` }], nextCursor: `c${endlessN}` };
+  }
+  if (process.env.MOCK_REPEAT_CURSOR) return { tools: [TOOLS[0]], nextCursor: 'same' };
+  if (process.env.MOCK_PAGES) {
+    const n = parseInt(process.env.MOCK_PAGES);
+    const k = params && params.cursor ? parseInt(String(params.cursor).slice(1)) : 0;
+    if (process.env.MOCK_BAD_PAGE && k === 1) return {};
+    const tools = TOOLS.filter((_, i) => i % n === k);
+    return k + 1 < n ? { tools, nextCursor: `p${k + 1}` } : { tools };
+  }
+  return { tools: TOOLS };
+}
 
 function respond(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
@@ -79,7 +116,8 @@ async function handleMessage(msg) {
   } else if (msg.method === 'tools/list') {
     if (process.env.MOCK_NO_TOOLS_LIST) return; // never respond → exercises tools/list timeout
     if (process.env.MOCK_BAD_TOOLS_LIST) return respond(msg.id, {});
-    respond(msg.id, { tools: TOOLS });
+    if (process.env.MOCK_PAGE_DELAY) await new Promise(r => setTimeout(r, parseInt(process.env.MOCK_PAGE_DELAY)));
+    respond(msg.id, listReply(msg.params));
   } else if (msg.method === 'tools/call') {
     if (process.env.MOCK_HANG_ON_CALL) return; // never respond → exercises per-call timeout
     if (process.env.MOCK_CRASH_ON_TOOL) {
