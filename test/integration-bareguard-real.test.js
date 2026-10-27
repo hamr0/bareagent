@@ -663,4 +663,23 @@ describe('Meter→gate pricing round-trip (eval-assist §3.8, bareguard 0.9.0)',
     assert.ok(lines.some(l => l.phase === 'unpriced'), 'gate still emits the `unpriced` audit phase (warn, not silent)');
     fs.unlinkSync(auditPath);
   });
+
+  it('onToolResult: an allow-listed error.context reaches the REAL audit row; stderr does not', async () => {
+    const { Gate } = await loadBareguard();
+    const auditPath = tmpAudit();
+    const gate = new Gate({ audit: { path: auditPath } });
+    await gate.init();
+    const { onToolResult } = wireGate(gate);
+    const error = Object.assign(new Error('MCP server "hang" tool "read_file" timed out after 500ms'), {
+      context: { timeout: true, server: 'hang', tool: 'read_file', timeoutMs: 500, stderr: 'SECRET-STDERR-TAIL' },
+    });
+    await onToolResult({ name: 'hang_read_file', args: { path: '/x' }, error, durationMs: 501, ctx: {} });
+    const raw = fs.readFileSync(auditPath, 'utf8');
+    const row = raw.trim().split('\n').map(JSON.parse).find(l => l.phase === 'record');
+    assert.equal(row.result.errorContext.timeout, true);
+    assert.equal(row.result.errorContext.server, 'hang');
+    assert.equal(row.result.errorContext.timeoutMs, 500);
+    assert.doesNotMatch(raw, /SECRET-STDERR-TAIL/);
+    fs.unlinkSync(auditPath);
+  });
 });

@@ -376,6 +376,65 @@ describe('wireGate', () => {
     assert.equal(result.error, 'boom');
   });
 
+  describe('onToolResult errorContext (allow-listed error.context forward)', () => {
+    const errWith = (context, msg = 'boom') => Object.assign(new Error(msg), { context });
+    const record = async (error) => {
+      const gate = mockGate();
+      await wireGate(gate).onToolResult({ name: 'mcp_x', args: {}, error, durationMs: 3, ctx: {} });
+      return gate._recordCalls[0].result;
+    };
+
+    it('forwards the timeout label fields', async () => {
+      const r = await record(errWith({ timeout: true, server: 'hang', tool: 'read_file', timeoutMs: 500 }));
+      assert.deepEqual(r.errorContext, { timeout: true, server: 'hang', tool: 'read_file', timeoutMs: 500 });
+      assert.equal(r.error, 'boom');
+      assert.equal(r.durationMs, 3);
+    });
+
+    it('forwards denied:true', async () => {
+      const r = await record(errWith({ denied: true, server: 's', tool: 't' }));
+      assert.deepEqual(r.errorContext, { denied: true, server: 's', tool: 't' });
+    });
+
+    it('NEVER forwards stderr or any non-allow-listed key', async () => {
+      const r = await record(errWith({ timeout: true, stderr: 'SECRET-TOKEN-abc', code: -32000, knownNames: ['a'] }));
+      assert.deepEqual(r.errorContext, { timeout: true });
+      assert.doesNotMatch(JSON.stringify(r), /SECRET-TOKEN/);
+    });
+
+    it('drops wrong-typed values and non-finite numbers', async () => {
+      const r = await record(errWith({ timeout: 'true', denied: 1, server: 42, tool: {}, timeoutMs: '500' }));
+      assert.equal('errorContext' in r, false);
+      // each wrong type dropped individually, a valid sibling still forwarded (no all-or-nothing)
+      for (const bad of [{ timeout: 'true' }, { timeout: 1 }, { denied: 'yes' }, { server: 42 }, { tool: {} }, { timeoutMs: '500' }]) {
+        assert.deepEqual((await record(errWith({ ...bad, server2: 1, tool: 't', ...bad }))).errorContext, bad.tool ? undefined : { tool: 't' }, JSON.stringify(bad));
+      }
+      const r2 = await record(errWith({ timeout: true, timeoutMs: Infinity }));
+      assert.deepEqual(r2.errorContext, { timeout: true });
+      const r3 = await record(errWith({ timeoutMs: NaN }));
+      assert.equal('errorContext' in r3, false);
+    });
+
+    it('caps strings at 200 chars', async () => {
+      const r = await record(errWith({ server: 'x'.repeat(500) }));
+      assert.equal(r.errorContext.server.length, 200);
+    });
+
+    it('plain Error / non-object context / throwing getter => no errorContext key, record unchanged', async () => {
+      assert.deepEqual(await record(new Error('boom')), { error: 'boom', durationMs: 3 });
+      assert.deepEqual(await record(errWith('str')), { error: 'boom', durationMs: 3 });
+      assert.deepEqual(await record(errWith(null)), { error: 'boom', durationMs: 3 });
+      const evil = new Error('boom');
+      Object.defineProperty(evil, 'context', { get() { throw new Error('getter'); } });
+      assert.deepEqual(await record(evil), { error: 'boom', durationMs: 3 });
+    });
+
+    it('inherited (prototype) keys are not forwarded', async () => {
+      const r = await record(errWith(Object.create({ timeout: true })));
+      assert.equal('errorContext' in r, false);
+    });
+  });
+
   // BA1: onLlmResult forwards LLM usage as a {type:'llm'} action so budget covers tokens.
   it('onLlmResult records LLM usage with ctx (BA1)', async () => {
     const gate = mockGate();
