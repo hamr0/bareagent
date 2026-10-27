@@ -425,7 +425,7 @@ naming the opt-in — rather than silently ignoring it. Pass `confirmServer(name
 def) => boolean` to approve each server **before its command is spawned** (return
 `false` to skip it; a throw fails closed). When no `confirmServer` is set, the
 bridge still trusts all *discovered* servers and prints a one-time warning naming
-every command it is about to spawn — `confirmServer` is how you actually *gate* it.
+every server and command it is about to spawn (an arg count only, never arg or env values) — `confirmServer` is how you actually *gate* it.
 
 **RPC timeouts (Unreleased).** Every JSON-RPC round-trip is now bounded, so a
 server that never answers can't hang the bridge or the loop. `opts.timeout`
@@ -438,9 +438,9 @@ non-stderr label fields to the audit row as an allow-listed `errorContext`) rath
 than blocking forever; a handshake timeout (`initialize`/`tools/list`) is labelled the same way
 (`MCP server "s" "method" timed out after Nms`, `context: { timeout: true, server, method, timeoutMs, stderr }`);
 a server that breaks its stdin pipe surfaces as a failed connection, never an uncaught `EPIPE`
-crash; and a server whose `command` cannot start (ENOENT/EACCES) rejects with
+crash; and a server whose `command` cannot start (ENOENT/EACCES, or a sync `spawn()` refusal such as an empty command or NUL byte) rejects with
 `MCP server "s" failed to start: command "<cmd>" (<code>)`, `context: { spawnError: true, server, code }`
-(command only, never args/env) — `listServerTools` throws it, `allow` mode puts it in `errors` + `missing`,
+(`code` = Node error code if a string, else `'ESPAWN'`; command only with control chars escaped, never args/env) — `listServerTools` throws it, `allow` mode puts it in `errors` + `missing`,
 bulk mode in `errors` — instead of crashing the host.
 
 ## Wiring with bareguard

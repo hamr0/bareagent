@@ -11,9 +11,18 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   (a `write EPIPE` rejection sometimes masked the cause) in `listServerTools`, `createMCPBridge` with `allow`, and bulk/cache
   `createMCPBridge`. It is now recorded once and rejects every pending and future rpc with
   `ToolError` `MCP server "<name>" failed to start: command "<command>" (<code>)` and
-  `context: { spawnError: true, server, code }` (`code` is the errno string, `'ESPAWN'` if absent). Only the command is named,
+  `context: { spawnError: true, server, code }` (`code` is the Node error code when it is a string, e.g. `ENOENT`,
+  `EACCES`, `ERR_INVALID_ARG_VALUE`; `'ESPAWN'` otherwise). Synchronous `spawn()` throws (empty command, NUL byte in the
+  command/args/env, E2BIG) get the SAME label and behave as a dead client (every rpc rejects); control characters in the
+  command are escaped (`\u0000`) in the message. Only a child that never got a pid counts as a spawn failure: a later
+  `'error'` on a live child (failed `kill()`/IPC send) is swallowed without marking the server failed. Only the command is named,
   never args or env. The spawn error wins over any later EPIPE/stdin/close message. Surfaces as: `listServerTools` throws it;
   `allow` mode lists the server in `errors` and its signed tools in `missing`; bulk mode lists it in `errors`.
+
+- **Security: the unvetted-spawn warning no longer prints server args.** With no `confirmServer`, the one-time stderr
+  warning (bulk, `allow`, `listServerTools`) listed `name → command arg arg ...`, so a token passed in `args` landed in logs
+  (reported by fwdloop; predates this branch). It now names the server and command only, plus an arg count (`(2 args)`),
+  never arg or env values.
 
 ### Changed
 
