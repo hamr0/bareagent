@@ -435,8 +435,13 @@ timed-out tool call rejects with a labelled `ToolError`
 (`MCP server "s" tool "t" timed out after Nms`, `context: { timeout: true, server, tool, timeoutMs, stderr }` —
 stderr is in `context`, not the message; `wireGate`'s `onToolResult` forwards only the
 non-stderr label fields to the audit row as an allow-listed `errorContext`) rather
-than blocking forever; a server that breaks its stdin pipe surfaces as a
-failed connection, never an uncaught `EPIPE` crash.
+than blocking forever; a handshake timeout (`initialize`/`tools/list`) is labelled the same way
+(`MCP server "s" "method" timed out after Nms`, `context: { timeout: true, server, method, timeoutMs, stderr }`);
+a server that breaks its stdin pipe surfaces as a failed connection, never an uncaught `EPIPE`
+crash; and a server whose `command` cannot start (ENOENT/EACCES) rejects with
+`MCP server "s" failed to start: command "<cmd>" (<code>)`, `context: { spawnError: true, server, code }`
+(command only, never args/env) — `listServerTools` throws it, `allow` mode puts it in `errors` + `missing`,
+bulk mode in `errors` — instead of crashing the host.
 
 ## Wiring with bareguard
 
