@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.54.0] - 2026-10-27
 
 ### Added
 
@@ -32,6 +32,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   and is always present. A server that failed discovery but then connected from the cached def is not listed. One
   `console.warn` per run names the final `errors`, if any. A server that failed discovery but connected from the cached def draws
   one separate `console.warn` (stderr; never in `errors`) naming it and its discovery message, so a broken config edit is not silent.
+  Failure recording no longer assumes the thrown value is an `Error` (a non-Error rejection is recorded by message/String, not crashed on).
 
 ### Fixed
 
