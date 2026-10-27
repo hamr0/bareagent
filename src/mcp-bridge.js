@@ -232,6 +232,23 @@ function resolveEnv(env) {
 // --- JSON-RPC stdio client ---
 
 /**
+ * Labelled spawn-failure error. Names the command ONLY (args/env can carry tokens); control
+ * characters in the command are escaped so a NUL/newline can't corrupt logs. `code` is the Node
+ * error code when it is a string, else 'ESPAWN'.
+ * @param {string} name
+ * @param {any} command
+ * @param {any} err
+ * @returns {ToolError}
+ */
+function spawnFailure(name, command, err) {
+  const code = typeof err?.code === 'string' ? err.code : 'ESPAWN';
+  const shown = String(command).replace(/[\u0000-\u001f\u007f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return new ToolError(`MCP server "${name}" failed to start: command "${shown}" (${code})`, {
+    context: { spawnError: true, server: name, code },
+  });
+}
+
+/**
  * @param {string} name
  * @param {ServerDef} def
  * @returns {RpcClient}
@@ -240,11 +257,28 @@ function createRpcClient(name, def) {
   const { command, args = [], env, cwd } = def;
   const mergedEnv = { ...process.env, ...resolveEnv(env) };
 
-  const child = spawn(command, args, {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: mergedEnv,
-    ...(cwd && { cwd }),
-  });
+  /** @type {import('node:child_process').ChildProcessWithoutNullStreams} */
+  let child;
+  try {
+    child = spawn(command, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: mergedEnv,
+      ...(cwd && { cwd }),
+    });
+  } catch (err) {
+    // spawn() throws SYNCHRONOUSLY for some bad input (empty command, NUL byte, E2BIG), so no
+    // child 'error' event will ever fire. Same labelled shape as the async path; never the args.
+    // Dead client: rpc() rejects every call; notify() is a no-op; `child` is a minimal stand-in
+    // that killServer() skips (exitCode !== null) — the simplest shape that needs no null-guards
+    // in connectAndListTools / killServer / close().
+    const dead = spawnFailure(name, command, err);
+    return {
+      rpc: () => Promise.reject(dead),
+      notify: () => {},
+      child: /** @type {any} */ ({ exitCode: -1, pid: undefined }),
+      stderr: '',
+    };
+  }
 
   /** @type {Map<number, {resolve: (v: any) => void, reject: (e: any) => void, timer: NodeJS.Timeout | null}>} */
   const pending = new Map();
@@ -297,9 +331,25 @@ function createRpcClient(name, def) {
   // and rpc()/notify() guard writability before writing.
   child.stdin.on('error', () => { /* child gone; surfaced via close + write guards */ });
 
+  // Spawn failure (ENOENT/EACCES/...): with NO 'error' listener Node re-throws it as an uncaught
+  // exception and crashes the HOST. Record it once; it WINS over any later pipe/close error and
+  // rejects every pending and future rpc. Names the command ONLY (args/env can carry tokens).
+  /** @type {ToolError | null} */
+  let spawnErr = null;
+  child.on('error', (err) => {
+    // Only a child that never got a pid is a spawn failure. Node also emits 'error' for a failed
+    // kill() or IPC send on a LIVE child; keep the listener (so it can't crash the host) but do
+    // not mark the server failed — a live server's lifecycle belongs to the 'close' handler.
+    if (child.pid !== undefined || spawnErr) return;
+    spawnErr = spawnFailure(name, command, err);
+    for (const id of [...pending.keys()]) settle(id, false, spawnErr);
+  });
+
   child.on('close', (code) => {
     for (const id of [...pending.keys()]) {
-      settle(id, false, new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
+      // Belt-and-braces: on Node 22 the observed order is error -> EPIPE -> close, so the 'error'
+      // handler has already settled these ids; `spawnErr ||` guards a different ordering elsewhere.
+      settle(id, false, spawnErr || new ToolError(`MCP server "${name}" exited (code ${code}). stderr: ${stderrBuf.slice(-500)}`));
     }
   });
 
@@ -318,6 +368,7 @@ function createRpcClient(name, def) {
   function rpc(method, params = {}, timeoutMs = 0, label) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
+      if (spawnErr) return reject(spawnErr);
       if (!child.stdin.writable) {
         return reject(new ToolError(`MCP server "${name}" stdin is not writable (process exited or pipe closed). stderr: ${stderrBuf.slice(-500)}`));
       }
@@ -331,7 +382,10 @@ function createRpcClient(name, def) {
               { context: { timeout: true, server: label.server, tool: label.tool, timeoutMs, stderr: stderrBuf.slice(-500) } },
             ));
           } else {
-            settle(id, false, new ToolError(`MCP server "${name}" "${method}" timed out after ${timeoutMs}ms. stderr: ${stderrBuf.slice(-500)}`));
+            settle(id, false, new ToolError(
+              `MCP server "${name}" "${method}" timed out after ${timeoutMs}ms`,
+              { context: { timeout: true, server: name, method, timeoutMs, stderr: stderrBuf.slice(-500) } },
+            ));
           }
         }, timeoutMs);
         timer.unref?.();
@@ -340,7 +394,10 @@ function createRpcClient(name, def) {
       const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
       child.stdin.write(msg, (err) => {
         // settle() no-ops if 'close'/timeout already settled this id.
-        if (err) settle(id, false, new ToolError(`MCP server "${name}" write failed: ${err.message}. stderr: ${stderrBuf.slice(-500)}`));
+        // Belt-and-braces (Node 22 order is error -> EPIPE -> close, already settled by 'error').
+        // Deferred a tick: a failed spawn's EPIPE/destroyed-stream callback can land before the
+        // 'error' event; the recorded spawn error must win, so re-check after it has had its turn.
+        if (err) setImmediate(() => settle(id, false, spawnErr || new ToolError(`MCP server "${name}" write failed: ${err.message}. stderr: ${stderrBuf.slice(-500)}`)));
       });
     });
   }
@@ -724,7 +781,8 @@ function makeUnvettedWarner(confirmServer) {
   return (specs) => {
     if (confirmServer || warned || specs.length === 0) return;
     warned = true;
-    const cmds = specs.map(s => `${s.name} → ${s.command} ${(s.args || []).join(' ')}`.trim());
+    // Server name + command ONLY: args/env can carry tokens and stderr lands in logs. A count only.
+    const cmds = specs.map(s => `${s.name} → ${s.command}${s.args && s.args.length ? ` (${s.args.length} args)` : ''}`);
     console.warn(
       `[MCP Bridge] spawning ${specs.length} server command(s) without a confirmServer hook:\n  ` +
       cmds.join('\n  ') +
