@@ -25,6 +25,14 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - **The `shell_grep` `timeout` bounds the whole call, including the `canRead` walk.** A slow or hung `canRead` rejects
   with a `canRead walk exceeded <N>ms time budget` error; the worker gets only the remaining budget.
 
+### Fixed
+
+- **`shell_grep` `timeout` above 2^31-1 (or non-finite) no longer fails almost instantly.** Node clamps `setTimeout` delays
+  over 2147483647ms to 1ms (`TimeoutOverflowWarning`), so a huge model-supplied `timeout` made the grep fail after a few ms
+  (also on the canRead-unset path). The budget is now clamped to 2^31-1; non-finite uses the default (0/negative/absent unchanged).
+- **`shell_grep` worker-timeout message under `canRead`** no longer blames the regex alone: it says the budget was shared with
+  the canRead walk (and how long the walk used). The canRead-unset message is unchanged.
+
 ## [0.54.1] - 2026-10-27
 
 ### Fixed

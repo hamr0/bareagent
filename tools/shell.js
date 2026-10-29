@@ -73,6 +73,7 @@ const fsConstants = fs.constants;
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;       // 256 KB
 const DEFAULT_WRITE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB — a sanity ceiling on a single write (LLM-authored)
 const DEFAULT_GREP_MAX_MATCHES = 200;
+const MAX_TIMER_MS = 2_147_483_647;              // setTimeout's max delay; larger overflows to 1ms
 const DEFAULT_GREP_TIMEOUT_MS = 5_000;           // hard ceiling on a single grep — bounds ReDoS
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_MAX_BUFFER = 1024 * 1024;     // 1 MB
@@ -584,7 +585,9 @@ function looksCatastrophic(pattern) {
  * @property {string} [flags]
  * @property {number} [timeout] - Hard wall-clock ceiling in ms (default 5000). The match runs in a
  *   worker thread; on overrun the worker is terminated and the call rejects, so a pattern that slips
- *   past `looksCatastrophic` can no longer hang the host event loop.
+ *   past `looksCatastrophic` can no longer hang the host event loop. When `canRead` is set it bounds
+ *   the WHOLE call, the canRead walk included. Values above 2^31-1 are clamped to 2^31-1 (Node's
+ *   timer max); non-finite, zero, negative or absent values use the default.
  * @property {boolean} [noFollowSymlinks] - When true, refuses a symlinked ROOT path (thrown, loud)
  *   and skips (silently, like any other read error) a file that is or becomes a symlink during the
  *   walk. Threaded into `workerData` so the worker thread's file reads honor it too.
@@ -789,7 +792,9 @@ async function grepPath(args, canRead) {
   /** @type {string[]|undefined} */
   let vettedFiles;
   // ONE budget for the WHOLE call (canRead walk + worker): the deadline starts before the walk.
-  const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
+  // Node clamps setTimeout delays > 2^31-1 (and NaN/Infinity) to 1ms, so clamp here, at the single source.
+  const budgetMs = typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, MAX_TIMER_MS) : DEFAULT_GREP_TIMEOUT_MS;
+  const callStart = Date.now();
   const budget = { deadline: Date.now() + budgetMs, budgetMs };
   if (canRead) {
     // The gate cannot cross into the Worker, so the walk runs here. Only a directory root walks; a
@@ -806,6 +811,7 @@ async function grepPath(args, canRead) {
   }
 
   // The worker gets only what is LEFT of the budget; none left => reject without spawning.
+  const walkMs = Date.now() - callStart;
   const workerBudgetMs = canRead ? budget.deadline - Date.now() : budgetMs;
   if (workerBudgetMs <= 0) {
     throw new Error(`shell_grep: canRead walk exceeded ${budgetMs}ms time budget — no time left to search. Narrow the root or raise timeout.`);
@@ -821,9 +827,11 @@ async function grepPath(args, canRead) {
       fn(val);
     };
     const timer = setTimeout(() => {
-      done(reject, new Error(
-        `shell_grep: pattern exceeded ${budgetMs}ms time budget — likely catastrophic backtracking. ` +
-        `Simplify the regex.`,
+      done(reject, new Error(canRead
+        ? `shell_grep: exceeded ${budgetMs}ms time budget (shared with the canRead walk, which used ${walkMs}ms) — ` +
+          `a slow canRead or a catastrophic regex; raise timeout or simplify the regex.`
+        : `shell_grep: pattern exceeded ${budgetMs}ms time budget — likely catastrophic backtracking. ` +
+          `Simplify the regex.`,
       ));
     }, workerBudgetMs);
     timer.unref?.();

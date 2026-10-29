@@ -208,5 +208,36 @@ describe('shell_grep canRead (F259)', () => {
       );
       assert.ok(Date.now() - t0 < 1500);
     });
+
+    it('worker-timeout message under canRead blames the shared budget, not just the regex', async () => {
+      const one = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'canread-one-'));
+      try {
+        fs.writeFileSync(path.join(one, 'a.txt'), 'hello\n');
+        await assert.rejects(
+          grepOf({ canRead: () => new Promise((r) => setTimeout(() => r(true), 270)) })
+            .execute({ pattern: 'hello', path: one, timeout: 300 }),
+          (e) => /shared with the canRead walk, which used \d+ms/.test(e.message) && /raise timeout/.test(e.message) &&
+            !/likely catastrophic backtracking/.test(e.message),
+        );
+      } finally { fs.rmSync(one, { recursive: true, force: true }); }
+    });
+  });
+
+  describe('huge / non-finite timeout is clamped (no TimeoutOverflowWarning)', () => {
+    for (const [label, opts] of [['unset', {}], ['set', { canRead: () => new Promise((r) => setTimeout(() => r(true), 5)) }]]) {
+      for (const timeout of [3_000_000_000, Infinity]) {
+        it(`timeout:${timeout} canRead ${label} succeeds`, async () => {
+          const warnings = [];
+          const onW = (w) => warnings.push(w.name);
+          process.on('warning', onW);
+          try {
+            const r = await run(opts, { timeout });
+            assert.ok(r.hits.length > 0);
+            await new Promise((r2) => setTimeout(r2, 50));
+          } finally { process.off('warning', onW); }
+          assert.deepEqual(warnings.filter((n) => n === 'TimeoutOverflowWarning'), []);
+        });
+      }
+    }
   });
 });
