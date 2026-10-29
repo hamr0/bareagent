@@ -2,6 +2,42 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.55.0] - 2026-10-29
+
+### Added
+
+- **`createShellTools({ canRead })` (opt-in, F259).** `async (absPath, { isDir, tool }) => boolean`, consulted by
+  `shell_grep` for every directory (before descending; `false` prunes the whole subtree, never listed) and every file
+  (`false` skips silently) under a directory root. The root itself is not passed (already policy-gated). When set, the
+  walk runs on the main thread and the worker receives only the allowed file list; unset is byte-identical to before.
+  Wire a bareguard gate as `(p, { tool }) => gate.allows({ type: 'read', tool, path: p })`. Fail-closed loud: a throw or a
+  non-boolean return rejects the grep (tool, path and value TYPE only in the message); `HaltError` propagates as-is; a
+  non-function `canRead` throws `ValidationError` at creation. Measured on this repo (5369 files, ~6500 gate calls):
+  ~2.5s unset vs ~3.7s with a real `gate.allows` (median of 5).
+  **TOCTOU:** `canRead` vets paths at walk time; a path swapped for a symlink between vetting and the worker's read is
+  followed unless `noFollowSymlinks: true` - pair `canRead` with `noFollowSymlinks: true`. The `recursive` arg has the same
+  truthiness under `canRead` as when it is unset (absent => true, other falsy => false).
+
+### Security
+
+- **Closes the F259 root-grep bypass of `fs.deny` (when `canRead` is wired).** The Loop policy gates `shell_grep` as ONE
+  action on the root path, so a root grep walked into `fs.deny`'d paths (`<wd>/.smoke`, `<wd>/.litectx`, an audit file)
+  that a direct `shell_read` is denied. Reported by bareloop. Repro/negative control: `poc/f259-grep-canread.mjs`.
+- **`shell_grep` never accepts a file list from model args.** The grep worker payload is built from an explicit
+  allow-list; a model-supplied `files` arg is ignored (closed a pre-release regression of this branch).
+- **The `shell_grep` `timeout` bounds the whole call, including the `canRead` walk.** A slow or hung `canRead` rejects
+  with a `canRead walk exceeded <N>ms time budget` error; the worker gets only the remaining budget.
+
+### Fixed
+
+- **`shell_grep` `timeout` above 2^31-1 (or non-finite) no longer fails almost instantly.** Node clamps `setTimeout` delays
+  over 2147483647ms to 1ms (`TimeoutOverflowWarning`), so a huge model-supplied `timeout` made the grep fail after a few ms
+  (also on the canRead-unset path). The budget is now clamped to 2^31-1; non-finite uses the default (0/negative/absent unchanged).
+  **Behavior change (also on the canRead-unset path):** a NON-NUMBER `timeout` (e.g. the string `"60000"`) now falls back to
+  the 5000ms default instead of being coerced by `setTimeout`.
+- **`shell_grep` worker-timeout message under `canRead`** no longer blames the regex alone: it says the budget was shared with
+  the canRead walk (and how long the walk used). The canRead-unset message is unchanged.
+
 ## [0.54.1] - 2026-10-27
 
 ### Fixed

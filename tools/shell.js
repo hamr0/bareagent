@@ -66,12 +66,14 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
+const { HaltError, ValidationError } = require('../src/errors');
 
 const fsConstants = fs.constants;
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;       // 256 KB
 const DEFAULT_WRITE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB — a sanity ceiling on a single write (LLM-authored)
 const DEFAULT_GREP_MAX_MATCHES = 200;
+const MAX_TIMER_MS = 2_147_483_647;              // setTimeout's max delay; larger overflows to 1ms
 const DEFAULT_GREP_TIMEOUT_MS = 5_000;           // hard ceiling on a single grep — bounds ReDoS
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_MAX_BUFFER = 1024 * 1024;     // 1 MB
@@ -583,11 +585,92 @@ function looksCatastrophic(pattern) {
  * @property {string} [flags]
  * @property {number} [timeout] - Hard wall-clock ceiling in ms (default 5000). The match runs in a
  *   worker thread; on overrun the worker is terminated and the call rejects, so a pattern that slips
- *   past `looksCatastrophic` can no longer hang the host event loop.
+ *   past `looksCatastrophic` can no longer hang the host event loop. When `canRead` is set it bounds
+ *   the WHOLE call, the canRead walk included. Values above 2^31-1 are clamped to 2^31-1 (Node's
+ *   timer max); non-finite, zero, negative or absent values use the default.
  * @property {boolean} [noFollowSymlinks] - When true, refuses a symlinked ROOT path (thrown, loud)
  *   and skips (silently, like any other read error) a file that is or becomes a symlink during the
  *   walk. Threaded into `workerData` so the worker thread's file reads honor it too.
  */
+
+/**
+ * @callback CanRead
+ * @param {string} absPath
+ * @param {{isDir: boolean, tool: string}} info
+ * @returns {Promise<boolean>|boolean}
+ */
+
+/**
+ * Ask the caller's `canRead` arbiter about one path. Fail-closed LOUD: a throw or any non-boolean
+ * (truthy objects, undefined, 1, a Promise resolving to 'yes') rejects the whole grep — a broken
+ * arbiter must never read as allow OR as a silent deny. HaltError propagates as-is. Error text names
+ * the tool, the path and the TYPE of a bad value only, never the value.
+ * The call is raced against the remaining whole-call `budget` so a slow or HUNG arbiter cannot
+ * outlive the grep `timeout`.
+ * @param {CanRead} canRead
+ * @param {string} abs
+ * @param {boolean} isDir
+ * @param {{deadline: number, budgetMs: number}} budget
+ * @returns {Promise<boolean>}
+ */
+async function askCanRead(canRead, abs, isDir, budget) {
+  let verdict;
+  /** @type {any} */
+  let timer;
+  try {
+    const remaining = budget.deadline - Date.now();
+    const exhausted = () => Object.assign(
+      new Error(`shell_grep: canRead walk exceeded ${budget.budgetMs}ms time budget — slow or hung canRead. Narrow the root or raise timeout.`),
+      { budgetExceeded: true },
+    );
+    if (remaining <= 0) throw exhausted();
+    verdict = await new Promise((resolve, reject) => {
+      // Ref'd on purpose: a pending call must keep the loop alive to fire the budget; cleared in `finally`.
+      timer = setTimeout(() => reject(exhausted()), remaining);
+      Promise.resolve(canRead(abs, { isDir, tool: 'shell_grep' })).then(resolve, reject);
+    });
+  } catch (/** @type {any} */ err) {
+    if (err instanceof HaltError) throw err;
+    if (err && err.budgetExceeded) throw err;
+    throw new Error(`shell_grep: canRead threw for ${abs} (${err && err.name ? err.name : typeof err})`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (verdict !== true && verdict !== false) {
+    throw new Error(`shell_grep: canRead returned a non-boolean (${verdict === null ? 'null' : typeof verdict}) for ${abs}`);
+  }
+  return verdict;
+}
+
+/**
+ * Main-thread, gate-vetted walk for `canRead` mode. Same semantics as `walk` (withFileTypes,
+ * symlinks neither dir nor file ⇒ skipped, readdir error ⇒ skip, `recursive:false` honoured) but
+ * each directory is checked BEFORE descent (false ⇒ subtree pruned, never listed) and each file
+ * BEFORE it is listed. The root is not checked (the caller's policy already gated it).
+ * @param {string} dir
+ * @param {boolean} recursive
+ * @param {CanRead} canRead
+ * @param {string[]} out
+ * @param {{deadline: number, budgetMs: number}} budget
+ */
+async function walkChecked(dir, recursive, canRead, out, budget) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!recursive) continue;
+      if (!(await askCanRead(canRead, full, true, budget))) continue;
+      await walkChecked(full, true, canRead, out, budget);
+    } else if (entry.isFile()) {
+      if (await askCanRead(canRead, full, false, budget)) out.push(full);
+    }
+  }
+}
 
 /**
  * The actual search: walk, skip binaries, regex-test each line. Runs in a worker thread (see
@@ -596,8 +679,10 @@ function looksCatastrophic(pattern) {
  * only sound bound (the static `looksCatastrophic` guard is a best-effort fast-reject, not a
  * guarantee; a grounded bypass like `(a|a|a)*` passes it yet backtracks exponentially).
  * @param {GrepArgs} args
+ * @param {string[]} [providedFiles] - INTERNAL, never from tool args: the `canRead`-vetted file list
+ *   (passed by grep-worker.js from its own workerData key, set only by `grepPath`).
  */
-async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false }) {
+async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false }, providedFiles) {
   const resolved = resolveToolPath(rawPath);
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
   let re;
@@ -613,7 +698,10 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
   if (!stat) throw new Error(`shell_grep: path not found — ${rawPath}`);
 
   const files = [];
-  if (stat.isFile()) {
+  if (Array.isArray(providedFiles)) {
+    // `canRead` mode: the main thread already walked + vetted the tree; read ONLY this list.
+    files.push(...providedFiles);
+  } else if (stat.isFile()) {
     files.push(resolved);
   } else if (stat.isDirectory()) {
     for await (const f of walk(resolved, recursive)) files.push(f);
@@ -655,8 +743,10 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
  * worker is even spawned — the ONLY loud/thrown refusal in the grep path (per-file skips during
  * the walk happen inside the worker and stay silent, matching the existing read-error `continue`).
  * @param {GrepArgs} args
+ * @param {CanRead} [canRead] - opt-in path arbiter (see `createShellTools`); when set the walk runs here
+ *   on the main thread and the worker receives only the vetted file list.
  */
-async function grepPath(args) {
+async function grepPath(args, canRead) {
   const { pattern, flags = 'i', timeout, path: rawPath, noFollowSymlinks = false } = args;
   if (looksCatastrophic(pattern)) {
     throw new Error(
@@ -696,9 +786,38 @@ async function grepPath(args) {
     }
   }
 
-  const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
+  // Explicit allow-list: model-controlled tool args are NEVER spread into the worker payload.
+  const { recursive, maxMatches } = args;
+  const workerArgs = { pattern, path: rawPath, recursive, maxMatches, flags, timeout, noFollowSymlinks };
+  /** @type {string[]|undefined} */
+  let vettedFiles;
+  // ONE budget for the WHOLE call (canRead walk + worker): the deadline starts before the walk.
+  // Node clamps setTimeout delays > 2^31-1 (and NaN/Infinity) to 1ms, so clamp here, at the single source.
+  const budgetMs = typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, MAX_TIMER_MS) : DEFAULT_GREP_TIMEOUT_MS;
+  const callStart = Date.now();
+  const budget = { deadline: Date.now() + budgetMs, budgetMs };
+  if (canRead) {
+    // The gate cannot cross into the Worker, so the walk runs here. Only a directory root walks; a
+    // missing root / file root falls through to the worker unchanged (root is never passed to canRead).
+    const root = resolveToolPath(rawPath);
+    const st = await fs.stat(root).catch(() => null);
+    if (st && st.isDirectory()) {
+      /** @type {string[]} */
+      const files = [];
+      // Same truthiness as the unset path (`recursive = true` default: undefined => true, other falsy => false).
+      await walkChecked(root, args.recursive === undefined ? true : !!args.recursive, canRead, files, budget);
+      vettedFiles = files;
+    }
+  }
+
+  // The worker gets only what is LEFT of the budget; none left => reject without spawning.
+  const walkMs = Date.now() - callStart;
+  const workerBudgetMs = canRead ? budget.deadline - Date.now() : budgetMs;
+  if (workerBudgetMs <= 0) {
+    throw new Error(`shell_grep: canRead walk exceeded ${budgetMs}ms time budget — no time left to search. Narrow the root or raise timeout.`);
+  }
   return new Promise((resolve, reject) => {
-    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: args });
+    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: { args: workerArgs, files: vettedFiles } });
     let settled = false;
     const done = (fn, val) => {
       if (settled) return;
@@ -708,11 +827,13 @@ async function grepPath(args) {
       fn(val);
     };
     const timer = setTimeout(() => {
-      done(reject, new Error(
-        `shell_grep: pattern exceeded ${budgetMs}ms time budget — likely catastrophic backtracking. ` +
-        `Simplify the regex.`,
+      done(reject, new Error(canRead
+        ? `shell_grep: exceeded ${budgetMs}ms time budget (shared with the canRead walk, which used ${walkMs}ms) — ` +
+          `a slow canRead or a catastrophic regex; raise timeout or simplify the regex.`
+        : `shell_grep: pattern exceeded ${budgetMs}ms time budget — likely catastrophic backtracking. ` +
+          `Simplify the regex.`,
       ));
-    }, budgetMs);
+    }, workerBudgetMs);
     timer.unref?.();
     worker.once('message', (msg) => {
       if (msg && msg.ok) done(resolve, msg.result);
@@ -818,7 +939,7 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * Create the six shell tools. Configuration is mostly per-call via tool args; gating is the
  * caller's responsibility via `new Loop({ policy })`.
  *
- * @param {{noFollowSymlinks?: boolean}} [options] - `noFollowSymlinks` (default `false`, byte-
+ * @param {{noFollowSymlinks?: boolean, canRead?: CanRead}} [options] - `noFollowSymlinks` (default `false`, byte-
  *   identical to the pre-existing behavior when omitted): when `true`, `shell_read`, `shell_write`,
  *   `shell_edit`, and `shell_grep` refuse to open a path whose FINAL path component is a symlink
  *   (file, dir, or dangling) — THROWN, `err.code:'ELOOP'`, never a silently-followed link. Scope is
@@ -833,6 +954,20 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   not a bug. Set per `createShellTools()` instance, not module-global — safe to mix a
  *   `noFollowSymlinks:true` toolset for one agent alongside a default toolset for another in the same
  *   process.
+ *   `canRead` (opt-in; unset => byte-identical to before): `async (absPath, {isDir, tool}) => boolean`,
+ *   consulted by `shell_grep` for EVERY directory (before descending; `false` prunes the whole subtree,
+ *   never listed) and file (`false` skips it silently) found under a directory root. Closes the
+ *   root-grep bypass of a gate's `fs.deny`: the Loop policy gates only the ROOT path, so a deny on
+ *   `<root>/.secret` is invisible to a grep of `<root>`. The root itself is NOT passed (already
+ *   policy-gated). Wire bareguard as `(p, {tool}) => gate.allows({type:'read', tool, path:p})`. When
+ *   set, the walk runs on the main thread (the gate can't cross into the Worker) and the worker
+ *   receives only the allowed list. Fail-closed LOUD: a throw or non-boolean return rejects the grep
+ *   (type only in the message); `HaltError` propagates as-is. A non-function `canRead` throws
+ *   `ValidationError` at creation. `shell_read` on a directory lists one dir's names and is gated on
+ *   its own path — unaffected. The grep `timeout` bounds the WHOLE call, the canRead walk included (a slow or
+ *   hung `canRead` rejects with a distinct `canRead walk exceeded` error). TOCTOU: `canRead` vets paths at WALK
+ *   time; a path swapped for a symlink between vetting and the worker's read is followed unless
+ *   `noFollowSymlinks:true` — pair `canRead` with `noFollowSymlinks:true`.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
  * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
@@ -842,7 +977,10 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   const { tools: safeTools } = createShellTools({ noFollowSymlinks: true });
  */
 function createShellTools(options = {}) {
-  const { noFollowSymlinks = false } = options;
+  const { noFollowSymlinks = false, canRead } = options;
+  if (canRead !== undefined && typeof canRead !== 'function') {
+    throw new ValidationError(`createShellTools: canRead must be a function (got ${canRead === null ? 'null' : typeof canRead})`);
+  }
   /** @type {ToolDef[]} */
   const tools = [
     {
@@ -873,7 +1011,7 @@ function createShellTools(options = {}) {
         },
         required: ['pattern', 'path'],
       },
-      execute: async (/** @type {GrepArgs} */ args) => grepPath({ ...args, noFollowSymlinks }),
+      execute: async (/** @type {GrepArgs} */ args) => grepPath({ ...args, noFollowSymlinks }, canRead),
     },
     {
       name: 'shell_write',

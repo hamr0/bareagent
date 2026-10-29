@@ -14,7 +14,7 @@ const { _grepCore } = require('./shell.js');
 if (!parentPort) throw new Error('grep-worker.js must be run as a worker thread');
 const port = parentPort;
 
-_grepCore(workerData).then(
+_grepCore(workerData.args, workerData.files).then(
   (result) => port.postMessage({ ok: true, result }),
   (err) => port.postMessage({ ok: false, error: err && err.message ? err.message : String(err) }),
 );
