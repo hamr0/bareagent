@@ -2,6 +2,25 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`createShellTools({ canRead })` (opt-in, F259).** `async (absPath, { isDir, tool }) => boolean`, consulted by
+  `shell_grep` for every directory (before descending; `false` prunes the whole subtree, never listed) and every file
+  (`false` skips silently) under a directory root. The root itself is not passed (already policy-gated). When set, the
+  walk runs on the main thread and the worker receives only the allowed file list; unset is byte-identical to before.
+  Wire a bareguard gate as `(p, { tool }) => gate.allows({ type: 'read', tool, path: p })`. Fail-closed loud: a throw or a
+  non-boolean return rejects the grep (tool, path and value TYPE only in the message); `HaltError` propagates as-is; a
+  non-function `canRead` throws `ValidationError` at creation. Measured on this repo (5369 files, ~6500 gate calls):
+  ~2.5s unset vs ~3.7s with a real `gate.allows` (median of 5).
+
+### Security
+
+- **Closes the F259 root-grep bypass of `fs.deny` (when `canRead` is wired).** The Loop policy gates `shell_grep` as ONE
+  action on the root path, so a root grep walked into `fs.deny`'d paths (`<wd>/.smoke`, `<wd>/.litectx`, an audit file)
+  that a direct `shell_read` is denied. Reported by bareloop. Repro/negative control: `poc/f259-grep-canread.mjs`.
+
 ## [0.54.1] - 2026-10-27
 
 ### Fixed
