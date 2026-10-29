@@ -66,6 +66,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
+const { HaltError, ValidationError } = require('../src/errors');
 
 const fsConstants = fs.constants;
 
@@ -587,7 +588,69 @@ function looksCatastrophic(pattern) {
  * @property {boolean} [noFollowSymlinks] - When true, refuses a symlinked ROOT path (thrown, loud)
  *   and skips (silently, like any other read error) a file that is or becomes a symlink during the
  *   walk. Threaded into `workerData` so the worker thread's file reads honor it too.
+ * @property {string[]} [files] - INTERNAL (set by `grepPath` when `canRead` is on): the pre-vetted
+ *   file list the worker reads instead of walking. Not a model-facing parameter.
  */
+
+/**
+ * @callback CanRead
+ * @param {string} absPath
+ * @param {{isDir: boolean, tool: string}} info
+ * @returns {Promise<boolean>|boolean}
+ */
+
+/**
+ * Ask the caller's `canRead` arbiter about one path. Fail-closed LOUD: a throw or any non-boolean
+ * (truthy objects, undefined, 1, a Promise resolving to 'yes') rejects the whole grep — a broken
+ * arbiter must never read as allow OR as a silent deny. HaltError propagates as-is. Error text names
+ * the tool, the path and the TYPE of a bad value only, never the value.
+ * @param {CanRead} canRead
+ * @param {string} abs
+ * @param {boolean} isDir
+ * @returns {Promise<boolean>}
+ */
+async function askCanRead(canRead, abs, isDir) {
+  let verdict;
+  try {
+    verdict = await canRead(abs, { isDir, tool: 'shell_grep' });
+  } catch (/** @type {any} */ err) {
+    if (err instanceof HaltError) throw err;
+    throw new Error(`shell_grep: canRead threw for ${abs} (${err && err.name ? err.name : typeof err})`);
+  }
+  if (verdict !== true && verdict !== false) {
+    throw new Error(`shell_grep: canRead returned a non-boolean (${verdict === null ? 'null' : typeof verdict}) for ${abs}`);
+  }
+  return verdict;
+}
+
+/**
+ * Main-thread, gate-vetted walk for `canRead` mode. Same semantics as `walk` (withFileTypes,
+ * symlinks neither dir nor file ⇒ skipped, readdir error ⇒ skip, `recursive:false` honoured) but
+ * each directory is checked BEFORE descent (false ⇒ subtree pruned, never listed) and each file
+ * BEFORE it is listed. The root is not checked (the caller's policy already gated it).
+ * @param {string} dir
+ * @param {boolean} recursive
+ * @param {CanRead} canRead
+ * @param {string[]} out
+ */
+async function walkChecked(dir, recursive, canRead, out) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!recursive) continue;
+      if (!(await askCanRead(canRead, full, true))) continue;
+      await walkChecked(full, true, canRead, out);
+    } else if (entry.isFile()) {
+      if (await askCanRead(canRead, full, false)) out.push(full);
+    }
+  }
+}
 
 /**
  * The actual search: walk, skip binaries, regex-test each line. Runs in a worker thread (see
@@ -597,7 +660,7 @@ function looksCatastrophic(pattern) {
  * guarantee; a grounded bypass like `(a|a|a)*` passes it yet backtracks exponentially).
  * @param {GrepArgs} args
  */
-async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false }) {
+async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false, files: providedFiles }) {
   const resolved = resolveToolPath(rawPath);
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
   let re;
@@ -613,7 +676,10 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
   if (!stat) throw new Error(`shell_grep: path not found — ${rawPath}`);
 
   const files = [];
-  if (stat.isFile()) {
+  if (Array.isArray(providedFiles)) {
+    // `canRead` mode: the main thread already walked + vetted the tree; read ONLY this list.
+    files.push(...providedFiles);
+  } else if (stat.isFile()) {
     files.push(resolved);
   } else if (stat.isDirectory()) {
     for await (const f of walk(resolved, recursive)) files.push(f);
@@ -656,7 +722,7 @@ async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches,
  * the walk happen inside the worker and stay silent, matching the existing read-error `continue`).
  * @param {GrepArgs} args
  */
-async function grepPath(args) {
+async function grepPath(args, canRead) {
   const { pattern, flags = 'i', timeout, path: rawPath, noFollowSymlinks = false } = args;
   if (looksCatastrophic(pattern)) {
     throw new Error(
@@ -696,9 +762,23 @@ async function grepPath(args) {
     }
   }
 
+  let workerArgs = args;
+  if (canRead) {
+    // The gate cannot cross into the Worker, so the walk runs here. Only a directory root walks; a
+    // missing root / file root falls through to the worker unchanged (root is never passed to canRead).
+    const root = resolveToolPath(rawPath);
+    const st = await fs.stat(root).catch(() => null);
+    if (st && st.isDirectory()) {
+      /** @type {string[]} */
+      const files = [];
+      await walkChecked(root, args.recursive !== false, canRead, files);
+      workerArgs = { ...args, files };
+    }
+  }
+
   const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: args });
+    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: workerArgs });
     let settled = false;
     const done = (fn, val) => {
       if (settled) return;
@@ -818,7 +898,7 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * Create the six shell tools. Configuration is mostly per-call via tool args; gating is the
  * caller's responsibility via `new Loop({ policy })`.
  *
- * @param {{noFollowSymlinks?: boolean}} [options] - `noFollowSymlinks` (default `false`, byte-
+ * @param {{noFollowSymlinks?: boolean, canRead?: CanRead}} [options] - `noFollowSymlinks` (default `false`, byte-
  *   identical to the pre-existing behavior when omitted): when `true`, `shell_read`, `shell_write`,
  *   `shell_edit`, and `shell_grep` refuse to open a path whose FINAL path component is a symlink
  *   (file, dir, or dangling) — THROWN, `err.code:'ELOOP'`, never a silently-followed link. Scope is
@@ -833,6 +913,17 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   not a bug. Set per `createShellTools()` instance, not module-global — safe to mix a
  *   `noFollowSymlinks:true` toolset for one agent alongside a default toolset for another in the same
  *   process.
+ *   `canRead` (opt-in; unset => byte-identical to before): `async (absPath, {isDir, tool}) => boolean`,
+ *   consulted by `shell_grep` for EVERY directory (before descending; `false` prunes the whole subtree,
+ *   never listed) and file (`false` skips it silently) found under a directory root. Closes the
+ *   root-grep bypass of a gate's `fs.deny`: the Loop policy gates only the ROOT path, so a deny on
+ *   `<root>/.secret` is invisible to a grep of `<root>`. The root itself is NOT passed (already
+ *   policy-gated). Wire bareguard as `(p, {tool}) => gate.allows({type:'read', tool, path:p})`. When
+ *   set, the walk runs on the main thread (the gate can't cross into the Worker) and the worker
+ *   receives only the allowed list. Fail-closed LOUD: a throw or non-boolean return rejects the grep
+ *   (type only in the message); `HaltError` propagates as-is. A non-function `canRead` throws
+ *   `ValidationError` at creation. `shell_read` on a directory lists one dir's names and is gated on
+ *   its own path — unaffected.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
  * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
@@ -842,7 +933,10 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   const { tools: safeTools } = createShellTools({ noFollowSymlinks: true });
  */
 function createShellTools(options = {}) {
-  const { noFollowSymlinks = false } = options;
+  const { noFollowSymlinks = false, canRead } = options;
+  if (canRead !== undefined && typeof canRead !== 'function') {
+    throw new ValidationError(`createShellTools: canRead must be a function (got ${canRead === null ? 'null' : typeof canRead})`);
+  }
   /** @type {ToolDef[]} */
   const tools = [
     {
@@ -873,7 +967,7 @@ function createShellTools(options = {}) {
         },
         required: ['pattern', 'path'],
       },
-      execute: async (/** @type {GrepArgs} */ args) => grepPath({ ...args, noFollowSymlinks }),
+      execute: async (/** @type {GrepArgs} */ args) => grepPath({ ...args, noFollowSymlinks }, canRead),
     },
     {
       name: 'shell_write',
