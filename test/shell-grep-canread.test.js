@@ -150,4 +150,25 @@ describe('shell_grep canRead (F259)', () => {
       assert.throws(() => createShellTools({ canRead: bad }), (e) => e instanceof ValidationError && !String(e.message).includes('yes'));
     }
   });
+
+  describe('model-supplied `files` arg is ignored (sneak regression)', () => {
+    let secret, outsideRoot;
+    before(() => {
+      outsideRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'canread-sneak-'));
+      secret = path.join(outsideRoot, 'secret.txt');
+      fs.writeFileSync(secret, 'SECRET_X\n');
+    });
+    after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+
+    for (const [mode, opts] of [['canRead unset', {}], ['canRead set', { canRead: async () => true }]]) {
+      it(`file root, ${mode}`, async () => {
+        const r = await grepOf(opts).execute({ pattern: 'SECRET_X', path: path.join(root, 'top.txt'), files: [secret] });
+        assert.equal(r.hits.length, 0);
+      });
+      it(`dir root, ${mode}`, async () => {
+        const r = await grepOf(opts).execute({ pattern: 'SECRET_X', path: path.join(root, 'src'), files: [secret] });
+        assert.equal(r.hits.length, 0);
+      });
+    }
+  });
 });

@@ -588,8 +588,6 @@ function looksCatastrophic(pattern) {
  * @property {boolean} [noFollowSymlinks] - When true, refuses a symlinked ROOT path (thrown, loud)
  *   and skips (silently, like any other read error) a file that is or becomes a symlink during the
  *   walk. Threaded into `workerData` so the worker thread's file reads honor it too.
- * @property {string[]} [files] - INTERNAL (set by `grepPath` when `canRead` is on): the pre-vetted
- *   file list the worker reads instead of walking. Not a model-facing parameter.
  */
 
 /**
@@ -659,8 +657,10 @@ async function walkChecked(dir, recursive, canRead, out) {
  * only sound bound (the static `looksCatastrophic` guard is a best-effort fast-reject, not a
  * guarantee; a grounded bypass like `(a|a|a)*` passes it yet backtracks exponentially).
  * @param {GrepArgs} args
+ * @param {string[]} [providedFiles] - INTERNAL, never from tool args: the `canRead`-vetted file list
+ *   (passed by grep-worker.js from its own workerData key, set only by `grepPath`).
  */
-async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false, files: providedFiles }) {
+async function _grepCore({ pattern, path: rawPath, recursive = true, maxMatches, flags = 'i', noFollowSymlinks = false }, providedFiles) {
   const resolved = resolveToolPath(rawPath);
   const cap = maxMatches || DEFAULT_GREP_MAX_MATCHES;
   let re;
@@ -762,7 +762,11 @@ async function grepPath(args, canRead) {
     }
   }
 
-  let workerArgs = args;
+  // Explicit allow-list: model-controlled tool args are NEVER spread into the worker payload.
+  const { recursive, maxMatches } = args;
+  const workerArgs = { pattern, path: rawPath, recursive, maxMatches, flags, timeout, noFollowSymlinks };
+  /** @type {string[]|undefined} */
+  let vettedFiles;
   if (canRead) {
     // The gate cannot cross into the Worker, so the walk runs here. Only a directory root walks; a
     // missing root / file root falls through to the worker unchanged (root is never passed to canRead).
@@ -772,13 +776,13 @@ async function grepPath(args, canRead) {
       /** @type {string[]} */
       const files = [];
       await walkChecked(root, args.recursive !== false, canRead, files);
-      workerArgs = { ...args, files };
+      vettedFiles = files;
     }
   }
 
   const budgetMs = timeout && timeout > 0 ? timeout : DEFAULT_GREP_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: workerArgs });
+    const worker = new Worker(path.join(__dirname, 'grep-worker.js'), { workerData: { args: workerArgs, files: vettedFiles } });
     let settled = false;
     const done = (fn, val) => {
       if (settled) return;
