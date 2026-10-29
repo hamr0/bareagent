@@ -2,7 +2,7 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.55.0] - 2026-10-29
 
 ### Added
 
@@ -14,6 +14,9 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   non-boolean return rejects the grep (tool, path and value TYPE only in the message); `HaltError` propagates as-is; a
   non-function `canRead` throws `ValidationError` at creation. Measured on this repo (5369 files, ~6500 gate calls):
   ~2.5s unset vs ~3.7s with a real `gate.allows` (median of 5).
+  **TOCTOU:** `canRead` vets paths at walk time; a path swapped for a symlink between vetting and the worker's read is
+  followed unless `noFollowSymlinks: true` - pair `canRead` with `noFollowSymlinks: true`. The `recursive` arg has the same
+  truthiness under `canRead` as when it is unset (absent => true, other falsy => false).
 
 ### Security
 
@@ -30,6 +33,8 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - **`shell_grep` `timeout` above 2^31-1 (or non-finite) no longer fails almost instantly.** Node clamps `setTimeout` delays
   over 2147483647ms to 1ms (`TimeoutOverflowWarning`), so a huge model-supplied `timeout` made the grep fail after a few ms
   (also on the canRead-unset path). The budget is now clamped to 2^31-1; non-finite uses the default (0/negative/absent unchanged).
+  **Behavior change (also on the canRead-unset path):** a NON-NUMBER `timeout` (e.g. the string `"60000"`) now falls back to
+  the 5000ms default instead of being coerced by `setTimeout`.
 - **`shell_grep` worker-timeout message under `canRead`** no longer blames the regex alone: it says the budget was shared with
   the canRead walk (and how long the walk used). The canRead-unset message is unchanged.
 
