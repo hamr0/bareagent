@@ -20,6 +20,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - **Closes the F259 root-grep bypass of `fs.deny` (when `canRead` is wired).** The Loop policy gates `shell_grep` as ONE
   action on the root path, so a root grep walked into `fs.deny`'d paths (`<wd>/.smoke`, `<wd>/.litectx`, an audit file)
   that a direct `shell_read` is denied. Reported by bareloop. Repro/negative control: `poc/f259-grep-canread.mjs`.
+- **`shell_grep` never accepts a file list from model args.** The grep worker payload is built from an explicit
+  allow-list; a model-supplied `files` arg is ignored (closed a pre-release regression of this branch).
+- **The `shell_grep` `timeout` bounds the whole call, including the `canRead` walk.** A slow or hung `canRead` rejects
+  with a `canRead walk exceeded <N>ms time budget` error; the worker gets only the remaining budget.
 
 ## [0.54.1] - 2026-10-27
 

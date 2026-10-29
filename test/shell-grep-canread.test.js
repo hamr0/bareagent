@@ -160,7 +160,7 @@ describe('shell_grep canRead (F259)', () => {
     });
     after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
 
-    for (const [mode, opts] of [['canRead unset', {}], ['canRead set', { canRead: async () => true }]]) {
+    for (const [mode, opts] of [['canRead unset', {}], ['canRead set (denies everything: vetted list empty)', { canRead: async () => false }]]) {
       it(`file root, ${mode}`, async () => {
         const r = await grepOf(opts).execute({ pattern: 'SECRET_X', path: path.join(root, 'top.txt'), files: [secret] });
         assert.equal(r.hits.length, 0);
@@ -170,5 +170,43 @@ describe('shell_grep canRead (F259)', () => {
         assert.equal(r.hits.length, 0);
       });
     }
+  });
+  describe('recursive truthiness matches between canRead and unset modes', () => {
+    for (const rec of [undefined, true, false, 0, null]) {
+      it(`recursive: ${String(rec)}`, async () => {
+        const a = await run({}, { recursive: rec });
+        const b = await run({ canRead: () => true }, { recursive: rec });
+        assert.deepEqual(rel(b), rel(a));
+        assert.equal(b.fileCount, a.fileCount);
+      });
+    }
+  });
+
+  describe('grep timeout bounds the whole call, canRead walk included', () => {
+    let slowDir;
+    before(() => {
+      slowDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'canread-slow-'));
+      for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(slowDir, `f${i}.txt`), 'MARKER_X\n');
+    });
+    after(() => fs.rmSync(slowDir, { recursive: true, force: true }));
+
+    it('slow canRead (300ms/path, 10 files) + timeout:300 rejects near the budget', async () => {
+      const t0 = Date.now();
+      await assert.rejects(
+        grepOf({ canRead: () => new Promise((r) => setTimeout(() => r(true), 300)) })
+          .execute({ pattern: 'MARKER_X', path: slowDir, timeout: 300 }),
+        (e) => /canRead walk exceeded 300ms time budget/.test(e.message) && !/backtracking/.test(e.message),
+      );
+      assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0}ms`);
+    });
+
+    it('HUNG canRead (never resolves) rejects and does not hang the process', async () => {
+      const t0 = Date.now();
+      await assert.rejects(
+        grepOf({ canRead: () => new Promise(() => {}) }).execute({ pattern: 'MARKER_X', path: slowDir, timeout: 300 }),
+        /canRead walk exceeded 300ms time budget/,
+      );
+      assert.ok(Date.now() - t0 < 1500);
+    });
   });
 });
