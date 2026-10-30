@@ -12,7 +12,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   clash; its `${VAR}` refs still resolve from the full `process.env`, so a deliberate handoff keeps working). `[]` = the
   server's own env only. Bridge-level (one list for all servers), threaded through every spawn path (bulk discovery + main,
   `allow` mode, `listServerTools`). A non-array or non-string/empty entry throws `ValidationError` (type only). Suggested
-  starting list (suggestion, not measured: PATH, HOME (+ TMPDIR, LANG on Unix; SYSTEMROOT, APPDATA, USERPROFILE, TEMP on Windows); npx/sh-wrapped servers may need more).
+  starting list (suggestion, not measured: PATH, HOME (+ TMPDIR, LANG on Unix; SYSTEMROOT, APPDATA, USERPROFILE, TEMP on Windows); measured (fwdloop F111): PATH + HOME alone were enough for tools/list on Linux with npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers; a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR; Windows unmeasured).
 
 ### Security
 
