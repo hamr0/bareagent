@@ -597,7 +597,7 @@ Verified live against a real 0.19 Gate: `gate.check` ALLOWs `shell_run ["ls","/t
 | throws | Treated as a deny. The thrown message becomes the reason. Loop continues. |
 | omitted | Allow-all. Useful for development; never in production — that's what bareguard is for. |
 
-**Keep provider keys out of MCP servers (`passEnv`, F109).** By default every stdio server is spawned with your full environment, so `DEEPSEEK_API_KEY` etc. are visible to it. Pass `passEnv: ['PATH', 'HOME']` to `createMCPBridge` (or `listServerTools`) and the child gets only those vars plus the server's own `env` (own wins on a clash; its `${VAR}` refs still resolve from your full env, so you can hand one key over deliberately). `[]` = own env only. Applies to every server, every mode. Suggested starting list, not measured: PATH, HOME (+ TMPDIR, LANG on Unix; SYSTEMROOT, APPDATA, USERPROFILE, TEMP on Windows); measured (fwdloop F111): PATH + HOME alone were enough for tools/list on Linux with npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers; a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR; Windows unmeasured. Bad shape throws `ValidationError`.
+**Keep provider keys out of MCP servers (`passEnv`, F109).** By default every stdio server is spawned with your full environment, so `DEEPSEEK_API_KEY` etc. are visible to it. Pass `passEnv: ['PATH', 'HOME']` to `createMCPBridge` (or `listServerTools`) and the child gets only those vars plus the server's own `env` (own wins on a clash; its `${VAR}` refs still resolve from your full env, so you can hand one key over deliberately). `[]` = own env only. Applies to every server, every mode. Suggested starting list: PATH, HOME. Measured (fwdloop F111, Linux, tools/list only): PATH + HOME were enough for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers. Unmeasured: real tool calls (a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR), TMPDIR/LANG, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP). Bad shape throws `ValidationError`.
 
 ### Per-caller governance with ctx (multi-user, multi-tenant)
 
@@ -1040,6 +1040,8 @@ const mcp = liteCtxMcpBridgeConfig({ root: './child-mem' });   // own-db isolati
 // In the spawn child config (bin/cli.js --config): { provider, model, tools, mcp, gate }
 //   mcp: <the config above>   → child's MCPBridge mounts litectx-mcp; tools join BEFORE gating
 // cfg.mcp also accepts a directory-confined { bridgePath } pointing at a .mcp-bridge.json on disk.
+// cfg.mcp.passEnv (optional string[], F109) limits which parent env vars reach the mounted MCP servers
+//   (default: they inherit the child's full env incl. API keys); a bad value exits 1 via the mount error.
 ```
 
 Requires litectx's `litectx-mcp` binary on PATH. Isolation is **physical** (each child a distinct `--root` db) — promotion to the parent is an explicit parent-side `recall`→`remember`, never automatic. See `examples/litectx-mcp-child.mjs`. bareagent imports nothing from litectx; the helper is pure config curation.
