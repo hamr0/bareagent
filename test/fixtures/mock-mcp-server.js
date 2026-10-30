@@ -6,6 +6,7 @@
  * Speaks JSON-RPC over stdio, same protocol as barebrowse/baremobile.
  *
  * Behaviors controlled by env vars:
+ *   MOCK_ENV_FILE=<path>   — APPEND this process's full env (one JSON object per line) to the file at startup
  *   MOCK_CRASH_ON_TOOL=1   — crash (exit 1) when tools/call is received
  *   MOCK_SLOW_INIT=<ms>    — delay initialize response by N ms
  *   MOCK_MALFORMED=1       — send non-JSON garbage on first tools/call
@@ -41,6 +42,10 @@ process.stdin.setEncoding('utf8');
 
 if (process.env.MOCK_PID_FILE) {
   require('fs').writeFileSync(process.env.MOCK_PID_FILE, String(process.pid));
+}
+
+if (process.env.MOCK_ENV_FILE) {
+  require('fs').appendFileSync(process.env.MOCK_ENV_FILE, JSON.stringify(process.env) + '\n');
 }
 
 if (process.env.MOCK_STDERR) process.stderr.write(process.env.MOCK_STDERR + '\n');
