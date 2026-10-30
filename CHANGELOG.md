@@ -12,7 +12,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   clash; its `${VAR}` refs still resolve from the full `process.env`, so a deliberate handoff keeps working). `[]` = the
   server's own env only. Bridge-level (one list for all servers), threaded through every spawn path (bulk discovery + main,
   `allow` mode, `listServerTools`). A non-array or non-string/empty entry throws `ValidationError` (type only). Suggested
-  starting list (suggestion, not measured: PATH, HOME (+ TMPDIR, LANG on Unix; SYSTEMROOT, APPDATA, USERPROFILE, TEMP on Windows); measured (fwdloop F111): PATH + HOME alone were enough for tools/list on Linux with npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers; a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR; Windows unmeasured).
+  starting list: PATH, HOME. Measured (fwdloop F111, Linux, tools/list only): PATH + HOME were enough for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers. Unmeasured: real tool calls (a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR), TMPDIR/LANG, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP).
+- **`cfg.mcp.passEnv` in `bin/cli.js --config` (F109).** The config-mode CLI now forwards an optional `cfg.mcp.passEnv` to
+  `createMCPBridge` (inline `{servers}` and `{bridgePath}` forms), so a spawned child's MCP servers no longer have to inherit
+  its API keys. Absent = byte-identical call; an invalid value surfaces as the existing `[cli] failed to mount MCP (cfg.mcp)` exit 1.
 
 ### Security
 
