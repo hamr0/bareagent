@@ -2,6 +2,24 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`passEnv: string[]` on `createMCPBridge` and `listServerTools` (opt-in, F109).** Restricts which parent env vars reach
+  spawned stdio MCP servers. Unset (default) is byte-identical to before: the child inherits the full parent env. Set: the
+  child gets ONLY the named vars that exist in `process.env`, overlaid by the server's own `env` (which wins on a name
+  clash; its `${VAR}` refs still resolve from the full `process.env`, so a deliberate handoff keeps working). `[]` = the
+  server's own env only. Bridge-level (one list for all servers), threaded through every spawn path (bulk discovery + main,
+  `allow` mode, `listServerTools`). A non-array or non-string/empty entry throws `ValidationError` (type only). Suggested
+  starting list (suggestion, not measured: PATH, HOME (+ TMPDIR, LANG on Unix; SYSTEMROOT, APPDATA, USERPROFILE, TEMP on Windows); npx/sh-wrapped servers may need more).
+
+### Security
+
+- **Closes F109 (when `passEnv` is set): provider API keys no longer reach third-party MCP servers.** `createRpcClient`
+  spawned every server with `{ ...process.env, ...serverEnv }`, so e.g. `DEEPSEEK_API_KEY` was visible to every MCP server.
+  Reported by fwdloop. Repro/negative control: `poc/f109-mcp-pass-env.mjs`.
+
 ## [0.55.0] - 2026-10-29
 
 ### Added
