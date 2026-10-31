@@ -2,6 +2,27 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.56.0] - 2026-10-31
+
+### Added
+
+- **`passEnv: string[]` on `createMCPBridge` and `listServerTools` (opt-in, F109).** Restricts which parent env vars reach
+  spawned stdio MCP servers. Unset (default) is byte-identical to before: the child inherits the full parent env. Set: the
+  child gets ONLY the named vars that exist in `process.env`, overlaid by the server's own `env` (which wins on a name
+  clash; its `${VAR}` refs still resolve from the full `process.env`, so a deliberate handoff keeps working). `[]` = the
+  server's own env only. Bridge-level (one list for all servers), threaded through every spawn path (bulk discovery + main,
+  `allow` mode, `listServerTools`). A non-array or non-string/empty entry throws `ValidationError` (type only). Suggested
+  starting list: PATH, HOME. Measured (fwdloop F111, Linux, tools/list only): PATH + HOME were enough for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers. Unmeasured: real tool calls (a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR), TMPDIR/LANG, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP).
+- **`cfg.mcp.passEnv` in `bin/cli.js --config` (F109).** The config-mode CLI now forwards an optional `cfg.mcp.passEnv` to
+  `createMCPBridge` (inline `{servers}` and `{bridgePath}` forms), so a spawned child's MCP servers no longer have to inherit
+  its API keys. Absent = byte-identical call; an invalid value surfaces as the existing `[cli] failed to mount MCP (cfg.mcp)` exit 1.
+
+### Security
+
+- **Closes F109 (when `passEnv` is set): provider API keys no longer reach third-party MCP servers.** `createRpcClient`
+  spawned every server with `{ ...process.env, ...serverEnv }`, so e.g. `DEEPSEEK_API_KEY` was visible to every MCP server.
+  Reported by fwdloop. Repro/negative control: `poc/f109-mcp-pass-env.mjs`.
+
 ## [0.55.0] - 2026-10-29
 
 ### Added

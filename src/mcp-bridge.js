@@ -249,13 +249,47 @@ function spawnFailure(name, command, err) {
 }
 
 /**
+ * Child process env. `passEnv` undefined => full inherit (historic behavior). Otherwise ONLY the
+ * named parent vars that exist (own-property) pass through, overlaid by the server's own resolved
+ * env (which wins). `${VAR}` in the server's own env was already resolved from the full process.env.
+ * @param {string[] | undefined} passEnv
+ * @param {Record<string, string>} own
+ * @returns {NodeJS.ProcessEnv}
+ */
+function buildChildEnv(passEnv, own) {
+  if (passEnv === undefined) return { ...process.env, ...own };
+  /** @type {Record<string, string>} */
+  const base = {};
+  for (const k of passEnv) {
+    if (Object.prototype.hasOwnProperty.call(process.env, k)) base[k] = /** @type {string} */ (process.env[k]);
+  }
+  return { ...base, ...own };
+}
+
+/**
+ * Validate `passEnv`. Messages name the TYPE only — never echo a value.
+ * @param {any} passEnv
+ * @param {(msg: string) => Error} bad
+ * @returns {string[] | undefined}
+ */
+function validatePassEnv(passEnv, bad) {
+  if (passEnv === undefined) return undefined;
+  if (!Array.isArray(passEnv)) throw bad(`passEnv must be an array of non-empty strings (got ${typeName(passEnv)})`);
+  for (const k of passEnv) {
+    if (typeof k !== 'string' || k === '') throw bad(`passEnv entries must be non-empty strings (got ${k === '' ? 'empty string' : typeName(k)})`);
+  }
+  return passEnv;
+}
+
+/**
  * @param {string} name
  * @param {ServerDef} def
+ * @param {string[]} [passEnv]
  * @returns {RpcClient}
  */
-function createRpcClient(name, def) {
+function createRpcClient(name, def, passEnv) {
   const { command, args = [], env, cwd } = def;
-  const mergedEnv = { ...process.env, ...resolveEnv(env) };
+  const mergedEnv = buildChildEnv(passEnv, resolveEnv(env));
 
   /** @type {import('node:child_process').ChildProcessWithoutNullStreams} */
   let child;
@@ -517,13 +551,13 @@ const MAX_LIST_PAGES = 100;
  * @param {string} name
  * @param {ServerDef} def
  * @param {number} [timeout] - Bound on EACH round-trip (initialize, every tools/list page).
- * @param {{ deadlineMs?: number }} [o] - Optional ONE total wall-clock ceiling over the whole
+ * @param {{ deadlineMs?: number, passEnv?: string[] }} [o] - `passEnv`: see createMCPBridge. Optional ONE total wall-clock ceiling over the whole
  *   connect+list (internal; used by listServerTools). On trip the child is killed and a labelled
  *   TimeoutError rejects. The timer is always cleared.
  * @returns {Promise<{mcpTools: McpTool[], client: RpcClient}>}
  */
 async function connectAndListTools(name, def, timeout = 15000, o = {}) {
-  const client = createRpcClient(name, def);
+  const client = createRpcClient(name, def, o.passEnv);
   /** @type {NodeJS.Timeout | undefined} */
   let deadlineTimer;
 
@@ -835,6 +869,7 @@ function validateAllow(allow) {
  * @param {boolean} o.includeProjectConfig
  * @param {number} o.timeout
  * @param {number} o.callTimeout
+ * @param {string[]} [o.passEnv]
  * @param {(name: string, def: ServerDef) => Promise<boolean>} o.vetServer
  * @param {(specs: Array<{name: string, command: string, args?: string[]}>) => void} o.warnUnvettedSpawn
  */
@@ -867,7 +902,7 @@ async function createAllowBridge(allow, o) {
   await Promise.all(toConnect.map(async ([name, def]) => {
     try {
       if (!(await o.vetServer(name, def))) return;
-      const { mcpTools, client } = await connectAndListTools(name, def, o.timeout);
+      const { mcpTools, client } = await connectAndListTools(name, def, o.timeout, { passEnv: o.passEnv });
       // Track the child BEFORE any processing so close() reaps it even if what follows throws.
       children.push(client.child);
       const signed = new Set(allow.get(name));
@@ -936,6 +971,7 @@ async function createAllowBridge(allow, o) {
  *   server was not found / failed / was rejected) come back in `missing`. `denied` is always `[]`, nothing is
  *   written to stdout, and `mcp_invoke` on a listed-but-unsigned name throws `context.denied === true`.
  *   Invalid shape throws `ValidationError` (type only, never values).
+ * @param {string[]} [opts.passEnv] - Parent env var NAMES to hand to every spawned server. Unset (default) = the child inherits the FULL parent env (all API keys). Set = the child gets ONLY these vars (those present in process.env) plus the server's own `env` (which wins on a name clash; its `${VAR}` refs still resolve from the full process.env). `[]` = own env only. Measured (fwdloop F111, Linux, tools/list only): PATH + HOME were enough for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers. Unmeasured: real tool calls (a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR), TMPDIR/LANG, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP). Bridge-level, one list for all servers. Invalid shape throws `ValidationError` (type only).
  * @param {string[]} [opts.servers] - Limit to these server names (ignored when `allow` is given).
  * @param {number} [opts.timeout=15000] - Per-server handshake timeout in ms (initialize + tools/list).
  * @param {number} [opts.callTimeout=120000] - Per-invocation timeout in ms for tools/call. Bounds a
@@ -963,6 +999,8 @@ async function createMCPBridge(opts = {}) {
       'The static allow/deny filter in .mcp-bridge.json is unchanged.'
     );
   }
+  const passEnv = validatePassEnv(opts.passEnv, (msg) =>
+    new ValidationError(`[MCP Bridge] ${msg}`, { context: { lib: 'bare-agent' } }));
   const bridgePath = opts.bridgePath || DEFAULT_BRIDGE_PATH();
   const timeout = opts.timeout || 15000;
   // 0 is a valid explicit "unbounded"; only undefined falls back to the default.
@@ -979,7 +1017,7 @@ async function createMCPBridge(opts = {}) {
     return createAllowBridge(allow, {
       configPaths: opts.configPaths,
       includeProjectConfig: opts.includeProjectConfig === true || !!confirmServer,
-      timeout, callTimeout, vetServer, warnUnvettedSpawn,
+      timeout, callTimeout, vetServer, warnUnvettedSpawn, passEnv,
     });
   }
 
@@ -1038,7 +1076,7 @@ async function createMCPBridge(opts = {}) {
           // Denied by confirmServer: skip silently — this is the caller's own
           // decision, not a connection failure, so it must not land in `errors`.
           if (!(await vetServer(name, def))) return;
-          const result = await connectAndListTools(name, def, timeout);
+          const result = await connectAndListTools(name, def, timeout, { passEnv });
           connectResults.set(name, result.client);
           freshTools.set(name, result.mcpTools);
         } catch (err) {
@@ -1110,7 +1148,7 @@ async function createMCPBridge(opts = {}) {
     try {
       // Denied by confirmServer: skip silently (the caller's decision, not a failure).
       if (!(await vetServer(name, serverConf))) return;
-      const { mcpTools, client } = await connectAndListTools(name, serverConf, timeout);
+      const { mcpTools, client } = await connectAndListTools(name, serverConf, timeout, { passEnv });
       // Track the child BEFORE any processing so close() reaps it even if what follows throws.
       children.push(client.child);
 
@@ -1182,6 +1220,7 @@ const listBad = (msg) => new ValidationError(`[MCP Bridge] listServerTools: ${ms
  * @param {string[]} [opts.configPaths] - Explicit config paths; omitted ⇒ trusted $HOME/IDE defaults.
  * @param {(name: string, def: ServerDef) => boolean | Promise<boolean>} [opts.confirmServer] - Same semantics as createMCPBridge: `=== true` proceeds, a throw denies. Implies includeProjectConfig.
  * @param {boolean} [opts.includeProjectConfig=false] - Also scan `./.mcp.json` during default discovery.
+ * @param {string[]} [opts.passEnv] - Same as createMCPBridge: restrict the spawned server's inherited env to these parent var names (unset = full inherit). Bad shape throws `ValidationError`.
  * @param {number} [opts.timeout=15000] - Per-round-trip bound in ms (initialize and each tools/list page).
  * @returns {Promise<Array<{name: string, description: string, annotations?: Record<string, any>}>>}
  * @when you want to list one MCP server's tools and their annotation hints before deciding what to allow — no bridge, no cache file, no tools kept alive
@@ -1194,6 +1233,7 @@ async function listServerTools(opts) {
     throw listBad(`opts must be an object (got ${typeName(opts)})`);
   }
   const { server, configPaths, confirmServer, includeProjectConfig, timeout = 15000 } = opts;
+  const passEnv = validatePassEnv(opts.passEnv, listBad);
   if (typeof server !== 'string' || server === '') {
     throw listBad(`server must be a non-empty string (got ${server === '' ? 'empty string' : typeName(server)})`);
   }
@@ -1221,7 +1261,7 @@ async function listServerTools(opts) {
     throw new ToolError(`MCP server "${server}" was not approved by confirmServer`, { context: { server, denied: true } });
   }
 
-  const { mcpTools, client } = await connectAndListTools(server, def, timeout, { deadlineMs: timeout * LIST_DEADLINE_MULTIPLIER });
+  const { mcpTools, client } = await connectAndListTools(server, def, timeout, { deadlineMs: timeout * LIST_DEADLINE_MULTIPLIER, passEnv });
   try {
     return mcpTools.map(t => {
       if (t === null || typeof t !== 'object' || typeof t.name !== 'string' || t.name === '') {

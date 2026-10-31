@@ -97,6 +97,7 @@ const bridge = await createMCPBridge({
 - `timeout` — per-server init timeout, default 15s (usage-guide.md:1092).
 - `allow` — signed in-memory allow-list `{ [server]: string[] }` (see below); `.mcp-bridge.json` is not used.
 - `refresh` — force re-discovery regardless of the `.mcp-bridge.json` TTL (usage-guide.md:1093).
+- `passEnv` — `string[]`, parent env var NAMES handed to every spawned server (also accepted by `listServerTools`). Unset (default): the child inherits the FULL parent env, so provider API keys reach every MCP server. Set: only the named vars present in `process.env`, overlaid by the server's own `env` (own wins on a clash; its `${VAR}` refs still resolve from the full `process.env`). `[]`: the server's own env only. One list for all servers, applied on every spawn path. In a spawn child config (`bin/cli.js --config`) set it as `cfg.mcp.passEnv`. A non-array or a non-string/empty entry throws `ValidationError` (type only). Measured (fwdloop F111, Linux, tools/list only): PATH + HOME were enough for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers. Unmeasured: real tool calls (a tool that opens a window may also need DISPLAY/XDG_RUNTIME_DIR), TMPDIR/LANG, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP).
 - `policy` — an async function for runtime, argument-dependent checks layered on top of the file-based allow/deny list (usage-guide.md:1094-1100).
 
 ## Signed allow-list (`allow`, in-memory)
