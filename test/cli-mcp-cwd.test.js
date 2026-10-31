@@ -33,7 +33,7 @@ describe('bin/cli.js cfg.mcp.cwd', () => {
       child.stdin.end('{"content":"go"}');
       child.on('exit', (code) => {
         const cwds = fs.existsSync(cwdFile) ? fs.readFileSync(cwdFile, 'utf8').trim().split('\n') : [];
-        resolve({ code, err, cwds });
+        resolve({ code, err, cwds, pid: child.pid });
       });
     });
   }
@@ -72,5 +72,12 @@ describe('bin/cli.js cfg.mcp.cwd', () => {
     assert.match(r.err, /failed to mount MCP \(cfg\.mcp\)/);
     assert.equal(r.err.includes('SECRETDIR'), false);
     assert.equal(r.cwds.length, 0);
+  });
+
+  it('mount failure with inline servers leaves no temp bridge file behind (by child pid)', async () => {
+    const r = await run((s) => ({ servers: { m: s }, cwd: 'rel/SECRETDIR' }));
+    assert.equal(r.code, 1);
+    assert.match(r.err, /failed to mount MCP \(cfg\.mcp\)/);
+    assert.equal(fs.existsSync(path.join(os.tmpdir(), `bareagent-mcp-${r.pid}.json`)), false);
   });
 });

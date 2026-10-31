@@ -100,6 +100,8 @@ async function runConfigMode(cfgPath) {
       process.stderr.write('[cli] cfg.mcp must be an inline bridge config ({ servers }) or { bridgePath }\n');
       process.exit(1);
     }
+    let mountFailed = false;
+    let mountMsg;
     try {
       mcpBridge = await createMCPBridge({
         bridgePath,
@@ -110,10 +112,15 @@ async function runConfigMode(cfgPath) {
       });
       tools.push(...mcpBridge.tools);
     } catch (err) {
-      process.stderr.write(`[cli] failed to mount MCP (cfg.mcp): ${err.message}\n`);
-      process.exit(1);
+      // Exit AFTER the finally: process.exit() inside the catch would skip it and leak the temp file.
+      mountFailed = true;
+      mountMsg = err.message;
     } finally {
       if (tmpBridge) { try { fs.unlinkSync(tmpBridge); } catch { /* best-effort */ } }
+    }
+    if (mountFailed) {
+      process.stderr.write(`[cli] failed to mount MCP (cfg.mcp): ${mountMsg}\n`);
+      process.exit(1);
     }
   }
 

@@ -1,7 +1,7 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
-const { readFileSync, writeFileSync, existsSync, statSync } = require('node:fs');
+const { readFileSync, writeFileSync, existsSync, statSync, accessSync, constants: fsConstants } = require('node:fs');
 const { join, isAbsolute } = require('node:path');
 const { homedir } = require('node:os');
 const { ToolError, ValidationError, TimeoutError } = require('./errors');
@@ -234,14 +234,27 @@ function resolveEnv(env) {
 /**
  * Labelled spawn-failure error. Names the command ONLY (args/env can carry tokens); control
  * characters in the command are escaped so a NUL/newline can't corrupt logs. `code` is the Node
- * error code when it is a string, else 'ESPAWN'.
+ * error code when it is a string, else 'ESPAWN'. Node reports a bad start folder exactly like a
+ * missing command (ENOENT/EACCES/ENOTDIR), so when a `cwd` was in effect and it cannot be entered
+ * the label says the working folder is the problem instead (`context.cwdFailed:true`, key absent
+ * otherwise); neither the folder path nor the command is named then. The check never throws.
  * @param {string} name
  * @param {any} command
  * @param {any} err
+ * @param {string} [cwd] - the start folder in effect for this spawn, if any
  * @returns {ToolError}
  */
-function spawnFailure(name, command, err) {
+function spawnFailure(name, command, err, cwd) {
   const code = typeof err?.code === 'string' ? err.code : 'ESPAWN';
+  if (cwd) {
+    let usable = false;
+    try { accessSync(cwd, fsConstants.X_OK); usable = statSync(cwd).isDirectory(); } catch { /* unusable */ }
+    if (!usable) {
+      return new ToolError(`MCP server "${name}" failed to start: working folder could not be used (${code})`, {
+        context: { spawnError: true, server: name, code, cwdFailed: true },
+      });
+    }
+  }
   const shown = String(command).replace(/[\u0000-\u001f\u007f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
   return new ToolError(`MCP server "${name}" failed to start: command "${shown}" (${code})`, {
     context: { spawnError: true, server: name, code },
@@ -327,7 +340,7 @@ function createRpcClient(name, def, passEnv, bridgeCwd) {
     // Dead client: rpc() rejects every call; notify() is a no-op; `child` is a minimal stand-in
     // that killServer() skips (exitCode !== null) — the simplest shape that needs no null-guards
     // in connectAndListTools / killServer / close().
-    const dead = spawnFailure(name, command, err);
+    const dead = spawnFailure(name, command, err, cwd);
     return {
       rpc: () => Promise.reject(dead),
       notify: () => {},
@@ -397,7 +410,7 @@ function createRpcClient(name, def, passEnv, bridgeCwd) {
     // kill() or IPC send on a LIVE child; keep the listener (so it can't crash the host) but do
     // not mark the server failed — a live server's lifecycle belongs to the 'close' handler.
     if (child.pid !== undefined || spawnErr) return;
-    spawnErr = spawnFailure(name, command, err);
+    spawnErr = spawnFailure(name, command, err, cwd);
     for (const id of [...pending.keys()]) settle(id, false, spawnErr);
   });
 
@@ -995,7 +1008,7 @@ async function createAllowBridge(allow, o) {
  *   written to stdout, and `mcp_invoke` on a listed-but-unsigned name throws `context.denied === true`.
  *   Invalid shape throws `ValidationError` (type only, never values).
  * @param {string[]} [opts.passEnv] - Parent env var NAMES to hand to every spawned server. Unset (default) = the child inherits the FULL parent env (all API keys). Set = the child gets ONLY these vars (those present in process.env) plus the server's own `env` (which wins on a name clash; its `${VAR}` refs still resolve from the full process.env). `[]` = own env only. Measured (fwdloop F111/F111b, Linux, passEnv ['PATH','HOME']): tools/list worked for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers, and real tool calls worked too (litectx.recall via node; a HEADLESS barebrowse browse); adding DISPLAY, XDG_RUNTIME_DIR, TMPDIR or LANG changed nothing, so PATH + HOME is the measured minimum on Linux. Unmeasured: a headed (windowed) browser, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP). Bridge-level, one list for all servers. Invalid shape throws `ValidationError` (type only).
- * @param {string} [opts.cwd] - Start folder for every spawned server (sibling of `passEnv`, bridge-level, opt-in). Unset (default) = the child starts in `process.cwd()`, byte-identical to before. A server's own `cwd` wins. Applied ONLY at spawn: never written to `.mcp-bridge.json`, and it does not move discovery (`./.mcp.json`, the default bridge path stay on `process.cwd()`). Validated once, before anything spawns: must be a non-empty ABSOLUTE path to an existing directory (no `~` expansion, no relative path), else `ValidationError` naming the reason only, never the value; this throws for the whole bridge. A folder deleted after validation, or a bad per-server `cwd`, behave as before (the server fails to start / lands in `errors`).
+ * @param {string} [opts.cwd] - Start folder for every spawned server (sibling of `passEnv`, bridge-level, opt-in). Unset (default) = the child starts in `process.cwd()`, byte-identical to before. A server's own `cwd` wins. Applied ONLY at spawn: never written to `.mcp-bridge.json`, and it does not move discovery (`./.mcp.json`, the default bridge path stay on `process.cwd()`). Validated once, before anything spawns: must be a non-empty ABSOLUTE path to an existing directory (no `~` expansion, no relative path), else `ValidationError` naming the reason only, never the value; this throws for the whole bridge. A folder deleted after validation, or a bad per-server `cwd`, is not validated up front: the server fails to start / lands in `errors`, labelled `working folder could not be used` with `context.cwdFailed:true` (the folder path is never named).
  * @param {string[]} [opts.servers] - Limit to these server names (ignored when `allow` is given).
  * @param {number} [opts.timeout=15000] - Per-server handshake timeout in ms (initialize + tools/list).
  * @param {number} [opts.callTimeout=120000] - Per-invocation timeout in ms for tools/call. Bounds a

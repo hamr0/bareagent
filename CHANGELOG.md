@@ -13,10 +13,23 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   discovery (`./.mcp.json`, the default bridge path stay on `process.cwd()`). Validated once, before anything spawns: a
   non-string, empty, relative or `~/x` path (no `~` expansion), or a path that does not exist or is not a directory, throws
   `ValidationError` for the whole bridge (reason only, the value is never echoed). Unchanged: a folder deleted after
-  validation, or a bad per-server `cwd`, behave as before. Raw `spawn` measured: a missing folder is an async `ENOENT`
+  validation, or a bad per-server `cwd`, are not validated up front (the server fails to start, labelled as the folder, see
+  Fixed). Raw `spawn` measured: a missing folder is an async `ENOENT`
   error event, a file as folder a sync `ENOTDIR` throw (`poc/mcp-bridge-cwd.mjs`).
 - **`cfg.mcp.cwd` in `bin/cli.js --config`.** Forwarded to `createMCPBridge` (inline and `{bridgePath}` forms); absent =
   byte-identical call; invalid exits 1 via the existing mount error.
+
+### Fixed
+
+- **A bad MCP start folder is no longer blamed on the command.** Node reports a missing/unenterable `cwd` exactly like a
+  missing command (`ENOENT`/`EACCES`/`ENOTDIR`), so the spawn-failure label read `failed to start: command "node" (ENOENT)`.
+  When a `cwd` was in effect (bridge-level or a server's own) and it cannot be entered, the label is now
+  `MCP server "s" failed to start: working folder could not be used (<code>)` with `context.cwdFailed:true` (the folder path
+  and the command are not named; key absent otherwise). Still fails at spawn, same `ToolError`, `spawnError`, `server`, `code`;
+  a truly missing command keeps its byte-identical label.
+- **`bin/cli.js --config`: a failed `cfg.mcp` mount no longer leaks `/tmp/bareagent-mcp-<pid>.json`.** `process.exit(1)` in
+  the catch skipped the `finally` that unlinks the inline-servers temp file (which holds the server config incl. env values).
+  The exit now runs after the cleanup; same stderr message, same exit 1.
 
 ## [0.56.0] - 2026-10-31
 

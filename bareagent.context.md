@@ -441,7 +441,7 @@ a server that breaks its stdin pipe surfaces as a failed connection, never an un
 crash; and a server whose `command` cannot start (ENOENT/EACCES, or a sync `spawn()` refusal such as an empty command or NUL byte) rejects with
 `MCP server "s" failed to start: command "<cmd>" (<code>)`, `context: { spawnError: true, server, code }`
 (`code` = Node error code if a string, else `'ESPAWN'`; command only with control chars escaped, never args/env) — `listServerTools` throws it, `allow` mode puts it in `errors` + `missing`,
-bulk mode in `errors` — instead of crashing the host.
+bulk mode in `errors` — instead of crashing the host. If a `cwd` (bridge-level or the server's own) was in effect and cannot be entered, the message is `MCP server "s" failed to start: working folder could not be used (<code>)` with `context.cwdFailed:true` added (no folder path, no command named); absent otherwise.
 
 ## Wiring with bareguard
 
