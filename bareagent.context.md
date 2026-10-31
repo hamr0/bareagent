@@ -599,6 +599,8 @@ Verified live against a real 0.19 Gate: `gate.check` ALLOWs `shell_run ["ls","/t
 
 **Keep provider keys out of MCP servers (`passEnv`, F109).** By default every stdio server is spawned with your full environment, so `DEEPSEEK_API_KEY` etc. are visible to it. Pass `passEnv: ['PATH', 'HOME']` to `createMCPBridge` (or `listServerTools`) and the child gets only those vars plus the server's own `env` (own wins on a clash; its `${VAR}` refs still resolve from your full env, so you can hand one key over deliberately). `[]` = own env only. Applies to every server, every mode. Suggested starting list: PATH, HOME. Measured (fwdloop F111/F111b, Linux, passEnv ['PATH','HOME']): tools/list worked for npx (barebrowse, baremobile), node (litectx) and sh-wrapped servers, and real tool calls worked too (litectx.recall via node; a HEADLESS barebrowse browse); adding DISPLAY, XDG_RUNTIME_DIR, TMPDIR or LANG changed nothing, so PATH + HOME is the measured minimum on Linux. Unmeasured: a headed (windowed) browser, and Windows (suggested: SYSTEMROOT, APPDATA, USERPROFILE, TEMP). Bad shape throws `ValidationError`.
 
+**Start folder for MCP servers (`cwd`).** `createMCPBridge({ cwd: '/abs/dir' })` (or `listServerTools`, or `cfg.mcp.cwd` in `--config`) starts every spawned server in that folder; a server's own `cwd` still wins; unset = your process cwd. It applies only at spawn: it is not saved into `.mcp-bridge.json` and does not move config discovery. It must be an absolute path to an existing directory (no `~`, no relative path) or the whole bridge throws `ValidationError` before anything spawns (the value is never echoed in the message).
+
 ### Per-caller governance with ctx (multi-user, multi-tenant)
 
 The policy signature accepts a third arg `ctx` — an opaque blob you pass per-call via `loop.run(msgs, tools, { ctx })`. `wireGate` forwards it as `_ctx` on every `gate.check({ type, args, _ctx })`, and you can branch on it inside bareguard's `humanChannel` callback or via custom primitives.
@@ -1042,6 +1044,7 @@ const mcp = liteCtxMcpBridgeConfig({ root: './child-mem' });   // own-db isolati
 // cfg.mcp also accepts a directory-confined { bridgePath } pointing at a .mcp-bridge.json on disk.
 // cfg.mcp.passEnv (optional string[], F109) limits which parent env vars reach the mounted MCP servers
 //   (default: they inherit the child's full env incl. API keys); a bad value exits 1 via the mount error.
+// cfg.mcp.cwd (optional absolute dir) sets the mounted MCP servers' start folder; a bad value exits 1 the same way.
 ```
 
 Requires litectx's `litectx-mcp` binary on PATH. Isolation is **physical** (each child a distinct `--root` db) — promotion to the parent is an explicit parent-side `recall`→`remember`, never automatic. See `examples/litectx-mcp-child.mjs`. bareagent imports nothing from litectx; the helper is pure config curation.

@@ -76,7 +76,7 @@ async function runConfigMode(cfgPath) {
   // `liteCtxMcpBridgeConfig`) or `{ bridgePath }` pointing at one (confined to the config directory,
   // same rule as gate.humanChannel). Mounted tools join the set BEFORE gating, so they traverse the
   // same policy as native tools. `cfg.mcp.passEnv` (string[], optional) restricts which parent env
-  // vars reach the MCP servers (F109); invalid ⇒ the mount-failure exit below. The server `command` runs unsandboxed — same trust as `cfg.tools`.
+  // vars reach the MCP servers (F109); `cfg.mcp.cwd` (absolute dir) sets the servers' start folder; invalid ⇒ the mount-failure exit below. The server `command` runs unsandboxed — same trust as `cfg.tools`.
   /** @type {{ tools: ToolDef[], close: Function } | null} */
   let mcpBridge = null;
   if (cfg.mcp) {
@@ -106,6 +106,7 @@ async function runConfigMode(cfgPath) {
         servers: cfg.mcp.servers ? Object.keys(cfg.mcp.servers) : undefined,
         timeout: cfg.mcp.timeout || 15000,
         ...(cfg.mcp.passEnv !== undefined ? { passEnv: cfg.mcp.passEnv } : {}),
+        ...(cfg.mcp.cwd !== undefined ? { cwd: cfg.mcp.cwd } : {}),
       });
       tools.push(...mcpBridge.tools);
     } catch (err) {

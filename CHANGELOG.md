@@ -2,6 +2,22 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`cwd: string` on `createMCPBridge` and `listServerTools` (opt-in, sibling of `passEnv`).** Sets the start folder of
+  every spawned stdio MCP server. Unset (default) is byte-identical to before (the child starts in `process.cwd()`). Set:
+  the child starts in that folder; a server's own `cwd` in its def still wins. Applied ONLY at spawn, on every spawn path
+  (bulk discovery + main, `allow` mode, `listServerTools`): it is never written to `.mcp-bridge.json`, and it does not move
+  discovery (`./.mcp.json`, the default bridge path stay on `process.cwd()`). Validated once, before anything spawns: a
+  non-string, empty, relative or `~/x` path (no `~` expansion), or a path that does not exist or is not a directory, throws
+  `ValidationError` for the whole bridge (reason only, the value is never echoed). Unchanged: a folder deleted after
+  validation, or a bad per-server `cwd`, behave as before. Raw `spawn` measured: a missing folder is an async `ENOENT`
+  error event, a file as folder a sync `ENOTDIR` throw (`poc/mcp-bridge-cwd.mjs`).
+- **`cfg.mcp.cwd` in `bin/cli.js --config`.** Forwarded to `createMCPBridge` (inline and `{bridgePath}` forms); absent =
+  byte-identical call; invalid exits 1 via the existing mount error.
+
 ## [0.56.0] - 2026-10-31
 
 ### Added
