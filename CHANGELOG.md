@@ -2,6 +2,16 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Flaky CI test made deterministic** (`test/shell-grep-canread.test.js`, "worker-timeout message under canRead blames
+  the shared budget"). It gave the grep worker only ~30ms of a 300ms budget after a 270ms `canRead` walk, so a fast
+  runner finished the search in time and the expected timeout never fired (red twice on CI, incl. the `v0.58.0` tag
+  run). The walk now takes ~100ms of a 1000ms budget and the worker runs a regex that always backtracks, so the
+  worker-timeout path is always hit. Test-only; no library change.
+
 ## [0.58.0] - 2026-11-01
 
 ### Added
