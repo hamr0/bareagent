@@ -135,7 +135,7 @@ class OllamaProvider {
       // BA-24: honest null when the response carried no token counts — do NOT manufacture an all-zeros
       // object (which launders an unpriceable round into a $0 PRICED one).
       usage: hasUsageSignal(data, OLLAMA_USAGE_KEYS)
-        ? { inputTokens: data.prompt_eval_count || 0, outputTokens: data.eval_count || 0 }
+        ? { inputTokens: data.prompt_eval_count || 0, outputTokens: data.eval_count || 0, reasoningTokens: null } // BA-29: not reported
         : null,
       ...(temperatureDropped && { temperatureDropped: true }),
       ...(thinkingMode && assessThinking({ kind: 'ollama', mode: thinkingMode, data, unsupported: thinkingTrack.unsupported, owner: this, label: 'OllamaProvider', model: this.model })),

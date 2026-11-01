@@ -206,6 +206,9 @@ class GeminiProvider {
       outputTokens: (u?.candidatesTokenCount || 0) + (u?.thoughtsTokenCount || 0),
       cacheReadTokens: cacheRead,
       cacheCreationTokens: 0,
+      // BA-29: reported thoughts (`thoughtsTokenCount`) or null — never 0-for-absent. Already FOLDED into
+      // `outputTokens` above (unchanged), so this is observability only and pricing is unaffected.
+      reasoningTokens: Number.isFinite(u?.thoughtsTokenCount) ? u.thoughtsTokenCount : null,
     };
   }
 

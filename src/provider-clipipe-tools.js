@@ -139,7 +139,7 @@ function mapClaudeMeta(outer) {
   const raw = hasUsageSignal(outer.usage, CLAUDE_USAGE_KEYS) ? outer.usage : null;
   /** @type {import('../types').Usage|null} */
   const usage = raw
-    ? { inputTokens: Number(raw.input_tokens) || 0, outputTokens: Number(raw.output_tokens) || 0 }
+    ? { inputTokens: Number(raw.input_tokens) || 0, outputTokens: Number(raw.output_tokens) || 0, reasoningTokens: null } // BA-29: not reported
     : null;
   // Absent cache tiers mean the model didn't cache — omit rather than emit a synthetic 0 (per Usage docs).
   if (usage && Number.isFinite(raw.cache_read_input_tokens)) usage.cacheReadTokens = raw.cache_read_input_tokens;

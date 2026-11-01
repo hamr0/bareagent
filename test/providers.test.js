@@ -150,7 +150,7 @@ describe('usage normalization — cache token tiers', () => {
       usage: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 80 } },
     });
     const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
-    assert.deepEqual(r.usage, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 80, cacheCreationTokens: 0 });
+    assert.deepEqual(r.usage, { inputTokens: 20, outputTokens: 10, cacheReadTokens: 80, cacheCreationTokens: 0, reasoningTokens: null });
     server.close();
   });
 
@@ -160,7 +160,7 @@ describe('usage normalization — cache token tiers', () => {
       usage: { prompt_tokens: 50, completion_tokens: 5 },
     });
     const r = await new OpenAIProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
-    assert.deepEqual(r.usage, { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    assert.deepEqual(r.usage, { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null });
     server.close();
   });
 
@@ -171,7 +171,7 @@ describe('usage normalization — cache token tiers', () => {
       usage: { input_tokens: 10, output_tokens: 4, cache_creation_input_tokens: 0, cache_read_input_tokens: 23510 },
     });
     const r = await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
-    assert.deepEqual(r.usage, { inputTokens: 10, outputTokens: 4, cacheReadTokens: 23510, cacheCreationTokens: 0 });
+    assert.deepEqual(r.usage, { inputTokens: 10, outputTokens: 4, cacheReadTokens: 23510, cacheCreationTokens: 0, reasoningTokens: null });
     server.close();
   });
 
@@ -181,7 +181,7 @@ describe('usage normalization — cache token tiers', () => {
       usage: { input_tokens: 7, output_tokens: 2 },
     });
     const r = await new AnthropicProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
-    assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null });
     server.close();
   });
 });
@@ -243,7 +243,7 @@ describe('GeminiProvider', () => {
     });
     const r = await new GeminiProvider({ apiKey: 'x', baseUrl: url }).generate([{ role: 'user', content: 'hi' }], []);
     // input = 39594 - 38885 = 709 (uncached remainder); output = candidates 1 + thoughts 3 = 4.
-    assert.deepEqual(r.usage, { inputTokens: 709, outputTokens: 4, cacheReadTokens: 38885, cacheCreationTokens: 0 });
+    assert.deepEqual(r.usage, { inputTokens: 709, outputTokens: 4, cacheReadTokens: 38885, cacheCreationTokens: 0, reasoningTokens: 3 });
     server.close();
   });
 });

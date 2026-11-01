@@ -11,6 +11,15 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 
 > Coverage note: v0.16.2→v0.27.0 (eval-assist suite 0.17–0.19, RLM/`recurse` 0.20–0.24, BA-8/9/10/11/14 seams 0.22–0.30) were decided in their own PRDs (`eval-assist-prd.md`, `RLM_PRD.md`), which remain canonical for those. Entries below fold former standalone side-docs (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`) back into the main PRD; granular evidence lives in CHANGELOG/git history. (prd.md:798-810)
 
+## unreleased / BA-29 — bad-call facts, `checkArgs`, `reasoningTokens`, shell hints (2026-11-01)
+- **Facts on the return, never actions:** `badCalls` / `cutOff` are on the `Loop.run()` return only (not events, not `onToolResult`); a cut-round call is still never executed, repaired or auto-continued (BA-4/BA-6/BA-13 stand). Key absent when empty so an untouched run's return shape is unchanged.
+- **`checkArgs` is opt-in and top-level only:** many caller schemas are loose, and a nested/`$ref` validator is a dependency. It refuses through the SAME path as a tool throw (so `maxIdenticalToolErrors` still bounds it), outside `retry.call` (a refusal is never re-run). shell.js throws are NOT parsed into `badCalls` (parsing English out of a message is the anti-pattern this replaces).
+- **Shell hints are the default-on fix:** the "output was cut short" sentence is true only for an ABSENT argument; for a present wrong-typed value it caused a byte-identical retry into `stuck:`. Messages only.
+- **`reasoningTokens` is observability, not a price input:** it is a subset of `outputTokens` for both OpenAI wire and Gemini (checked in each provider's usage normalizer), so pricing is untouched; `null` = unreported, never 0.
+- **`maxTokensRequested` is only what the Loop handed the provider** (`null` otherwise): no provider exposes an instance default, and Anthropic's internal 4096 fallback is not guessed at.
+- **`round` is 0-based** to match the existing `loop:*` event `round`.
+- **Raw args of cut-round calls are not exposed:** no existing option mirrors cleanly (`exposeMalformedArgs` lives on the provider and already puts `rawArguments` on the malformed marker); a new Loop option was not added.
+
 ## unreleased / MCP annotations pass-through, `listServerTools`, tools/list pagination (2026-10-27)
 - **Separate function, not a `listOnly` option:** `listServerTools` is its own one-shot read-only door instead of a flag on `createMCPBridge` — a flag would be a second mode on the bridge that returns no tools to keep alive (dead knobs, shape-varying return). It shares the vet/warn helpers, so `confirmServer` semantics (`=== true` proceeds, throw denies) cannot drift.
 - **Annotations are server HINTS:** passed through unmodified (same object, key absent when none sent) so callers can pick an `allow` list; they are never an authorization signal — the trust root stays the server/operator (`allow`, `confirmServer`, the gate). A server can lie in its annotations.

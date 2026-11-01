@@ -3,6 +3,7 @@
 const { ToolError, HaltError } = require('./errors');
 const { classifyStopReason } = require('./provider-stop-reason');
 const { appliedOf } = require('./thinking-mode');
+const { checkToolArgs } = require('./check-args');
 
 // Worst-wins precedence for the run's `thinkingStatus`. Null-prototype so a provider-supplied
 // status string like 'constructor' cannot match an inherited key.
@@ -16,6 +17,8 @@ const THINKING_STATUS_RANK = Object.assign(Object.create(null), { applied: 0, un
 /** @typedef {import('../types').Usage} Usage */
 /** @typedef {import('../types').RunMetrics} RunMetrics */
 /** @typedef {import('../types').GenerateResult} GenerateResult */
+/** @typedef {import('../types').BadCall} BadCall */
+/** @typedef {import('../types').CutOff} CutOff */
 /** @typedef {import('../types').Store} Store */
 /** @typedef {import('./checkpoint').Checkpoint} Checkpoint */
 /** @typedef {import('./retry').Retry} Retry */
@@ -64,6 +67,7 @@ const THINKING_STATUS_RANK = Object.assign(Object.create(null), { applied: 0, un
  *   (rateSource:'caller') instead of the built-in guesstimate. There is NO per-model rate table — bring
  *   your own rate, or take a flagged guesstimate (haiku/sonnet recognized, else the Sonnet-tier default).
  * @property {Function} [onToolResult]
+ * @property {boolean} [checkArgs=false] - BA-29, opt-in. Before `execute`, check the call's args against the tool's declared `parameters` — TOP-LEVEL only: a missing `required` param, or a JSON type mismatch on a declared `string`/`number`/`integer`/`boolean`/`object`/`array` (a `type` array = any-of; an unknown/absent type is skipped; no nesting, no `$ref`/`oneOf`, no coercion). A fault means the tool is NOT executed and the refusal (`<param> must be a <type>, got <type>`, or `<param> is required`) flows through the SAME path as a tool throw — tool-result message, `loop:tool_result`, `onToolResult` error, and the `maxIdenticalToolErrors` count. Each refusal is recorded in the run return's `badCalls`. Default off: many caller schemas are loose.
  * @property {number} [maxIdenticalToolErrors] - BA-12 safety net (default 3). Short-circuit the run when a
  *   tool's `execute` throws this many times IN A ROW for a BYTE-IDENTICAL call (same tool + same args). A
  *   tool error is deliberately fed back to the model so it can recover — that is the point of the feedback
@@ -323,6 +327,11 @@ class Loop {
       throw new Error('[Loop] options.maxIdenticalToolErrors must be a non-negative number (0 or Infinity disables)');
     }
     this.maxIdenticalToolErrors = options.maxIdenticalToolErrors != null ? options.maxIdenticalToolErrors : 3;
+    // BA-29: opt-in top-level argument check (see LoopOptions.checkArgs). Strictly boolean when given.
+    if (options.checkArgs != null && typeof options.checkArgs !== 'boolean') {
+      throw new Error('[Loop] options.checkArgs must be a boolean');
+    }
+    this.checkArgs = options.checkArgs === true;
     if (options.assemble != null && typeof options.assemble !== 'function') {
       throw new Error('[Loop] options.assemble must be a function (msgs, info) => msgs');
     }
@@ -461,7 +470,7 @@ class Loop {
    *   thunk is re-evaluated each round (D4/eval-assist F2) so a tool set that grows mid-run — e.g. a skill
    *   unlocking its tools — is offered on the next round; a static array is resolved once at wire time.
    * @param {Record<string, any>} [options={}] - Per-run overrides (system, temperature, ctx, etc.).
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean, thinkingApplied?: boolean|null, thinkingStatus?: 'applied'|'unsupported'|'ignored'|'unknown'}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], badCalls?: BadCall[], cutOff?: CutOff, temperatureDropped?: boolean, thinkingApplied?: boolean|null, thinkingStatus?: 'applied'|'unsupported'|'ignored'|'unknown'}>}
    *   On halt the returned `error` is `halt:<rule>` (or `halt:unknown` if the
    *   thrown HaltError carried no `rule`), and `msgs` is sanitized so any
    *   dangling assistant `tool_calls` from the halted round are paired with
@@ -567,6 +576,27 @@ class Loop {
     // as `toolCalls: []`. Reset each completed round; a malformed round always terminates the run (no
     // usable call to continue with), so it can only be non-null on the round that returns.
     let lastMalformedToolCall = null;
+    // BA-29: facts about bad tool calls, accumulated over the WHOLE run and surfaced ONLY on the return
+    // (`badCalls`, key absent when empty; `cutOff`, only when the run ended at the output cap). Never on
+    // events or onToolResult. Facts, not actions: nothing here changes what executes.
+    /** @type {BadCall[]} */
+    const badCalls = [];
+    /** @type {CutOff|null} */
+    let cutOff = null;
+    const toolHasAppend = (/** @type {any} */ name) => {
+      const t = typeof name === 'string' ? toolMap.get(name) : undefined;
+      const props = t && t.parameters && t.parameters.properties;
+      return !!props && typeof props === 'object' && Object.prototype.hasOwnProperty.call(props, 'append');
+    };
+    // RE-SERIALIZED size of a parsed call's args (what the model sent, approximately — key order/escapes
+    // may differ from the wire bytes). Unserializable ⇒ 0.
+    const parsedArgBytes = (/** @type {any} */ args) => {
+      try { const j = JSON.stringify(args); return typeof j === 'string' ? Buffer.byteLength(j, 'utf8') : 0; } catch { return 0; }
+    };
+    const badCallFields = () => ({
+      ...(badCalls.length > 0 && { badCalls: badCalls.slice() }),
+      ...(cutOff && { cutOff: { ...cutOff } }),
+    });
     // BA-10: sticky across rounds — true if ANY round's `temperature` was dropped by the model (400,
     // unsupported/deprecated) and retried without it. Surfaced on the result so an upstream receipt
     // (recurse's refineLeaf) can report the EFFECTIVE temperature rather than the ignored request.
@@ -609,7 +639,7 @@ class Loop {
         sealDanglingToolCalls(msgs, `[halted:${stuckTag}]`);
         this._reportError('stuck', new Error(`tool "${tc.name}" failed ${identicalErrors} times with identical arguments`), { rule: stuckTag, attempts: identicalErrors });
         this._safeEmit({ type: 'loop:done', data: { text: lastText, stuck: true, rule: stuckTag, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: stuckTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
       return null;
     };
@@ -633,6 +663,9 @@ class Loop {
       /** @type {Record<string, number>} */
       byTool: {},
       tokens: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+      // BA-29: cumulative reasoning tokens = sum of rounds that REPORTED a count; null until one does.
+      /** @type {number|null} */
+      reasoningTokens: null,
       unpricedRounds: 0,
       // BA-21 — priced rounds whose rate was a built-in guesstimate (rateSource:'tier' or 'default'), i.e.
       // no provider cost and no caller `rates`. Not unpriced (they DID price and count against budget); a
@@ -664,6 +697,7 @@ class Loop {
       metrics.tokens.output += u.outputTokens || 0;
       metrics.tokens.cacheCreation += u.cacheCreationTokens || 0;
       metrics.tokens.cacheRead += u.cacheReadTokens || 0;
+      if (Number.isFinite(u.reasoningTokens)) metrics.reasoningTokens = (metrics.reasoningTokens || 0) + /** @type {number} */ (u.reasoningTokens);
     };
     /** Snapshot the meter for a return — finalizes the run-scoped fields. @returns {RunMetrics} */
     const finalizeMetrics = () => ({
@@ -672,6 +706,7 @@ class Loop {
       toolCalls: metrics.toolCalls,
       byTool: metrics.byTool,
       tokens: { ...metrics.tokens },
+      reasoningTokens: metrics.reasoningTokens, // BA-29 — sum of reported rounds, null if none reported
       costUsd: pricedAny ? totalCost : null,
       unpricedRounds: metrics.unpricedRounds,
       estimatedRounds: metrics.estimatedRounds, // BA-21 — rounds priced off the built-in guesstimate
@@ -856,7 +891,7 @@ class Loop {
         this._reportError('provider', err, { round });
         if (this.throwOnError) throw err;
         // BA-5: a mid-run provider failure must not erase the work of the rounds that succeeded.
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: err.message, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
 
       lastUsage = result.usage || lastUsage;
@@ -963,7 +998,7 @@ class Loop {
         sealDanglingToolCalls(msgs, `[halted:${session.error}]`);
         this._reportError('session', new Error(`provider session terminated: ${session.error}`), { rule: session.error, sessionTurns: session.turns ?? null });
         this._safeEmit({ type: 'loop:done', data: { text: lastText, rule: session.error, sessionTurns: session.turns ?? null, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: session.error, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: session.error, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
 
       // BA-13: classify this round's terminal signal against the neutral stop-reason vocabulary. BA-6
@@ -1002,6 +1037,13 @@ class Loop {
         this._safeEmit({ type: 'loop:resume', data: { round, stopReason: lastStopReason } });
         continue;
       }
+      // BA-29: a malformed call on a round that was NOT cut at the cap. (On a cut round the same call is
+      // recorded once, as `cut-off` with parsed:false, below — never as two entries.) `argBytes` is the
+      // raw-argument SIZE from the provider's marker; no content, no repair, nothing executes.
+      if (terminal !== 'truncated' && lastMalformedToolCall) {
+        const m = /** @type {any} */ (lastMalformedToolCall);
+        badCalls.push({ kind: 'malformed-json', tool: typeof m.name === 'string' ? m.name : null, parsed: false, argBytes: Number.isFinite(m.argBytes) ? m.argBytes : 0, hasAppend: toolHasAppend(m.name), round });
+      }
       if (terminal) {
         // terminal ∈ {'truncated','refusal','context_exceeded'} — a non-clean terminal round. Error-tag it
         // (NOT just surface stopReason): `recurse`'s worker path and the bareloop adopter both branch on
@@ -1015,6 +1057,24 @@ class Loop {
         // unpriced-round precedent). The awaited result already error-tags it (BA-13); this surfaces it
         // to a stream consumer and to the console without reading the return value.
         if (terminal === 'truncated') {
+          // BA-29: facts about what the cut dropped. ONE `cut-off` entry per call riding the round (a
+          // complete call that was merely last is `parsed:true`; a malformed one is ONE `parsed:false`
+          // entry). Never executed (BA-4/BA-6), raw args never included. `cutOff` is the round's token
+          // facts; `maxTokensRequested` is the per-run `maxTokens` option the Loop handed the provider —
+          // no provider exposes an instance default, so unset ⇒ null (never a guessed default).
+          for (const call of (result.toolCalls || [])) {
+            badCalls.push({ kind: 'cut-off', tool: typeof call.name === 'string' ? call.name : null, parsed: true, argBytes: parsedArgBytes(call.arguments), hasAppend: toolHasAppend(call.name), round });
+          }
+          if (lastMalformedToolCall) {
+            const m = /** @type {any} */ (lastMalformedToolCall);
+            badCalls.push({ kind: 'cut-off', tool: typeof m.name === 'string' ? m.name : null, parsed: false, argBytes: Number.isFinite(m.argBytes) ? m.argBytes : 0, hasAppend: toolHasAppend(m.name), round });
+          }
+          const mt = options.maxTokens;
+          cutOff = {
+            outputTokens: result.usage && Number.isFinite(result.usage.outputTokens) ? result.usage.outputTokens : null,
+            reasoningTokens: result.usage && Number.isFinite(result.usage.reasoningTokens) ? /** @type {number} */ (result.usage.reasoningTokens) : null,
+            maxTokensRequested: typeof mt === 'number' && Number.isFinite(mt) && mt > 0 ? mt : null,
+          };
           this._safeEmit({ type: 'loop:truncated', data: { round, stopReason: lastStopReason, droppedToolCalls: dropped, outputTokens: lastUsage && lastUsage.outputTokens } });
           if (!this._warnedTruncated) {
             this._warnedTruncated = true;
@@ -1028,7 +1088,7 @@ class Loop {
           msgs.push({ role: 'assistant', content: result.text });
         }
         this._safeEmit({ type: 'loop:done', data: { text: lastText, ...(terminal === 'truncated' && { truncated: true }), terminal, stopReason: lastStopReason, droppedToolCalls: dropped, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: errorTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: errorTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
 
       // No tool calls — LLM gave a final text response
@@ -1048,7 +1108,7 @@ class Loop {
           try { await flush(msgs, ctx); }
           catch (err) { if (err instanceof HaltError) throw err; this._reportError('trim-flush', err, { round }); }
         }
-        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: result.text, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
 
       // Execute tool calls
@@ -1157,7 +1217,7 @@ class Loop {
               sealDanglingToolCalls(msgs, `[halted:${denyTag}]`);
               this._reportError('denied', new Error(`policy denied ${consecutiveDenials} consecutive tool calls (${tc.name})`), { rule: denyTag, denials: consecutiveDenials });
               this._safeEmit({ type: 'loop:done', data: { text: lastText, denied: true, rule: denyTag, cost: totalCost } });
-              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+              return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: denyTag, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
             }
             continue;
           }
@@ -1171,6 +1231,17 @@ class Loop {
         let toolResult;
         let toolError;
         try {
+          // BA-29: opt-in argument check. A fault THROWS here, inside the same try as `execute`, so the
+          // refusal takes the exact tool-throw path below (tool-result message, loop:tool_result,
+          // onToolResult error, recordToolFailure/maxIdenticalToolErrors). It sits OUTSIDE `retry.call`: a
+          // refused call is never re-run. The tool is not executed.
+          if (this.checkArgs) {
+            const fault = checkToolArgs(tool, tc.arguments);
+            if (fault) {
+              badCalls.push({ kind: fault.kind, tool: tc.name, param: fault.param, ...(fault.expected && { expected: fault.expected }), got: fault.got, round, hasAppend: toolHasAppend(tc.name) });
+              throw new Error(fault.message);
+            }
+          }
           const execute = () => tool.execute(tc.arguments);
           toolResult = this.retry ? await this.retry.call(execute) : await execute();
           const content = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
@@ -1231,7 +1302,7 @@ class Loop {
         // BA-5: the rule tag survives on `error`; so does the work. A halt is how a bounded attempt is
         // SUPPOSED to end — the caller reads `error` to know it was bounded and `text` to learn from it.
         this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+        return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
       }
       throw err;
     }
@@ -1261,20 +1332,20 @@ class Loop {
             const rule = err.rule || 'unknown';
             this._reportError('halt', err, { rule, reason: err.decision?.reason ?? null });
             this._safeEmit({ type: 'loop:done', data: { text: lastText, halted: true, rule, cost: totalCost } });
-            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+            return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: `halt:${rule}`, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
           }
           this._reportError('trim-flush', err, { phase: 'stop' });
         }
       }
       this._safeEmit({ type: 'loop:done', data: { text: lastText, stopped: true, cost: totalCost } });
-      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+      return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: null, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
     }
 
     // Hard safety limit — should never fire under normal usage; bareguard's
     // limits.maxTurns (or the LLM's natural completion) ends the loop first.
     const warning = `[Loop] hit internal safety limit of ${HARD_ROUND_LIMIT} rounds. Wire bareguard for proper governance — see bare-agent/bareguard.`;
     this._safeEmit({ type: 'loop:done', data: { text: lastText, warning, cost: totalCost } });
-    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields() };
+    return { text: lastText, toolCalls: [], usage: lastUsage, cost: totalCost, error: warning, stopReason: lastStopReason, model: lastModel, msgs, metrics: finalizeMetrics(), ...(lastMalformedToolCall && { malformedToolCall: lastMalformedToolCall }), ...(temperatureDropped && { temperatureDropped: true }), ...thinkingFields(), ...badCallFields() };
   }
 
   /**
@@ -1347,7 +1418,7 @@ class Loop {
    * @param {string} text - User message.
    * @param {ToolDef[]} [tools=[]] - Tool definitions.
    * @param {Record<string, any>} [options={}] - Per-run overrides.
-   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], temperatureDropped?: boolean, thinkingApplied?: boolean|null, thinkingStatus?: 'applied'|'unsupported'|'ignored'|'unknown'}>}
+   * @returns {Promise<{text: string, toolCalls: ToolCall[], usage: Usage, cost: number, error: string|null, stopReason: string|null, model: string|null, msgs: Message[], metrics: RunMetrics, malformedToolCall?: GenerateResult['malformedToolCall'], badCalls?: BadCall[], cutOff?: CutOff, temperatureDropped?: boolean, thinkingApplied?: boolean|null, thinkingStatus?: 'applied'|'unsupported'|'ignored'|'unknown'}>}
    */
   async chat(text, tools = [], options = {}) {
     this._history.push({ role: 'user', content: text });

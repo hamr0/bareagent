@@ -22,6 +22,52 @@ export interface Usage {
   cacheReadTokens?: number;
   /** Prompt tokens written to cache — a premium tier (Anthropic ~1.25×; OpenAI/Gemini have no write surcharge → 0). */
   cacheCreationTokens?: number;
+  /**
+   * BA-29 — reasoning/thinking tokens when the vendor REPORTS them (OpenAI wire
+   * `completion_tokens_details.reasoning_tokens`, Gemini `thoughtsTokenCount`), else `null`: NEVER 0 for
+   * absent (an explicit reported 0 stays 0). Anthropic, Ollama and CLIPipe do not report it → `null`; a
+   * custom provider that omits the key is read as unreported. These are a SUBSET of `outputTokens`
+   * (already inside it), carried for observability — pricing reads the four tiers and is unchanged.
+   */
+  reasoningTokens?: number | null;
+}
+
+/**
+ * BA-29 — one bad tool call the model made, reported on the run RETURN as `badCalls` (key absent when
+ * there were none; accumulated across the whole run, in order). Facts only: nothing here is executed,
+ * repaired or coerced, and raw arguments are never included.
+ *  - `arg-type` / `arg-missing`: only from the opt-in `Loop({ checkArgs: true })` (top-level `required` /
+ *    declared primitive `type`); carry `param`, `expected`, `got`. A refused call is NOT executed.
+ *  - `cut-off`: a call that rode a round cut at the output cap (`stopReason:'max_tokens'`); one entry per
+ *    call, `parsed:true` when its arguments parsed, `parsed:false` for a malformed one. Never executed.
+ *  - `malformed-json`: a call whose `function.arguments` was syntactically broken JSON on a round that was
+ *    NOT cut (`parsed:false`).
+ * `argBytes`: for a malformed call, the byte length of the raw `function.arguments`; for a parsed call, the
+ * RE-SERIALIZED size (`Buffer.byteLength(JSON.stringify(args))`, an approximation of what was sent).
+ * `hasAppend`: whether the tool's `parameters.properties` declares an `append` param (unknown tool ⇒ false).
+ */
+export interface BadCall {
+  kind: 'arg-type' | 'arg-missing' | 'cut-off' | 'malformed-json';
+  tool: string | null;
+  param?: string;
+  expected?: string;
+  got?: string;
+  argBytes?: number;
+  parsed?: boolean;
+  hasAppend: boolean;
+  round: number;
+}
+
+/**
+ * BA-29 — token facts of the round that ended a run at the output cap; on the run return as `cutOff`
+ * only when `error === 'truncated:max_tokens'`. `outputTokens`/`reasoningTokens` are that round's (`null`
+ * when the provider reported no usage / no reasoning count). `maxTokensRequested` is the per-run
+ * `maxTokens` option the Loop passed to the provider, else `null` — never a guessed provider default.
+ */
+export interface CutOff {
+  outputTokens: number | null;
+  reasoningTokens: number | null;
+  maxTokensRequested: number | null;
 }
 
 /**
@@ -45,6 +91,8 @@ export interface RunMetrics {
   byTool: Record<string, number>;
   /** Cumulative token spend across all rounds (incl. summarize calls), by tier. */
   tokens: { input: number; output: number; cacheCreation: number; cacheRead: number };
+  /** BA-29 — cumulative reasoning tokens: the sum of rounds that REPORTED a count (an explicit 0 counts); `null` only if no round reported one. A subset of `tokens.output`. */
+  reasoningTokens: number | null;
   /** Cumulative USD over priced rounds; null ONLY if nothing could be priced (explicit-unknown, not free). */
   costUsd: number | null;
   /** Count of rounds genuinely unpriceable (no usage, or a runaway non-finite estimate) — the loud-unpriced signal. */
@@ -167,7 +215,10 @@ export interface GenerateResult {
    * raw `function.arguments` was a string: the FULL raw value verbatim, uncapped (model-generated; may be
    * large or sensitive).
    */
-  malformedToolCall?: { name: string | undefined; error: string; rawArguments?: string;
+  malformedToolCall?: { name: string | undefined; error: string;
+    /** BA-29 — byte length of the raw `function.arguments` (size only, ALWAYS present on the marker). */
+    argBytes: number;
+    rawArguments?: string;
     /** @deprecated never set since 0.50.0 (rawArguments is now uncapped) */
     rawTruncated?: true;
   };

@@ -380,7 +380,7 @@ class CLIPipeProvider {
           outputTokens: a.outputTokens + (t.outputTokens || 0),
           cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
           cacheCreationTokens: a.cacheCreationTokens + (t.cacheCreationTokens || 0),
-        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 })
+        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null /* BA-29: not reported */ })
         : null);
 
     const { stopReason, error } = resolveSessionError({

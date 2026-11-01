@@ -3,6 +3,20 @@
 /** @typedef {import('../types').ToolCall} ToolCall */
 
 /**
+ * BA-29: byte length of a raw `function.arguments` value. A string is measured as UTF-8; a non-string
+ * (Ollama's already-an-object case) by its JSON form; absent/unserializable ⇒ 0. Size only, never content.
+ * @param {any} raw
+ * @returns {number}
+ */
+function rawArgBytes(raw) {
+  if (typeof raw === 'string') return Buffer.byteLength(raw, 'utf8');
+  try {
+    const s = JSON.stringify(raw);
+    return typeof s === 'string' ? Buffer.byteLength(s, 'utf8') : 0;
+  } catch { return 0; }
+}
+
+/**
  * BA-27 — parse a round's raw tool calls into the neutral {@link ToolCall} shape WITHOUT throwing on
  * malformed arguments.
  *
@@ -30,7 +44,7 @@
  * @param {any[]} rawToolCalls - provider-native tool-call entries (may be undefined/empty)
  * @param {(tc: any) => ToolCall} mapOne - maps one raw entry to a ToolCall; MAY throw on bad arguments
  * @param {{ exposeMalformedArgs?: boolean }} [opts]
- * @returns {{ toolCalls: ToolCall[], malformedToolCall?: { name: string|undefined, error: string, rawArguments?: string } }}
+ * @returns {{ toolCalls: ToolCall[], malformedToolCall?: { name: string|undefined, error: string, argBytes: number, rawArguments?: string } }}
  */
 function parseToolCalls(rawToolCalls, mapOne, opts = {}) {
   const raw = rawToolCalls || [];
@@ -40,10 +54,13 @@ function parseToolCalls(rawToolCalls, mapOne, opts = {}) {
     try {
       toolCalls.push(mapOne(tc));
     } catch (e) {
-      /** @type {{ name: string|undefined, error: string, rawArguments?: string }} */
+      /** @type {{ name: string|undefined, error: string, argBytes: number, rawArguments?: string }} */
       const malformedToolCall = {
         name: tc && tc.function ? tc.function.name : undefined,
         error: e instanceof Error ? e.message : String(e),
+        // BA-29: SIZE only, ALWAYS present (bytes of the raw `function.arguments` — never its content), so a
+        // caller can tell a 300 KB cut from a 12-byte typo without the opt-in `rawArguments`.
+        argBytes: rawArgBytes(tc && tc.function ? tc.function.arguments : undefined),
       };
       if (opts.exposeMalformedArgs) {
         const rawArgs = tc && tc.function ? tc.function.arguments : undefined;

@@ -252,6 +252,10 @@ class OpenAIProvider {
       outputTokens: u?.completion_tokens || 0,
       cacheReadTokens: cacheRead,
       cacheCreationTokens: 0,
+      // BA-29: reasoning tokens when the vendor REPORTS them (`completion_tokens_details.reasoning_tokens`),
+      // else null — never 0-for-absent. A SUBSET of `outputTokens` (`completion_tokens` already includes
+      // them), carried for observability only: pricing reads the four tiers above and is unchanged.
+      reasoningTokens: Number.isFinite(u?.completion_tokens_details?.reasoning_tokens) ? u.completion_tokens_details.reasoning_tokens : null,
     };
   }
 

@@ -708,7 +708,7 @@ describe('BA-17 — what the caller actually receives', () => {
       [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
     );
     // Per-EVENT summing (the 0.33.0 bug) would give input 9 / output 220 / read 500 / creation 22.
-    assert.deepStrictEqual(r.usage, { inputTokens: 5, outputTokens: 166, cacheReadTokens: 300, cacheCreationTokens: 12 });
+    assert.deepStrictEqual(r.usage, { inputTokens: 5, outputTokens: 166, cacheReadTokens: 300, cacheCreationTokens: 12, reasoningTokens: null });
   });
 
   test('a bounded stop is named AND keeps the work (BA-5)', async () => {

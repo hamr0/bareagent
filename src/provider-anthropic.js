@@ -225,6 +225,7 @@ class AnthropicProvider {
             outputTokens: data.usage.output_tokens || 0,
             cacheReadTokens: data.usage.cache_read_input_tokens || 0,
             cacheCreationTokens: data.usage.cache_creation_input_tokens || 0,
+            reasoningTokens: null, // BA-29: Anthropic does not report a separate thinking count
           }
         : null,
       ...(temperatureDropped && { temperatureDropped: true }),
