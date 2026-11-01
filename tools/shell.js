@@ -471,8 +471,9 @@ async function checkShrink(rawPath, resolved, content, newBytes, guard, options)
   const { lines: oldLines, capped } = await countLinesBounded(resolved, options);
   const newLines = content.length === 0 ? 0 : content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
   const n = (/** @type {number} */ x) => x.toLocaleString('en-US');
+  const u = (/** @type {number} */ x, /** @type {string} */ w) => `${n(x)} ${w}${x === 1 ? '' : 's'}`;
   throw new ToolError(
-    `refusing: this would replace ${rawPath} (${n(oldBytes)} bytes, ${n(oldLines)}${capped ? '+' : ''} lines) with ${n(newBytes)} bytes (${n(newLines)} lines). ` +
+    `refusing: this would replace ${rawPath} (${u(oldBytes, 'byte')}, ${capped ? `${n(oldLines)}+ lines` : u(oldLines, 'line')}) with ${u(newBytes, 'byte')} (${u(newLines, 'line')}). ` +
     'To change part of a file use shell_edit; to rebuild it in parts use append:true; to really empty it pass content:\'\'.',
     { context: { shrink: true, oldBytes, newBytes, oldLines, newLines } },
   );
@@ -1123,7 +1124,7 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   `shrinkGuard` (BA-30, opt-in; unset => byte-identical): refuses a whole-file `shell_write` that would gut an
  *   existing file — THROWN `ToolError` (so `maxIdenticalToolErrors` applies), file untouched. `true` =
  *   `{minOldBytes:2048, maxShrinkRatio:0.5}`; an object may override either plus `guardPath(absPath)=>boolean|Promise<boolean>`
- *   (receives the `resolveToolPath`'d path; `false` skips the guard for that file; throw/non-boolean rejects, type only;
+ *   (receives the `resolveToolPath`'d path — LEXICAL, not realpath'd, same as `canRead`: `guardPath` sees the lexical path, not the realpath; realpath inside the predicate (or exempt-list rather than guard-list) if aliases matter; `false` skips the guard for that file; throw/non-boolean rejects, type only;
  *   `HaltError` propagates). Bytes decide: refuse when `oldBytes >= minOldBytes && newBytes < oldBytes*maxShrinkRatio`.
  *   Skipped for `append:true`, `content:''`, a new file, and a non-regular target. Size is measured at call time (`lstat`
  *   under `noFollowSymlinks`, never through a symlink); a stat error other than ENOENT rejects. Lines are counted only on

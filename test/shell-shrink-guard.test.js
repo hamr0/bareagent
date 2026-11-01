@@ -49,6 +49,19 @@ describe('BA-30 shrinkGuard: trigger', () => {
       "To change part of a file use shell_edit; to rebuild it in parts use append:true; to really empty it pass content:''.");
   });
 
+  it('message uses singular for exactly 1 byte / 1 line (all four counts), plural otherwise', async () => {
+    const p = seed(0, 'a'.repeat(2048)); // 1 line, no newline
+    const rel = path.relative(process.cwd(), p);
+    const err = await refusal({ shrinkGuard: true }, { path: rel, content: 'x' });
+    assert.match(err.message, new RegExp(`\\(2,048 bytes, 1 line\\) with 1 byte \\(1 line\\)\\. To change`));
+    const q = seed(0, 'a\n'.repeat(1024)); // exactly 1 byte new, 1024 lines
+    const e2 = await refusal({ shrinkGuard: true }, { path: q, content: '' + 'x' });
+    assert.match(e2.message, /\(2,048 bytes, 1,024 lines\) with 1 byte \(1 line\)/);
+    const r = seed(0, 'b'.repeat(4000));
+    const e3 = await refusal({ shrinkGuard: true }, { path: r, content: 'xy\nz' });
+    assert.match(e3.message, /with 4 bytes \(2 lines\)/);
+  });
+
   it('edge: exactly at the ratio passes; one byte under refuses', async () => {
     const p = seed(4000);
     await writer({ shrinkGuard: true }).execute({ path: p, content: 'z'.repeat(2000) }); // 2000 == 4000*0.5, not <
