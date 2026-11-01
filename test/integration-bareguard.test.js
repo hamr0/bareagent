@@ -415,6 +415,14 @@ describe('wireGate', () => {
       assert.equal('errorContext' in r3, false);
     });
 
+    it('BA-30: forwards the shrink fields; drops wrong-typed ones and any path/content', async () => {
+      const r = await record(errWith({ shrink: true, oldBytes: 132315, newBytes: 2221, oldLines: 2433, newLines: 143, path: '/etc/x', content: 'SECRET' }));
+      assert.deepEqual(r.errorContext, { shrink: true, oldBytes: 132315, newBytes: 2221, oldLines: 2433, newLines: 143 });
+      assert.doesNotMatch(JSON.stringify(r), /SECRET|\/etc\/x/);
+      const bad = await record(errWith({ shrink: 'yes', oldBytes: '1', newBytes: NaN, oldLines: Infinity, newLines: {} }));
+      assert.equal('errorContext' in bad, false);
+    });
+
     it('caps strings at 200 chars', async () => {
       const r = await record(errWith({ server: 'x'.repeat(500) }));
       assert.equal(r.errorContext.server.length, 200);

@@ -66,7 +66,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { exec, execFile } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
-const { HaltError, ValidationError } = require('../src/errors');
+const { HaltError, ValidationError, ToolError } = require('../src/errors');
 
 const fsConstants = fs.constants;
 
@@ -358,6 +358,126 @@ function wrongTypeHint(v, param) {
   return ` Send ${param} as a string.`;
 }
 
+// ---- BA-30 shrinkGuard (opt-in, per createShellTools instance) -------------------------------------------
+const SHRINK_DEFAULTS = { minOldBytes: 2048, maxShrinkRatio: 0.5 };
+// Upper bound on bytes read to count the OLD file's lines for the refusal message (never a full slurp).
+const SHRINK_LINE_SCAN_CAP = 8 * 1024 * 1024;
+const SHRINK_LINE_CHUNK = 64 * 1024;
+
+/** @param {any} v */
+function typeName(v) {
+  return v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v;
+}
+
+/**
+ * Validate + normalize `createShellTools({ shrinkGuard })`. Throws `ValidationError` naming the TYPE only.
+ * @param {any} sg
+ * @returns {{minOldBytes: number, maxShrinkRatio: number, guardPath?: (absPath: string) => boolean|Promise<boolean>}|null}
+ */
+function normalizeShrinkGuard(sg) {
+  if (sg === undefined) return null;
+  if (sg === true) return { ...SHRINK_DEFAULTS };
+  if (sg === null || typeof sg !== 'object' || Array.isArray(sg)) {
+    throw new ValidationError(`createShellTools: shrinkGuard must be true or an options object (got ${typeName(sg)})`);
+  }
+  const allowed = ['minOldBytes', 'maxShrinkRatio', 'guardPath'];
+  if (Object.keys(sg).some((k) => !allowed.includes(k))) {
+    throw new ValidationError('createShellTools: shrinkGuard has an unknown option (allowed: minOldBytes, maxShrinkRatio, guardPath)');
+  }
+  const out = { ...SHRINK_DEFAULTS };
+  if (sg.minOldBytes !== undefined) {
+    if (typeof sg.minOldBytes !== 'number' || !Number.isFinite(sg.minOldBytes) || sg.minOldBytes < 0) {
+      throw new ValidationError(`createShellTools: shrinkGuard.minOldBytes must be a finite number >= 0 (got ${typeName(sg.minOldBytes)})`);
+    }
+    out.minOldBytes = sg.minOldBytes;
+  }
+  if (sg.maxShrinkRatio !== undefined) {
+    const r = sg.maxShrinkRatio;
+    if (typeof r !== 'number' || !Number.isFinite(r) || r <= 0 || r > 1) {
+      throw new ValidationError(`createShellTools: shrinkGuard.maxShrinkRatio must be a finite number in (0, 1] (got ${typeName(r)})`);
+    }
+    out.maxShrinkRatio = r;
+  }
+  /** @type {any} */
+  const res = out;
+  if (sg.guardPath !== undefined) {
+    if (typeof sg.guardPath !== 'function') {
+      throw new ValidationError(`createShellTools: shrinkGuard.guardPath must be a function (got ${typeName(sg.guardPath)})`);
+    }
+    res.guardPath = sg.guardPath;
+  }
+  return res;
+}
+
+/**
+ * Count the lines of an existing file with a bounded chunked read through the same no-follow open.
+ * @param {string} resolved
+ * @param {{noFollowSymlinks?: boolean}} options
+ * @returns {Promise<{lines: number, capped: boolean}>}
+ */
+async function countLinesBounded(resolved, options) {
+  const fh = await openFile('shell_write', resolved, fsConstants.O_RDONLY, undefined, options);
+  try {
+    const buf = Buffer.alloc(SHRINK_LINE_CHUNK);
+    let total = 0;
+    let lines = 0;
+    let lastByte = 10;
+    while (total < SHRINK_LINE_SCAN_CAP) {
+      const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, SHRINK_LINE_SCAN_CAP - total), null);
+      if (bytesRead === 0) return { lines: lines + (lastByte === 10 ? 0 : 1), capped: false };
+      for (let i = 0; i < bytesRead; i++) if (buf[i] === 10) lines++;
+      lastByte = buf[bytesRead - 1];
+      total += bytesRead;
+    }
+    return { lines: lines + (lastByte === 10 ? 0 : 1), capped: true };
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * Refuse (throw ToolError, nothing written) a whole-file write that would gut an existing file.
+ * Bytes decide; lines are counted only here, for the message.
+ * @param {string} rawPath @param {string} resolved @param {string} content @param {number} newBytes
+ * @param {NonNullable<ReturnType<typeof normalizeShrinkGuard>>} guard
+ * @param {{noFollowSymlinks?: boolean}} options
+ */
+async function checkShrink(rawPath, resolved, content, newBytes, guard, options) {
+  /** @type {import('node:fs').Stats} */
+  let st;
+  try {
+    // lstat under noFollowSymlinks: never measure through a final-component symlink (the write refuses it).
+    st = options.noFollowSymlinks ? await fs.lstat(resolved) : await fs.stat(resolved);
+  } catch (/** @type {any} */ err) {
+    if (err && err.code === 'ENOENT') return; // new file
+    throw new Error(`shell_write: shrinkGuard could not stat the target (${err && err.code ? err.code : typeof err}) — refusing to write unguarded`);
+  }
+  if (!st.isFile()) return; // symlink (noFollow) / dir / special: the normal write path handles it
+  const oldBytes = st.size;
+  if (!(oldBytes >= guard.minOldBytes && newBytes < oldBytes * guard.maxShrinkRatio)) return;
+  if (guard.guardPath) {
+    let verdict;
+    try {
+      verdict = await guard.guardPath(resolved);
+    } catch (/** @type {any} */ err) {
+      if (err instanceof HaltError) throw err;
+      throw new Error(`shell_write: shrinkGuard.guardPath threw for ${resolved} (${err && err.name ? err.name : typeof err})`);
+    }
+    if (verdict !== true && verdict !== false) {
+      throw new Error(`shell_write: shrinkGuard.guardPath returned a non-boolean (${typeName(verdict)}) for ${resolved}`);
+    }
+    if (verdict === false) return;
+  }
+  const { lines: oldLines, capped } = await countLinesBounded(resolved, options);
+  const newLines = content.length === 0 ? 0 : content.split('\n').length - (content.endsWith('\n') ? 1 : 0);
+  const n = (/** @type {number} */ x) => x.toLocaleString('en-US');
+  throw new ToolError(
+    `refusing: this would replace ${rawPath} (${n(oldBytes)} bytes, ${n(oldLines)}${capped ? '+' : ''} lines) with ${n(newBytes)} bytes (${n(newLines)} lines). ` +
+    'To change part of a file use shell_edit; to rebuild it in parts use append:true; to really empty it pass content:\'\'.',
+    { context: { shrink: true, oldBytes, newBytes, oldLines, newLines } },
+  );
+}
+
 /**
  * Write text to a file (the BA-2 first-class write primitive — a coding agent must edit files, and routing
  * writes through the shell is impractical: redirection is a shell metachar that an argv/bash allowlist denies).
@@ -375,7 +495,7 @@ function wrongTypeHint(v, param) {
  * feeds this UNTRUSTED model-authored args (that is the boundary BA-4 was breached at, and where types buy
  * nothing).
  * @param {{path: string, content: string, append?: boolean, maxBytes?: number}} args
- * @param {{noFollowSymlinks?: boolean}} [options]
+ * @param {{noFollowSymlinks?: boolean, shrinkGuard?: ReturnType<typeof normalizeShrinkGuard>}} [options]
  * @returns {Promise<string>}
  */
 async function writeFile({ path: rawPath, content, append = false, maxBytes }, options = {}) {
@@ -395,6 +515,10 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }, o
     throw new Error(`shell_write content is ${bytes} bytes, over the ${cap}-byte cap (pass maxBytes to raise it)`);
   }
   const resolved = resolveToolPath(rawPath);
+  // BA-30 (opt-in): skip for append and the deliberate empty; checkShrink skips new/non-regular targets.
+  if (options.shrinkGuard && !append && content !== '') {
+    await checkShrink(rawPath, resolved, content, bytes, options.shrinkGuard, options);
+  }
   await fs.mkdir(path.dirname(resolved), { recursive: true });
 
   // O_TRUNC/O_APPEND + O_CREAT, mode 0o666 (subject to umask) — the same semantics `fs.writeFile`/
@@ -967,7 +1091,7 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  * Create the six shell tools. Configuration is mostly per-call via tool args; gating is the
  * caller's responsibility via `new Loop({ policy })`.
  *
- * @param {{noFollowSymlinks?: boolean, canRead?: CanRead}} [options] - `noFollowSymlinks` (default `false`, byte-
+ * @param {{noFollowSymlinks?: boolean, canRead?: CanRead, shrinkGuard?: true|{minOldBytes?: number, maxShrinkRatio?: number, guardPath?: (absPath: string) => boolean|Promise<boolean>}}} [options] - `noFollowSymlinks` (default `false`, byte-
  *   identical to the pre-existing behavior when omitted): when `true`, `shell_read`, `shell_write`,
  *   `shell_edit`, and `shell_grep` refuse to open a path whose FINAL path component is a symlink
  *   (file, dir, or dangling) — THROWN, `err.code:'ELOOP'`, never a silently-followed link. Scope is
@@ -996,6 +1120,16 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   hung `canRead` rejects with a distinct `canRead walk exceeded` error). TOCTOU: `canRead` vets paths at WALK
  *   time; a path swapped for a symlink between vetting and the worker's read is followed unless
  *   `noFollowSymlinks:true` — pair `canRead` with `noFollowSymlinks:true`.
+ *   `shrinkGuard` (BA-30, opt-in; unset => byte-identical): refuses a whole-file `shell_write` that would gut an
+ *   existing file — THROWN `ToolError` (so `maxIdenticalToolErrors` applies), file untouched. `true` =
+ *   `{minOldBytes:2048, maxShrinkRatio:0.5}`; an object may override either plus `guardPath(absPath)=>boolean|Promise<boolean>`
+ *   (receives the `resolveToolPath`'d path; `false` skips the guard for that file; throw/non-boolean rejects, type only;
+ *   `HaltError` propagates). Bytes decide: refuse when `oldBytes >= minOldBytes && newBytes < oldBytes*maxShrinkRatio`.
+ *   Skipped for `append:true`, `content:''`, a new file, and a non-regular target. Size is measured at call time (`lstat`
+ *   under `noFollowSymlinks`, never through a symlink); a stat error other than ENOENT rejects. Lines are counted only on
+ *   refusal (bounded 8 MiB read, `N+` when capped). `error.context` = `{shrink:true, oldBytes, newBytes, oldLines, newLines}`
+ *   (numbers/boolean only, no path or content). Any other `shrinkGuard` shape (incl. `false`) throws `ValidationError` at
+ *   creation, naming the type only. `shell_edit` is unaffected; there is deliberately no override flag.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
  * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
@@ -1006,6 +1140,7 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  */
 function createShellTools(options = {}) {
   const { noFollowSymlinks = false, canRead } = options;
+  const shrinkGuard = normalizeShrinkGuard(options.shrinkGuard);
   if (canRead !== undefined && typeof canRead !== 'function') {
     throw new ValidationError(`createShellTools: canRead must be a function (got ${canRead === null ? 'null' : typeof canRead})`);
   }
@@ -1059,7 +1194,7 @@ function createShellTools(options = {}) {
       // The args are model-authored and UNTRUSTED — `content` may be absent (an output-token-capped
       // generation), so the boundary type stays loose and `writeFile` enforces the contract at runtime (BA-4).
       execute: async (/** @type {{path: string, content?: string, append?: boolean, maxBytes?: number}} */ args) =>
-        writeFile(/** @type {any} */ (args), { noFollowSymlinks }),
+        writeFile(/** @type {any} */ (args), { noFollowSymlinks, shrinkGuard }),
     },
     {
       name: 'shell_edit',
@@ -1130,6 +1265,7 @@ module.exports = {
   resolveToolPath,
   _grepCore,
   _writeFile: writeFile,
+  _SHRINK_LINE_SCAN_CAP: SHRINK_LINE_SCAN_CAP,
   _editFile: editFile,
   _openFile: openFile,
   _assertDirStillMatchesHandle: assertDirStillMatchesHandle,
