@@ -212,13 +212,18 @@ describe('shell_grep canRead (F259)', () => {
     it('worker-timeout message under canRead blames the shared budget, not just the regex', async () => {
       const one = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'canread-one-'));
       try {
-        fs.writeFileSync(path.join(one, 'a.txt'), 'hello\n');
+        // Deterministic: the walk (~100ms) fits well inside the 1000ms budget, and the worker's search
+        // is guaranteed to hang. `^(a|aa)+$` slips past the static nested-quantifier guard (no
+        // unbounded quantifier inside the group) yet backtracks exponentially on 'aaa...ab'.
+        fs.writeFileSync(path.join(one, 'a.txt'), 'a'.repeat(50) + 'b\n');
+        const t0 = Date.now();
         await assert.rejects(
-          grepOf({ canRead: () => new Promise((r) => setTimeout(() => r(true), 270)) })
-            .execute({ pattern: 'hello', path: one, timeout: 300 }),
+          grepOf({ canRead: () => new Promise((r) => setTimeout(() => r(true), 100)) })
+            .execute({ pattern: '^(a|aa)+$', path: one, timeout: 1000 }),
           (e) => /shared with the canRead walk, which used \d+ms/.test(e.message) && /raise timeout/.test(e.message) &&
             !/likely catastrophic backtracking/.test(e.message),
         );
+        assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0}ms`);
       } finally { fs.rmSync(one, { recursive: true, force: true }); }
     });
   });
