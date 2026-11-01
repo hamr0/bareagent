@@ -332,6 +332,33 @@ async function readEntry(rawPath, maxBytes, options = {}) {
 }
 
 /**
+ * BA-29: the JSON type name of a model-supplied argument, for refusal messages (`array` and `null` are
+ * named as such — `typeof` would call both `object`).
+ * @param {any} v
+ * @returns {string}
+ */
+function receivedType(v) {
+  return v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v;
+}
+
+/**
+ * BA-29: the fix-it sentence for a string param that arrived wrong, chosen by what actually arrived. The
+ * "output was cut short, retry" hint is the BA-4 signature of a truncated call and is true ONLY for an
+ * ABSENT (undefined) argument; for a value that is present but the wrong type it sent the model
+ * retrying byte-identically into the identical-error stop. Message-only: the call still throws and
+ * the file is untouched. Leading space included (appended to a sentence).
+ * @param {any} v
+ * @param {string} param
+ * @returns {string}
+ */
+function wrongTypeHint(v, param) {
+  if (v === undefined) return ` If your output was cut short, retry with the full ${param}.`;
+  const t = receivedType(v);
+  if (t === 'object' || t === 'array') return ` Send ${param} as a string; to send JSON, encode it as one string.`;
+  return ` Send ${param} as a string.`;
+}
+
+/**
  * Write text to a file (the BA-2 first-class write primitive — a coding agent must edit files, and routing
  * writes through the shell is impractical: redirection is a shell metachar that an argv/bash allowlist denies).
  * Creates parent directories. Caps size as a sanity ceiling. NO shell — so it gates cleanly through bareguard's
@@ -358,8 +385,8 @@ async function writeFile({ path: rawPath, content, append = false, maxBytes }, o
   if (typeof content !== 'string') {
     throw new Error(
       'shell_write requires a "content" string (pass content:"" to deliberately empty the file). '
-      + `Got ${content === undefined ? 'no content argument' : `content of type ${content === null ? 'null' : typeof content}`}`
-      + ' — refusing to write, the file is unchanged. If your output was cut short, retry with the full content.',
+      + `Got ${content === undefined ? 'no content argument' : `content of type ${receivedType(content)}`}`
+      + ` — refusing to write, the file is unchanged.${wrongTypeHint(content, 'content')}`,
     );
   }
   const cap = maxBytes || DEFAULT_WRITE_MAX_BYTES;
@@ -426,14 +453,15 @@ async function editFile({ path: rawPath, oldText, newText, maxBytes }, options =
   if (typeof oldText !== 'string' || oldText.length === 0) {
     throw new Error(
       'shell_edit requires a non-empty "oldText" string to anchor the edit — refusing to edit, the file is unchanged. '
-      + `Got ${oldText === undefined ? 'no oldText argument' : oldText === '' ? 'an empty string' : `oldText of type ${oldText === null ? 'null' : typeof oldText}`}.`,
+      + `Got ${oldText === undefined ? 'no oldText argument' : oldText === '' ? 'an empty string' : `oldText of type ${receivedType(oldText)}`}.`
+      + (oldText === '' ? '' : wrongTypeHint(oldText, 'oldText')),
     );
   }
   if (typeof newText !== 'string') {
     throw new Error(
       'shell_edit requires a "newText" string (pass newText:"" to delete the anchored text) — refusing to edit, the file is unchanged. '
-      + `Got ${newText === undefined ? 'no newText argument' : `newText of type ${newText === null ? 'null' : typeof newText}`}`
-      + '. If your output was cut short, retry with the full newText.',
+      + `Got ${newText === undefined ? 'no newText argument' : `newText of type ${receivedType(newText)}`}.`
+      + wrongTypeHint(newText, 'newText'),
     );
   }
 

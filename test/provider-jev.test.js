@@ -97,7 +97,8 @@ describe('JevProvider happy path — the three question types', () => {
   it('normalizes usage to the neutral shape', async () => {
     const p = new JevProvider({ apiKey: 'k', baseUrl: srv.url });
     const { usage } = await p.classify('x', NOUL);
-    assert.deepEqual(usage, { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    assert.deepEqual(usage, { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null });
+    assert.ok('reasoningTokens' in usage && usage.reasoningTokens === null, 'BA-29: key present and null (Jev reports none)');
   });
 });
 

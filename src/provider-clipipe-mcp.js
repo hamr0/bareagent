@@ -449,6 +449,7 @@ function createSessionStream({ onTurn, ctx, startedAt, onHalt, turnCap = null, o
             const usage = {
               inputTokens: Number(u.input_tokens) || 0,
               outputTokens: Number(u.output_tokens) || 0,
+              reasoningTokens: null, // BA-29: the CLI stream reports no separate reasoning count
             };
             // Omit an absent tier rather than emit a synthetic 0 (per the Usage contract).
             if (Number.isFinite(u.cache_read_input_tokens)) usage.cacheReadTokens = u.cache_read_input_tokens;

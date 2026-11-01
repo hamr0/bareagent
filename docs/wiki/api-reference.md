@@ -187,6 +187,8 @@ Anthropic / OpenAI (incl. DeepSeek) / Gemini / Ollama also accept `{ thinkingMod
 
 OpenAI / Ollama also accept `{ exposeMalformedArgs: true }` — on a malformed tool-call JSON round, attach the FULL raw `function.arguments` string (verbatim, uncapped since 0.50.0) to `malformedToolCall.rawArguments`; off by default, independent of `exposeErrorBody`. `rawTruncated` is deprecated and never set.
 
+`usage.reasoningTokens` (BA-29): OpenAI wire `completion_tokens_details.reasoning_tokens` and Gemini `thoughtsTokenCount` when reported, else `null` (Anthropic, Ollama, Jev, CLIPipe); never 0-for-absent; a subset of `outputTokens`, so pricing is unchanged. The malformed-tool-call marker also carries `argBytes` (raw-argument byte length, size only, always present). `Loop.run()` adds `badCalls` / `cutOff` on its return and the opt-in `checkArgs` option (order: checkpoint → policy → checkArgs → execute, so a human can approve a call checkArgs then refuses; throws at construction with a cycle-owning provider) — see `bareagent.context.md` § "What the model did when a call went bad".
+
 ```javascript
 // OpenAI
 const { OpenAI } = require('bare-agent/providers');

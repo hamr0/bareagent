@@ -243,6 +243,7 @@ class JevProvider {
       outputTokens: u.output_tokens || 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
+      reasoningTokens: null, // BA-29: Jev reports no reasoning count
     };
   }
 

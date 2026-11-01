@@ -276,7 +276,7 @@ describe('thinkingMode: ladder (try all shapes; if none works the call still run
   it('rejected-shape attempt does not double-meter: usage is the accepted reply\'s only', async () => {
     await withServer([P.openai.reject(), openaiOk(0)], async (s) => {
       const r = await P.openai.make(s, { model: 'gpt-x-unmeasured' }).generate(MSGS, [], { thinkingMode: 'off' });
-      assert.deepEqual(r.usage, { inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheCreationTokens: 0 });
+      assert.deepEqual(r.usage, { inputTokens: 3, outputTokens: 4, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0 }); // openaiOk reports reasoning_tokens:0 explicitly — an explicit 0 stays 0 (BA-29)
     });
   });
   it('anthropic on, unmeasured model: adaptive 400s ⇒ enabled+budget is tried (haiku-style) and cached', async () => {

@@ -2,6 +2,56 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.58.0] - 2026-11-01
+
+### Added
+
+- **BA-29: the run return says what the model did when a tool call went bad.** `Loop.run()` gains `badCalls`: an array,
+  key ABSENT when empty, accumulated over the whole run in order, each entry
+  `{ kind, tool, param?, expected?, got?, argBytes?, parsed?, hasAppend, round }`. Kinds: `arg-type` / `arg-missing`
+  (only from `checkArgs`, below), `cut-off` (ONE entry per call that rode a round cut at the output cap: `parsed:true`
+  for a parsed call, `parsed:false` for a malformed one, never two entries for one call), and `malformed-json` (a
+  malformed call on a round that was NOT cut, `parsed:false`). `argBytes` is the raw `function.arguments` byte length for
+  a malformed call and the RE-SERIALIZED size (`Buffer.byteLength(JSON.stringify(args))`) for a parsed one; `hasAppend`
+  is whether that tool's `parameters.properties` has `append` (unknown tool: `false`); `round` is 0-based, like the
+  `round` in `loop:*` events. Facts only: raw arguments are never included, a cut-round call is still never executed or
+  repaired (BA-4/BA-6), `badCalls` is on the return only (not events, not `onToolResult`).
+- **`cutOff: { outputTokens, reasoningTokens, maxTokensRequested }` on the return when the run ended `truncated:max_tokens`.**
+  The cut round's own token counts (`null` when the provider reported none); `maxTokensRequested` is the per-run
+  `maxTokens` option the Loop handed the provider, `null` when none was passed (never a guessed provider default: no
+  provider exposes an instance default, and Anthropic's own 4096 fallback is applied inside it, invisible to the Loop).
+- **`Loop({ checkArgs: true })` (opt-in, default off).** Before `execute`, top-level only, against `tool.parameters`: a
+  missing `required` param, or a JSON type mismatch on a declared `string`/`number`/`integer`/`boolean`/`object`/`array`
+  (`integer` = `Number.isInteger`; a `type` array = any-of; an unknown/absent type is skipped; `null` is type `"null"`; no
+  nesting, `$ref`, `oneOf` or coercion; no dependency). A fault means the tool is NOT executed and the refusal
+  (`<param> must be a <type>, got <type>`, plus `; to send JSON, encode it as one string` for string-got-object/array, or
+  `<param> is required`) takes the SAME path as a tool throw: tool-result message, `loop:tool_result`, `onToolResult` error,
+  `maxIdenticalToolErrors`. Never retried by `retry`. A non-boolean value throws at construction, and so does
+  `checkArgs: true` with a cycle-owning provider (CLIPipe `claude-mcp`: no tool call reaches the Loop, so it could never
+  run). Per-call order is checkpoint prompt → policy → checkArgs → execute: with a Checkpoint and `checkArgs` both on, a
+  human can approve a call that `checkArgs` then refuses (the gate still audits every attempt).
+- **`usage.reasoningTokens`** (and cumulative `metrics.reasoningTokens`): the vendor's reported number, else `null`, never
+  0-for-absent (an explicit reported 0 stays 0). OpenAI wire `completion_tokens_details.reasoning_tokens`, Gemini
+  `thoughtsTokenCount`; Anthropic, Ollama, Jev and CLIPipe report none, so `null`. It is a subset of `outputTokens` (both OpenAI
+  `completion_tokens` and Gemini's `candidates + thoughts` already contain it), so `outputTokens` and pricing are unchanged.
+  `metrics.reasoningTokens` is the sum of rounds that reported, `null` only if none did.
+- **`malformedToolCall.argBytes`**: the byte length of the raw `function.arguments` (size only, always present on the marker;
+  `rawArguments` stays opt-in). Every other marker field is unchanged.
+
+### Fixed
+
+- **`shell_write` / `shell_edit` no longer tell the model "your output was cut short" when it sent the wrong TYPE.** That
+  sentence is the BA-4 signature of an ABSENT argument; a model that sent JSON as a JSON object for `content` / `newText`
+  was told to retry, retried byte-identically and ended `stuck:shell_write`. The refusal now names the received type
+  (`object`, `array`, `number`, `boolean`, `null`), keeps the cut-short hint only for an absent argument, and adds
+  `to send JSON, encode it as one string` for an object or array. `shell_edit`'s `oldText` gets the same hints (it had
+  none). Messages only: still a throw, file untouched, no coercion.
+
+### Changed
+
+- `usage` objects from the OpenAI, Gemini, Anthropic, Ollama, Jev and CLIPipe providers (incl. native per-turn and residual usage) now carry a `reasoningTokens` key
+  (`null` where unreported); a test or consumer that deep-equals a provider's `usage` object must allow the new key.
+
 ## [0.57.0] - 2026-10-31
 
 ### Added

@@ -101,7 +101,7 @@ function subtractUsage(total, streamed) {
   const at = (/** @type {keyof import('../types').Usage} */ k) =>
     Math.max(0, (Number(total[k]) || 0) - sum(k));
   /** @type {import('../types').Usage} */
-  const out = { inputTokens: at('inputTokens'), outputTokens: at('outputTokens') };
+  const out = { inputTokens: at('inputTokens'), outputTokens: at('outputTokens'), reasoningTokens: null /* BA-29: not reported */ };
   // Only report a cache tier the session actually had — an absent tier stays absent, never a
   // synthetic 0 (the Usage contract).
   if (total.cacheReadTokens !== undefined) out.cacheReadTokens = at('cacheReadTokens');
@@ -380,7 +380,7 @@ class CLIPipeProvider {
           outputTokens: a.outputTokens + (t.outputTokens || 0),
           cacheReadTokens: a.cacheReadTokens + (t.cacheReadTokens || 0),
           cacheCreationTokens: a.cacheCreationTokens + (t.cacheCreationTokens || 0),
-        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 })
+        }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null /* BA-29: not reported */ })
         : null);
 
     const { stopReason, error } = resolveSessionError({

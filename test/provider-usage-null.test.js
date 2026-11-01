@@ -52,26 +52,26 @@ const SHAPES = {
     make: (port) => new Anthropic({ apiKey: 'k', model: 'claude-sonnet-5', baseUrl: `http://127.0.0.1:${port}/v1` }),
     body: (usage) => ({ id: 'm', type: 'message', role: 'assistant', model: 'claude-sonnet-5', content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn', ...(usage !== undefined && { usage }) }),
     real: { input_tokens: 10, output_tokens: 5 },
-    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null },
     cacheOnly: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 5000 },
   },
   openai: {
     make: (port) => new OpenAI({ apiKey: 'k', model: 'gpt-4o-mini', baseUrl: `http://127.0.0.1:${port}/v1` }),
     body: (usage) => ({ model: 'gpt-4o-mini', choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }], ...(usage !== undefined && { usage }) }),
     real: { prompt_tokens: 10, completion_tokens: 5 },
-    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null },
   },
   gemini: {
     make: (port) => new Gemini({ apiKey: 'k', model: 'gemini-2.5-flash', baseUrl: `http://127.0.0.1:${port}/v1beta` }),
     body: (usage) => ({ modelVersion: 'gemini-2.5-flash', candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }], ...(usage !== undefined && { usageMetadata: usage }) }),
     real: { promptTokenCount: 10, candidatesTokenCount: 5 },
-    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    expectReal: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null },
   },
   ollama: {
     make: (port) => new Ollama({ model: 'qwen2.5', url: `http://127.0.0.1:${port}` }),
     body: (usage) => ({ model: 'qwen2.5', message: { content: 'hi' }, done_reason: 'stop', ...(usage || {}) }),
     real: { prompt_eval_count: 10, eval_count: 5 },
-    expectReal: { inputTokens: 10, outputTokens: 5 },
+    expectReal: { inputTokens: 10, outputTokens: 5, reasoningTokens: null },
   },
 };
 
