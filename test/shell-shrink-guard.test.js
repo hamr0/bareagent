@@ -218,7 +218,7 @@ describe('BA-30 shrinkGuard: stat errors are loud', () => {
 });
 
 describe('BA-30 shrinkGuard: creation-time validation (type only)', () => {
-  for (const bad of [false, null, 0, 1, 'true', [], () => {}, { minOldBytes: -1 }, { minOldBytes: NaN }, { minOldBytes: '5' },
+  for (const bad of [null, 0, 1, 'true', [], () => {}, { minOldBytes: -1 }, { minOldBytes: NaN }, { minOldBytes: '5' },
     { minOldBytes: Infinity }, { maxShrinkRatio: 0 }, { maxShrinkRatio: 1.01 }, { maxShrinkRatio: NaN }, { maxShrinkRatio: '0.5' },
     { guardPath: 'x' }, { guardPath: null }, { nope: 1 }]) {
     it(`rejects ${typeof bad === 'function' ? 'function' : JSON.stringify(bad)}`, () => {
@@ -229,7 +229,10 @@ describe('BA-30 shrinkGuard: creation-time validation (type only)', () => {
     assert.throws(() => createShellTools({ shrinkGuard: 'SECRET-VALUE' }), (e) => e instanceof ValidationError && !/SECRET-VALUE/.test(e.message) && /string/.test(e.message));
     assert.throws(() => createShellTools({ shrinkGuard: { guardPath: 'SECRET-VALUE' } }), (e) => !/SECRET-VALUE/.test(e.message));
   });
-  it('accepts valid shapes', () => {
+  it('accepts valid shapes; false is OFF (guard inert)', async () => {
+    const p = seed(10000);
+    await writer({ shrinkGuard: false }).execute({ path: p, content: 'x' });
+    assert.equal(fs.readFileSync(p, 'utf8'), 'x');
     createShellTools({ shrinkGuard: true });
     createShellTools({ shrinkGuard: {} });
     createShellTools({ shrinkGuard: { minOldBytes: 0, maxShrinkRatio: 1, guardPath: async () => true } });

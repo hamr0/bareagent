@@ -375,7 +375,7 @@ function typeName(v) {
  * @returns {{minOldBytes: number, maxShrinkRatio: number, guardPath?: (absPath: string) => boolean|Promise<boolean>}|null}
  */
 function normalizeShrinkGuard(sg) {
-  if (sg === undefined) return null;
+  if (sg === undefined || sg === false) return null;
   if (sg === true) return { ...SHRINK_DEFAULTS };
   if (sg === null || typeof sg !== 'object' || Array.isArray(sg)) {
     throw new ValidationError(`createShellTools: shrinkGuard must be true or an options object (got ${typeName(sg)})`);
@@ -1128,11 +1128,11 @@ function execCommand({ command, cwd, timeout, maxBuffer, env }) {
  *   Skipped for `append:true`, `content:''`, a new file, and a non-regular target. Size is measured at call time (`lstat`
  *   under `noFollowSymlinks`, never through a symlink); a stat error other than ENOENT rejects. Lines are counted only on
  *   refusal (bounded 8 MiB read, `N+` when capped). `error.context` = `{shrink:true, oldBytes, newBytes, oldLines, newLines}`
- *   (numbers/boolean only, no path or content). Any other `shrinkGuard` shape (incl. `false`) throws `ValidationError` at
+ *   (numbers/boolean only, no path or content). `shrinkGuard:false` is off, same as unset. Any other `shrinkGuard` shape throws `ValidationError` at
  *   creation, naming the type only. `shell_edit` is unaffected; there is deliberately no override flag.
  * @returns {{tools: ToolDef[]}}
  * @when you want to give an agent shell/file tools (read, grep, write, edit, run, exec) — cross-platform, pure Node, zero deps
- * @fails never throws at creation; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
+ * @fails throws ValidationError at creation for a non-function canRead or a bad shrinkGuard shape; gating is the caller's via Loop({ policy }) and fs.writeScope, shell_edit refuses a non-unique anchor as a tool result (file untouched), and with noFollowSymlinks:true the four file tools throw ELOOP on a symlinked final path component.
  * @example
  *   const { tools } = createShellTools();
  *   const loop = new Loop({ provider, tools, policy });

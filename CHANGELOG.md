@@ -17,7 +17,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   a bounded 8 MiB read, `N+` when capped) and the three remedies (`shell_edit`, `append:true`, `content:''`); there is no
   model-settable override. `error.context` = `{ shrink, oldBytes, newBytes, oldLines, newLines }` (numbers/boolean only,
   no path or content) and `wireGate`'s `errorContext` allow-list forwards exactly those five (wrong-typed values
-  dropped). Any other `shrinkGuard` shape, including `false`, throws `ValidationError` at creation. `shell_edit`, badCalls
+  dropped). `shrinkGuard:false` is off (same as unset), so `shrinkGuard: cond` works. Any other shape throws `ValidationError` at creation. `shell_edit`, badCalls
   and the Loop are untouched. Evidence: a whole-file `shell_write` cut a big file below 50% in 14 audited bareloop runs
   (e.g. `src/gate.js` 132,315 B to 2,221 B). Proof: `poc/ba30-shrink-guard.mjs`, `test/shell-shrink-guard.test.js`.
 
