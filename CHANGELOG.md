@@ -26,10 +26,13 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
   nesting, `$ref`, `oneOf` or coercion; no dependency). A fault means the tool is NOT executed and the refusal
   (`<param> must be a <type>, got <type>`, plus `; to send JSON, encode it as one string` for string-got-object/array, or
   `<param> is required`) takes the SAME path as a tool throw: tool-result message, `loop:tool_result`, `onToolResult` error,
-  `maxIdenticalToolErrors`. Never retried by `retry`. A non-boolean value throws at construction.
+  `maxIdenticalToolErrors`. Never retried by `retry`. A non-boolean value throws at construction, and so does
+  `checkArgs: true` with a cycle-owning provider (CLIPipe `claude-mcp`: no tool call reaches the Loop, so it could never
+  run). Per-call order is checkpoint prompt → policy → checkArgs → execute: with a Checkpoint and `checkArgs` both on, a
+  human can approve a call that `checkArgs` then refuses (the gate still audits every attempt).
 - **`usage.reasoningTokens`** (and cumulative `metrics.reasoningTokens`): the vendor's reported number, else `null`, never
   0-for-absent (an explicit reported 0 stays 0). OpenAI wire `completion_tokens_details.reasoning_tokens`, Gemini
-  `thoughtsTokenCount`; Anthropic, Ollama and CLIPipe report none, so `null`. It is a subset of `outputTokens` (both OpenAI
+  `thoughtsTokenCount`; Anthropic, Ollama, Jev and CLIPipe report none, so `null`. It is a subset of `outputTokens` (both OpenAI
   `completion_tokens` and Gemini's `candidates + thoughts` already contain it), so `outputTokens` and pricing are unchanged.
   `metrics.reasoningTokens` is the sum of rounds that reported, `null` only if none did.
 - **`malformedToolCall.argBytes`**: the byte length of the raw `function.arguments` (size only, always present on the marker;
@@ -46,7 +49,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 ### Changed
 
-- `usage` objects from the OpenAI, Gemini, Anthropic, Ollama and CLIPipe providers now carry a `reasoningTokens` key
+- `usage` objects from the OpenAI, Gemini, Anthropic, Ollama, Jev and CLIPipe providers (incl. native per-turn and residual usage) now carry a `reasoningTokens` key
   (`null` where unreported); a test or consumer that deep-equals a provider's `usage` object must allow the new key.
 
 ## [0.57.0] - 2026-10-31

@@ -359,6 +359,19 @@ describe('BA-16 — Loop refuses options it could never honor', () => {
     assert.throws(() => new Loop({ provider: p, policy: () => true }), /policy would\s+NEVER run/);
   });
 
+  test('BA-29: checkArgs:true THROWS when the provider owns the cycle (no tool call reaches the Loop)', () => {
+    const p = sessionProvider({ turns: 1, toolCalls: 0, error: null, usageReported: false });
+    assert.throws(() => new Loop({ provider: p, checkArgs: true }), /stub-session.*checkArgs can never run/s);
+  });
+
+  test('BA-29: checkArgs:false/unset constructs with a cycle-owning provider; checkArgs:true with a normal provider', () => {
+    const p = sessionProvider({ turns: 1, toolCalls: 0, error: null, usageReported: false });
+    assert.doesNotThrow(() => new Loop({ provider: p, checkArgs: false }));
+    assert.doesNotThrow(() => new Loop({ provider: p }));
+    const plain = { name: 'plain', async generate() { return { text: 'x', toolCalls: [], usage: {} }; } };
+    assert.doesNotThrow(() => new Loop({ provider: plain, checkArgs: true }));
+  });
+
   test('the same Loop options remain legal on a normal provider (negative control)', () => {
     const plain = { name: 'plain', async generate() { return { text: 'x', toolCalls: [], usage: {} }; } };
     assert.doesNotThrow(() => new Loop({ provider: plain, assemble: (m) => m, trim: (m) => m, policy: () => true }));
@@ -553,7 +566,7 @@ describe('BA-17 — a turn is a message, not an event', () => {
     s.feed(asstEvent('msg_1', { usage: u(60) }) + '\n');
     s.feed(asstEvent('msg_1', { usage: u(60) }) + '\n');
     await s.flush();
-    assert.deepStrictEqual(s.turns[0], { inputTokens: 2, outputTokens: 60, cacheReadTokens: 10, cacheCreationTokens: 1 });
+    assert.deepStrictEqual(s.turns[0], { inputTokens: 2, outputTokens: 60, cacheReadTokens: 10, cacheCreationTokens: 1, reasoningTokens: null });
   });
 });
 
@@ -703,6 +716,16 @@ describe('BA-17 — what the caller actually receives', () => {
     assert.strictEqual(r.session.turns, 2, 'four events, two assistant messages');
   });
 
+  test('BA-29: every per-turn usage the native stream emits carries reasoningTokens:null', async () => {
+    const seen = [];
+    const turn = (id) => JSON.stringify({ type: 'assistant', message: { id, usage: { input_tokens: 2, output_tokens: 3 }, content: [{ type: 'text', text: 't' }] } });
+    const s = createSessionStream({ onTurn: async (e) => { seen.push(e.usage); }, ctx: null, startedAt: Date.now(), onHalt: () => {} });
+    s.feed(turn('m1') + '\n');
+    await s.flush();
+    assert.ok(seen.length >= 1);
+    for (const u of seen) assert.ok('reasoningTokens' in u && u.reasoningTokens === null);
+  });
+
   test('usage is the CLI\'s own session total, not the per-block-event sum', async () => {
     const r = await nativeProvider(fakeCli(boundedSession)).generate(
       [{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')],
@@ -780,7 +803,7 @@ describe('BA-17 — what the caller actually receives', () => {
     const closing = seen[seen.length - 1];
     assert.strictEqual(closing.kind, 'session');
     // Streamed: input 2, output 5, read 20, creation 4. Session total: 5 / 800 / 20 / 4.
-    assert.deepStrictEqual(closing.usage, { inputTokens: 3, outputTokens: 795, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    assert.deepStrictEqual(closing.usage, { inputTokens: 3, outputTokens: 795, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null });
     const summed = seen.reduce((a, e) => a + e.usage.inputTokens + e.usage.outputTokens, 0);
     assert.strictEqual(summed, 805, "everything the gate is told must add up to the CLI's own total");
   });
@@ -824,7 +847,7 @@ describe('BA-17 — what the caller actually receives', () => {
     const done = JSON.stringify({ type: 'result', subtype: 'success', result: 'ok', usage: { input_tokens: 1, output_tokens: 1 } });
     const p = nativeProvider(fakeCli([turn('m1', 50), turn('m2', 50), done]), { onTurn: async (e) => { seen.push(e); } });
     await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
-    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0 });
+    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0, reasoningTokens: null });
   });
 
   test('a session we killed has no authoritative total, so there is no residual to add', async () => {
@@ -834,7 +857,7 @@ describe('BA-17 — what the caller actually receives', () => {
     await p.generate([{ role: 'user', content: 'go' }], [tool('reader', async () => 'x')]);
     // The fallback total IS the streamed sum, so every tier nets to zero. It carries all four tiers
     // because the summing fallback does (unchanged from 0.33.0), and the residual mirrors its shape.
-    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    assert.deepStrictEqual(seen[seen.length - 1].usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningTokens: null });
   });
 
   // BA-24 site #7: the native session-close path. A session that ends before any assistant turn

@@ -67,7 +67,7 @@ const THINKING_STATUS_RANK = Object.assign(Object.create(null), { applied: 0, un
  *   (rateSource:'caller') instead of the built-in guesstimate. There is NO per-model rate table — bring
  *   your own rate, or take a flagged guesstimate (haiku/sonnet recognized, else the Sonnet-tier default).
  * @property {Function} [onToolResult]
- * @property {boolean} [checkArgs=false] - BA-29, opt-in. Before `execute`, check the call's args against the tool's declared `parameters` — TOP-LEVEL only: a missing `required` param, or a JSON type mismatch on a declared `string`/`number`/`integer`/`boolean`/`object`/`array` (a `type` array = any-of; an unknown/absent type is skipped; no nesting, no `$ref`/`oneOf`, no coercion). A fault means the tool is NOT executed and the refusal (`<param> must be a <type>, got <type>`, or `<param> is required`) flows through the SAME path as a tool throw — tool-result message, `loop:tool_result`, `onToolResult` error, and the `maxIdenticalToolErrors` count. Each refusal is recorded in the run return's `badCalls`. Default off: many caller schemas are loose.
+ * @property {boolean} [checkArgs=false] - BA-29, opt-in. Before `execute`, check the call's args against the tool's declared `parameters` — TOP-LEVEL only: a missing `required` param, or a JSON type mismatch on a declared `string`/`number`/`integer`/`boolean`/`object`/`array` (a `type` array = any-of; an unknown/absent type is skipped; no nesting, no `$ref`/`oneOf`, no coercion). A fault means the tool is NOT executed and the refusal (`<param> must be a <type>, got <type>`, or `<param> is required`) flows through the SAME path as a tool throw — tool-result message, `loop:tool_result`, `onToolResult` error, and the `maxIdenticalToolErrors` count. Each refusal is recorded in the run return's `badCalls`. Per-call order is checkpoint prompt → policy → checkArgs → execute: with a Checkpoint and checkArgs both on, a human can approve a call that checkArgs then refuses (the gate still audits every attempt). Throws at construction with a cycle-owning (`ownsCycle`) provider — no tool call reaches the Loop, so it could never run. Default off: many caller schemas are loose.
  * @property {number} [maxIdenticalToolErrors] - BA-12 safety net (default 3). Short-circuit the run when a
  *   tool's `execute` throws this many times IN A ROW for a BYTE-IDENTICAL call (same tool + same args). A
  *   tool error is deliberately fed back to the model so it can recover — that is the point of the feedback
@@ -367,6 +367,14 @@ class Loop {
         `[Loop] provider '${this.provider.name || 'unknown'}' owns its own turn cycle, so Loop-level policy would `
         + 'NEVER run — no tool call reaches the Loop. Wire the gate on the provider instead '
         + '(e.g. new CLIPipeProvider({ toolProtocol: \'claude-mcp\', policy })).',
+      );
+    }
+    // BA-29: same rule for `checkArgs` — it runs per tool call inside the Loop, and with a cycle-owning
+    // provider no tool call ever reaches the Loop, so it would be accepted and silently never run.
+    if (this.provider && this.provider.ownsCycle && this.checkArgs) {
+      throw new Error(
+        `[Loop] provider '${this.provider.name || 'unknown'}' owns its own turn cycle, so checkArgs can never run `
+        + '(no tool call reaches the Loop). Remove the option, or use a provider whose cycle the Loop drives.',
       );
     }
     if (options.onLlmResult != null && typeof options.onLlmResult !== 'function') {
