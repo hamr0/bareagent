@@ -47,6 +47,8 @@ function safeStringify(value) {
 // its result verbatim to the audit log. Anything not listed here, or of the wrong type, is dropped.
 const ERROR_CONTEXT_KEYS = /** @type {const} */ ({
   timeout: 'boolean', denied: 'boolean', server: 'string', tool: 'string', timeoutMs: 'number',
+  // BA-30 shrinkGuard refusal facts (numbers/boolean only — never a path or content).
+  shrink: 'boolean', oldBytes: 'number', newBytes: 'number', oldLines: 'number', newLines: 'number',
 });
 const ERROR_CONTEXT_MAX_STR = 200;
 

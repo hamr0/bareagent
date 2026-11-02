@@ -2,7 +2,25 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.59.0] - 2026-11-01
+
+### Added
+
+- **BA-30 — opt-in `shrinkGuard` on `shell_write`** (`createShellTools({ shrinkGuard })`, per instance; unset is
+  byte-identical). Refuses a whole-file write that would gut an existing file: `oldBytes >= minOldBytes` (default 2048)
+  and `newBytes < oldBytes * maxShrinkRatio` (default 0.5) throws a `ToolError` (so `maxIdenticalToolErrors` bounds a
+  retry spin) and leaves the file byte-identical. `shrinkGuard: true` takes the defaults; an object may override either
+  plus `guardPath(absPath) => boolean | Promise<boolean>` (`false` skips the guard for that file; a throw or non-boolean
+  rejects the write, type only; `HaltError` propagates). `guardPath` is called only after the byte trigger has fired and receives the
+  LEXICAL absolute path (after `~`/cwd resolution, not the realpath). Skipped for `append:true`, `content:''`, a new file and a
+  non-regular target; size is measured at call time (`lstat` under `noFollowSymlinks`, never through a symlink) and a
+  stat error other than ENOENT rejects. The message names old/new bytes and lines (old lines counted only on refusal, by
+  a bounded 8 MiB read, `N+` when capped; "1 byte"/"1 line" when a count is exactly 1) and the three remedies (`shell_edit`, `append:true`, `content:''`); there is no
+  model-settable override. `error.context` = `{ shrink, oldBytes, newBytes, oldLines, newLines }` (numbers/boolean only,
+  no path or content) and `wireGate`'s `errorContext` allow-list forwards exactly those five (wrong-typed values
+  dropped). `shrinkGuard:false` is off (same as unset), so `shrinkGuard: cond` works. Any other shape throws `ValidationError` at creation. `shell_edit`, badCalls
+  and the Loop are untouched. Evidence: a whole-file `shell_write` cut a big file below 50% in 14 audited bareloop runs
+  (e.g. `src/gate.js` 132,315 B to 2,221 B). Proof: `poc/ba30-shrink-guard.mjs`, `test/shell-shrink-guard.test.js`.
 
 ### Fixed
 
