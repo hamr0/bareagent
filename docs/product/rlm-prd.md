@@ -18,9 +18,87 @@ The mature shape is **"B-shell with an A-tool"**: a deterministic loop owns cont
 Locked decisions (sign-off received):
 1. **Shape:** one standalone import composing existing primitives; a missing hook gets a narrow, optional, backward-compatible seam — never fork a primitive.
 2. **Scope:** build the *full* RLM primitive set (incl. bounded self-recursion) while throwing every `/prose` extra that doesn't move RLM performance (Reactor, world-models, ProseScript DSL, memoization, registry), consuming — never rebuilding — litectx/`Loop`/`Evaluator`/bareguard.
-3. **Depth default:** open ceiling `maxDepth=3` (recursion permitted out of the box), but actual depth is escalation-gated on measurable slice-overflow and always capped by bareguard's hard `limits.maxDepth`.
+3. **Depth default** *(superseded by §0.1: default `maxDepth:1`, brakes on)*: open ceiling `maxDepth=3` (recursion permitted out of the box), but actual depth is escalation-gated on measurable slice-overflow and always capped by bareguard's hard `limits.maxDepth`.
 4. **Control default:** **Family A** — the model decides decomposition via the `spawn` tool, bounded by budget/depth, inside a deterministic shell. `assessComplexity` is a hint not a gate (routes `simple`→single-shot, flags `critical`→adversarial-verify). Family B forced fan-out (NB-2) is opt-in.
 (RLM_PRD.md:46-63)
+
+## 0.1 v2 rebuild plan (2026-11-11)
+
+Status: plan DECIDED, not built. Source: a read-only design review of `main` @ 1247efe (no live runs; brake defaults are guesses to be measured). Where this section contradicts §§0–8 below, this section wins; the contradicted passages carry a "superseded by §0.1" note.
+
+### Why rebuild instead of patch
+
+- **It is not an RLM yet.** The paper (Zhang/Kraska/Khattab, arXiv:2512.24601) puts the prompt in a variable the model inspects and slices, runs sub-calls over pieces from code, keeps results in variables, and answers from a variable. Today: Family A has no input handle; the task string goes straight into the root prompt (recurse.js:554); `spawn_child` takes only a prose `subtask` (recurse.js:1449-1456). There is no peek/length/slice tool. Only the count-scan (recurse-retrieval.js:144-170) follows the handle idea.
+- **Root window is unbounded.** Each child's full result string enters the parent transcript untruncated (recurse.js:1467-1480); measured peak node window 18,982 tokens vs an 8k budget (poc/rlm-defer2-history-overflow.mjs).
+- **Width is uncapped.** The "~100 children per level" figure is wrong: `HARD_ROUND_LIMIT` caps rounds (loop.js:819), and one round can carry any number of tool calls (loop.js:1139). The docstring claim that forced paths "ARE bounded" (recurse.js:383-384) is false: fanout width is whatever the Planner returns, `count` is only a prompt request (recurse.js:1321,1332; planner.js:86-88); partition width is `⌈size/workerBudget⌉` with no cap, so a 1M-item corpus gives ~10,000 workers (recurse.js:1175-1176). Depth IS capped (recurse.js:486,537-539).
+- **Complexity.** 2,135 lines over four files (about 955 code), six dispatch paths (partition, fanout, scan, refineLeaf, Family A; recurse.js:449-646, 871-1406), the `wantVerify` check written five times and the HaltError catch six times, 19 options with hand-maintained carry-down (recurse.js:128-140, 189-302). Most post-v0.21 code is BA-8/9/10/11/14/15 hardening of the refineLeaf seam. The repo rule applies: after three patch rounds, redesign.
+- **Silent wrong answers found on the way:** a corpus turns any task into a counter (recurse.js:466-481); the `search` upgrade regex flips the result type (recurse-retrieval.js:39); `retrieval:'exact'` over an async corpus matches nothing (recurse.js:504); ids with spaces/commas or duplicates undercount silently (recurse-retrieval.js:107); a verify-slot throw discards the whole run (recurse.js:1555,644); a scan halt loses everything judged (recurse.js:1121-1126); a retried child leaves the parent incomplete for good (recurse.js:620, inferred).
+- **One real caller:** relayfact `src/author.mjs:78-82` uses `recurse(…, {maxDepth:0, refineLeaf})`, i.e. none of the RLM part.
+
+### The new design
+
+- **Context as variables.** `opts.input` (`string | Slice[] | () => Promise<Slice[]>`) lives in an env map; the root prompt shows only metadata (type, length, item count, short prefix).
+- **Fixed tools, no model-written code** (DECIDED 4): `info`, `peek`, `find` (literal AND-terms, no regex), `chunk`, `ask` (sub-call on a piece; full recurse below `maxDepth`, plain leaf Loop at the cap), `map` (code-driven fan-out, capped, every slot required), `classify` (today's scan: window 8, 2 passes), `join`/`union`/`count` (code reductions), `final(var)` / `final_text(text)`. Every tool returns a truncated preview and stores the full value under a var name. Caller `opts.tools` still append; the litectx adapters move to an adapter module and are passed in as ordinary tools or an `input` source.
+- **One tail.** Every path ends in a single `finish(node, value, err)` doing verify, halt/brake mapping, `best`, blockers (removes the five/six copies).
+- **Brakes** `limits:{maxDepth, maxCalls, maxWidth, maxRounds}`, counting structure only:
+  - One `countingProvider` wrapper at the top; every `generate` in the tree (worker, sub-call, judge, plan, verify) counts against one shared counter held in a closure. The model cannot read or raise it; children share it and can only tighten (`min(parent remaining, requested)`).
+  - At the cap the wrapper throws `HaltError({rule:'brake:maxCalls'})`, reusing the clean-halt plumbing (loop.js:1302-1313). recurse maps it to `{incomplete, blocker:'brake', brake:'maxCalls', best}` with work preserved (BA-5). A gate halt stays labelled `halt:<rule>`, so "my brake" and "the gate" are distinguishable.
+  - Defaults `{maxDepth:1, maxCalls:64, maxWidth:16, maxRounds:20}` (depth 1 and 20 rounds match the paper; 64 and 16 are guesses the POC must check). Defaults stay ON even when a gate is wired. `limits:'none'` turns them off and every return carries `unbraked:true`.
+  - **Money stays with bareguard:** no dollars, tokens or wall-clock here.
+- **Meter:** the root carries summed `metrics:{calls, tokens, costUsd|null}`; `costUsd` stays null if any node is null.
+- **Dropped:** `mode:'fanout'`, `count`, TIER_COUNT, Planner use; `mode:'partition'`/`workerBudget`; `retrieval` and the completeness regex; `synthesize` strings; the `simple` routing; prose-only `spawn_child`.
+- **Size target:** about 640 code lines (inferred) vs ~955; `recurse.js` ~250, brakes ~60, finish ~120, scan ~150, prompts ~60, `refine-worker.js` ~150 (moved, not new).
+
+### Decisions (DECIDED 2026-11-11)
+
+1. **Failed verdict is incomplete.** A verifier verdict of `failed` / `needs_revision` returns `{incomplete, best, blocker:'verify-failed', verdict}`, not a converged-shaped success. `incomplete` becomes the one "not done" signal. Changes test/recurse.test.js:507 and :888.
+2. **Default brakes stay ON with a gate wired.** The caller raises them explicitly; `limits:'none'` opts out and marks `unbraked:true`. A gate may have no call cap, and caps should be human-signed and tighten-only.
+3. **relayfact keeps working for one release via a compat shim:** `recurse` with `maxDepth:0` + `refineLeaf` forwards to `refineWorker` and warns once.
+4. **Environment is fixed tools** (the list above), not a sandboxed REPL: no code-execution surface, works for weak coders, far smaller. Cost: less expressive than real code; `map` covers the common loop.
+
+### Keep-list (all 20 measured findings must survive; evidence in parentheses)
+
+1. Aggregation is code, never LLM arithmetic, ~10-15% error (recurse-synthesize.js:6-10; poc/rlm-spike1-gate.mjs, rlm-spike2-recursion.mjs)
+2. Judge returns ids, code counts the union; RC-2 drops ids not shown (recurse-retrieval.js:104-111; test/recurse.test.js:1430)
+3. Verbatim classify wording + `<id> => <text>` layout; a paraphrase dropped recall 0.93 to 0.29 (recurse-retrieval.js:56-66; poc/rlm-step8-shipped-replay.mjs)
+4. Scan window 8, 2 passes, deterministic rotation, no RNG; recall ~0.88-0.93, precision ~0.97 (recurse-retrieval.js:31-34,125-131; poc/rlm-step7-window-knee.mjs)
+5. Pull beats push, ~8% vs ~23-25% error (poc/rlm-spike1-gate.mjs)
+6. No survivor-sum: dead/incomplete piece gives `{incomplete, missingSlices}` (recurse.js:620-625,1215-1237,1342-1384; test :148,:1199,:1727)
+7. Dead window is a floor, never a zero (recurse-retrieval.js:154-161,316-321; test :1458,:1641)
+8. BA-5: every terminating path keeps the last non-empty work as `best` (recurse.js:951-956,1084-1100)
+9. `auditSafeCtx` strips the provider from audited ctx, F16/BA-1 key leak (recurse.js:142-164)
+10. Depth-aware prompts; spawn withheld at the cap (recurse-prompts.js:52-71; test :1071-1170)
+11. Fresh window per child, only the result crosses back (recurse.js:550-560,1462-1467; test :323,:335)
+12. In-process self-call, not fork: ~0 ms vs >=90 ms per node (§4.5; poc/rlm-spike2-recursion.mjs)
+13. Blocker labels `governance-deny`/`broken-sensor`/`broken-verifier`; a descendant's label rides as `blockerFrom`, never stamped on ancestors (recurse.js:576-580,822-853; poc/ba11-verify-shipped.mjs, ba15-broken-sensor.mjs)
+14. BA-15 arbiter hygiene: typed error, prototype-preserving verdict copy, truthy `pass`, bounded `blockerDetail` (recurse.js:659-802; test :911-982)
+15. Isolated adversarial verifier; persona never reaches it (recurse.js:1496-1527; test :402)
+16. `isCritical` forces verify, frozen non-overridable floor (recurse.js:422,629)
+17. refineLeaf: escalating temperature (0/5 to 2-3/5), buffer holds temperature flat (100/70/50%), buffer adaptive on temperature-fixed models (poc/ba8-leaf-refine.mjs, ba14b-temp-with-buffer.mjs, ba14-rejected-buffer.mjs)
+18. Working context on the USER message, 0/3 to 3/3 at locating files (recurse.js:107-110; poc/ba9-context-thread.mjs)
+19. Description-routed tools: the model picks scan for counts, search for needles (poc/rlm-scan-as-tool.mjs)
+20. A gate bounds the runaway, 43-117 calls cut to 4-5 (poc/rlm-defer2c-governed-bound.mjs); and `return await verifyOrBlock(...)` inside the try (recurse.js:1536-1539; poc/ba15-broken-sensor.mjs)
+
+### Step order
+
+1. **Extract `refineWorker`** (`src/refine-worker.js`) from `recurseRefineLeaf` + the BA-15 arbiter code, no behaviour change; recurse's refineLeaf leaf path calls it; whole suite green; relayfact's harness re-run on the branch.
+2. **POC (~15 min, real wire, built to fail):** hand-rolled env Loop with info/peek/chunk/map/classify/union/final over AG News at 10x one window, input never in the root prompt. Pass bars: (a) code-known count at about step-8 numbers (recall >=0.88, precision >=0.97); (b) a needle-plus-count mixed question answered; (c) root peak window under a fixed bound (e.g. 4k tokens) while input grows 1x to 10x; (d) `maxCalls:5` gives `{incomplete, blocker:'brake'}` with non-null `best`; (e) `limits:'none'` sets `unbraked:true`. Negative controls: the same task inlined in a plain Loop must overflow or undercount; a constant `final_text("0")` must fail (a). Run on gpt-4o-mini (where the runaway reproduced) and haiku.
+3. **Build** brakes + `finish()` with mutation-proved tests (disable the brake, confirm red).
+4. **Build** env tools, port scan with verbatim wording; shipped-vs-POC replay as with rlm-step8; then remove old paths, move adapters, update docs/primitives.json/CHANGELOG in the same commit.
+5. **Compat shim + migration note** for relayfact.
+
+### What breaks for existing callers
+
+| Today | After |
+|---|---|
+| relayfact `recurse(…, {maxDepth:0, refineLeaf})` | `refineWorker(task, ctx, {persona, tools, sensor, temperatures})`; one-release shim warns once |
+| `corpus` / `retrieval` / `window` / `passes` | `input` + the `classify` tool; standalone `classifyCount` stays exported |
+| `mode` / `count` / `workerBudget` | `limits.maxWidth`, `concurrency` |
+| receipts `retrieval`/`scan`/`partition`/`refineLeaf` fields | new `receipts` with `calls`, `vars`, `limits` |
+| `{result, verdict:{pass:false}}` | `{incomplete, blocker:'verify-failed'}` |
+| exports `buildScanTool`/`buildSearchTool`/`buildExactTool`/`litectxCorpus` | moved to an adapter subpath; primitives.json and the completeness test updated |
+
+About 136 tests: port the keep-list tests (~60, inferred), rewrite the rest.
 
 ## 1. Summary & problem
 
@@ -30,13 +108,13 @@ Long agent runs degrade as the context window fills (context rot/anxiety), and a
 
 **Depth is escalation-gated, not always-on**: depth-0/1 already beats most baselines; recursion only earns its keep on information-dense tasks. The default ceiling is open (`maxDepth=3`) so the primitive handles oversized subgoals out of the box, but a node only recurses when its fetched slice *measurably* overflows one window — non-info-dense tasks run at effective depth-1 and pay nothing. The open ceiling is always bounded by bareguard's hard `limits.maxDepth`. The overflow trigger must be a measurable check (slice tokens > worker budget), never a model's self-declaration (RLM_PRD.md:78-87).
 
-**Control is Family A by default**: the deterministic shell (loop, guards, verify, audit) is always present, but the model decides whether/how to decompose and recurse via the offered `spawn` tool. Deterministic forced fan-out (Family B, NB-2) is opt-in for known-parallel tasks (RLM_PRD.md:89-96).
+**Control is Family A by default**: the deterministic shell (loop, guards, verify, audit) is always present, but the model decides whether/how to decompose and recurse via the offered `spawn` tool. Deterministic forced fan-out (Family B, NB-2) is opt-in for known-parallel tasks (RLM_PRD.md:89-96). *(Superseded by §0.1: forced fan-out/partition are dropped; the "forced paths are bounded" claim was false, width is uncapped today.)*
 
 ## 2. Goals & non-goals
 
 **Goals** (RLM_PRD.md:100-113):
 - G1. One entry point `recurse(task, ctx, opts)` — decompose, fan out over fresh-context workers, verify against a setpoint, synthesize one result, assembled from existing primitives.
-- G2. Provable termination enforced through **bareguard**, not a second hand-rolled guard layer.
+- G2. Provable termination enforced through **bareguard**, not a second hand-rolled guard layer. *(Superseded by §0.1: structure brakes are in-process; money stays with bareguard.)*
 - G3. Context discipline — each worker gets a tight, handle-fetched slice via litectx, never the whole corpus.
 - G4. Honest done — the Evaluator emits a gap report with evidence, not a boolean; non-convergence reports `incomplete`, never fakes success.
 - G5. One knob unifies fan-out and recursion (`maxDepth=1` ⇒ flat fan-out).
@@ -45,7 +123,7 @@ Long agent runs degrade as the context window fills (context rot/anxiety), and a
 **Non-goals** (RLM_PRD.md:115-131):
 - N1. No new litectx code — litectx stays the handle layer.
 - N2. No LLM grader/rubric verb inside litectx (no-LLM-inside moat) — the judge is bareagent's Evaluator.
-- N3. No second guard layer — depth/budget/wall-clock/call caps are bareguard's.
+- N3. No second guard layer — depth/budget/wall-clock/call caps are bareguard's. *(Superseded by §0.1 for depth/width/call/round counts.)*
 - N4. No prose.md VM/Markdown interpreter — Family B is JS orchestration (`Planner`+`runPlan`); the optional NB-6 `rlm.md` is a setpoint to read/approve, never an executed program.
 - N5. No "parallel mode" as a separate code path — flat fan-out *is* `recurse()` at `maxDepth=1` over the existing `runPlan` executor.
 - N6. No new transcript grammar — bareagent already owns transcript shape (Loop).
@@ -86,7 +164,7 @@ Two axes — control (who decides decomposition) × topology (the shape). `recur
 
 - The classifier always runs, as a **hint, not a gate** — `assessComplexity` runs on every call (pure code, sub-ms, zero tokens, ~89%). It decides only two low-regret rails: `simple`→single-shot (cost rail, self-healing) and `critical`→force adversarial verify (safety floor via `isCritical`, asymmetric-cost). It does **not** gate the high-regret decomposition-structure decision — the tier + its 2/4/6 count go to the model as a suggested, overridable hint (RLM_PRD.md:181-192).
 - Rails are **decisions**, not hints, specifically where the model could talk past a hint on high-stakes work (the self-evaluation trap) — `critical`→verify is a non-overridable safety floor; `simple`→single-shot is defensible as a hint since it's lower-stakes and self-correcting (RLM_PRD.md:193-200).
-- Topology stays flat-first even in Family A; `maxDepth=1` forbids nesting. Family A's batch spawns run concurrently through the same `runPlan` executor as Family B — no parallelism lost (RLM_PRD.md:201-205).
+- Topology stays flat-first even in Family A; `maxDepth=1` forbids nesting. Family A's batch spawns run concurrently through the same `runPlan` executor as Family B — no parallelism lost (RLM_PRD.md:201-205). *(Superseded by §0.1: false in code — the Loop runs tool calls serially, loop.js:1139; only fanout/partition were parallel.)*
 - Two stacked count dials: `assessComplexity` sets the coarse route and a fixed starting count (2/4/6) from goal text alone; a second, downstream dial — measurement (deterministic) or the model — may raise the count to as-many-as-the-data-needs once a node fetches its slice, capped by the guards (RLM_PRD.md:206-214).
 
 ### 4.3 The build delta — exactly what is net-new
@@ -181,6 +259,8 @@ Two callers (the "hybrid"): (1) HITL — human approves the `rlm.md` via `Checkp
 (RLM_PRD.md:399-411)
 
 ## 6. Guards — enforced via bareguard, not re-implemented
+
+> **Superseded by §0.1 for structure caps.** Depth/width/call/round counts become default-on in-process brakes (`limits`); bareguard keeps money, tokens and wall-clock. The measured finding that a gate bounds the runaway still holds.
 
 The architecture is **meter (bareagent) → gate (bareguard)** (RLM_PRD.md:418-421):
 1. **Depth cap** — bareguard `limits.maxDepth` via `BAREGUARD_SPAWN_DEPTH` (process fork) or in-proc depth threaded to `policy` (NB-4). `opts.maxDepth` is only the topology knob (open default 3), never exceeding bareguard's `limits.maxDepth`.

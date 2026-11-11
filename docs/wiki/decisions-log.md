@@ -11,6 +11,13 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 
 > Coverage note: v0.16.2→v0.27.0 (eval-assist suite 0.17–0.19, RLM/`recurse` 0.20–0.24, BA-8/9/10/11/14 seams 0.22–0.30) were decided in their own PRDs (`eval-assist-prd.md`, `RLM_PRD.md`), which remain canonical for those. Entries below fold former standalone side-docs (`provider-fidelity-prd.md`, `BA-13-…-plan.md`, `litectx-enumerate-spec.md`) back into the main PRD; granular evidence lives in CHANGELOG/git history. (prd.md:798-810)
 
+## unreleased / recurse() v2 rebuild plan — real RLM + brakes (2026-11-11)
+- **Rebuild, not patch:** `recurse()` is a decompose-and-delegate agent with a count-scan bolted on, not an RLM (no input handle, unbounded root window, uncapped width, six dispatch paths). Plan, evidence and keep-list: `docs/product/rlm-prd.md` §0.1.
+- **Failed verdict is incomplete:** a `failed`/`needs_revision` verifier verdict returns `{incomplete, blocker:'verify-failed'}`.
+- **Default brakes stay on with a gate wired:** `limits:{maxDepth,maxCalls,maxWidth,maxRounds}` as a closure the model cannot touch, tighten-only; `limits:'none'` marks `unbraked:true`; money stays with bareguard.
+- **relayfact keeps working one release** via a compat shim onto the extracted `refineWorker`.
+- **Environment is fixed tools, no model-written code executed.**
+
 ## unreleased / BA-29 — bad-call facts, `checkArgs`, `reasoningTokens`, shell hints (2026-11-01)
 - **Facts on the return, never actions:** `badCalls` / `cutOff` are on the `Loop.run()` return only (not events, not `onToolResult`); a cut-round call is still never executed, repaired or auto-continued (BA-4/BA-6/BA-13 stand). Key absent when empty so an untouched run's return shape is unchanged.
 - **`checkArgs` is opt-in and top-level only:** many caller schemas are loose, and a nested/`$ref` validator is a dependency. It refuses through the SAME path as a tool throw (so `maxIdenticalToolErrors` still bounds it), outside `retry.call` (a refusal is never re-run). shell.js throws are NOT parsed into `badCalls` (parsing English out of a message is the anti-pattern this replaces).
