@@ -27,6 +27,11 @@
 //   NC2 a constant scripted model that only calls final_text("0") must fail (a). (The one allowed fake: it
 //       exists to prove the checker can go red.)
 //
+// FINDING for the brake defaults: the spec default maxCalls=64 is too small for a 10x classify (~150 judge calls:
+// 75 windows x 2 passes), so accuracy runs use maxCalls 200 unless --limits is given.
+// (b) NEEDLE is found by CONTENT: code picks a term (or 2-term pair) UNIQUE in the 10x items; the model is not
+// given an index and must use `find` (literal, case-insensitive AND-term filter, no regex).
+//
 // SAFETY: hard wall-clock timeout (10 min, exit 3) and a POC-level global call ceiling (300) that apply EVEN
 // under --limits none, so a live run cannot burn unbounded money. Keys are read ONLY from env.
 //
@@ -152,6 +157,17 @@ async function pool(n, jobs) {
   await Promise.all(Array.from({ length: Math.min(n, jobs.length) }, async () => { for (;;) { const i = next++; if (i >= jobs.length) return; out[i] = await jobs[i](); } }));
   return out;
 }
+const findIds = (items, terms) => { const t = terms.map((x) => String(x).toLowerCase()).filter(Boolean); return t.length ? items.filter((r) => t.every((x) => r.text.toLowerCase().includes(x))).map((r) => r.id) : []; };
+// pick a needle whose term(s) match EXACTLY ONE item in `items` (computed with the same findIds the tool uses)
+function pickNeedle(items, from) {
+  const words = (r) => [...new Set(r.text.toLowerCase().match(/[a-z0-9]{4,}/g) || [])];
+  for (let k = 0; k < items.length; k++) {
+    const it = items[(from + k) % items.length]; const ws = words(it);
+    for (const w of ws) if (findIds(items, [w]).length === 1) return { item: it, terms: [w] };
+    for (let i = 0; i < ws.length; i++) for (let j = i + 1; j < ws.length; j++) if (findIds(items, [ws[i], ws[j]]).length === 1) return { item: it, terms: [ws[i], ws[j]] };
+  }
+  throw new Error('no unique needle found');
+}
 const classifySystem = (predicate) =>
   'You are a precise classifier. Examine EACH item individually. Each item is shown on its own line as ' +
   '`<id> => <text>`. Output ONLY the IDs of the items that match the predicate below — copy each matching ' +
@@ -166,7 +182,7 @@ function buildEnv({ items, provider, run }) {
   const store = (value) => { const name = `v${++S.vars}`; env.set(name, value); S.lastVar = { name, value }; return name; };
   const get = (name) => { if (!env.has(name)) throw new Error(`unknown var "${name}" (vars: ${[...env.keys()].join(', ')})`); return env.get(name); };
   const reply = (value) => { const name = store(value); return `var=${name} type=${typeOf(value)}\n${preview(value, name)}`; };
-  let loop = null; const state = { final: null, lastClassify: null };
+  let loop = null; const state = { final: null, lastClassify: null, lastFind: null };
 
   const subCall = async (system, user) => { // one fresh leaf Loop per piece; HaltError (brake) propagates
     if (1 > L.maxDepth) trip('maxDepth');
@@ -183,6 +199,11 @@ function buildEnv({ items, provider, run }) {
     { name: 'peek', description: 'Read items [start, start+len) of a list var (0-based), or a character range of a string var. Preview is truncated.',
       parameters: { type: 'object', properties: { var: { type: 'string' }, start: { type: 'integer' }, len: { type: 'integer' } }, required: ['var', 'start', 'len'] },
       execute: ({ var: v, start, len }) => { const x = get(v); return reply(Array.isArray(x) ? x.slice(start, start + len) : String(render(x)).slice(start, start + len)); } },
+    { name: 'find', description: 'Find items by CONTENT: literal, case-insensitive, ALL terms must appear (AND); no regex. Returns the matching items as a list var (ids + truncated preview). Use for locating a specific item by words it contains.',
+      parameters: { type: 'object', properties: { var: { type: 'string' }, terms: { type: 'array', items: { type: 'string' } } }, required: ['var', 'terms'] },
+      execute: ({ var: v, terms }) => { const x = flatItems(get(v)); if (!Array.isArray(terms) || !terms.length) throw new Error('find needs a non-empty terms array');
+        const ids = findIds(x, terms); state.lastFind = ids; const m = new Set(ids); const name = store(x.filter((r) => m.has(r.id)));
+        return `var=${name} matches=${ids.length} ids=${JSON.stringify(ids.slice(0, 50))}\n${preview(env.get(name), name)}`; } },
     { name: 'chunk', description: 'Split a list var into a list of chunks of `size` items. Returns a list var (a list of lists).',
       parameters: { type: 'object', properties: { var: { type: 'string' }, size: { type: 'integer' } }, required: ['var', 'size'] },
       execute: ({ var: v, size }) => { const x = get(v); if (!Array.isArray(x) || !(size >= 1)) throw new Error('chunk needs a list var and size>=1');
@@ -232,7 +253,7 @@ function buildEnv({ items, provider, run }) {
       parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
       execute: ({ text }) => { state.final = { value: String(text), missing: [] }; loop.stop(); return 'final recorded'; } },
   ];
-  return { env, tools, state, setLoop: (l) => { loop = l; } };
+  return { env, tools, byName: Object.fromEntries(tools.map((t) => [t.name, t])), state, knownIds, setLoop: (l) => { loop = l; } };
 }
 
 function rootSystem(items) {
@@ -241,7 +262,7 @@ function rootSystem(items) {
     'You answer questions about a dataset you cannot see. It lives OUTSIDE your prompt as env var `input`.',
     `input: type=list of {id,text} news items, items=${items.length}, total_chars=${total}, prefix=${JSON.stringify(items.map(render).join('\n').slice(0, 200))}`,
     'Items are numbered 0..N-1 in order, ids look like rec:K. Use the tools to inspect it; every tool returns a truncated preview and stores the full value under a var name you can pass to the next tool.',
-    'Rules: never guess the data. For "how many"/"all" questions call classify(predicate, "input") — it counts in CODE; do not count by hand. For a single item use peek. Finish with final(var) (e.g. the classify var) or final_text(text). For a mixed question use final_text with BOTH answers, stating the count as digits.',
+    'Rules: never guess the data. For "how many"/"all" questions call classify(predicate, "input") — it counts in CODE; do not count by hand. To locate an item by words it contains use find(var, terms); to read by position use peek. Finish with final(var) (e.g. the classify var) or final_text(text). For a mixed question use final_text with BOTH answers, stating the count as digits.',
   ].join('\n');
 }
 
@@ -343,6 +364,11 @@ if (DRY) {
   // (e)
   const e = add(await runEnv({ task: COUNT_TASK, items: items1, provider: scriptedProvider(COUNT_SCRIPT, { oracle: true }), limits: 'none', rates }));
   check("(e) limits:'none' -> unbraked:true", e.unbraked === true && !e.incomplete, `unbraked=${e.unbraked} incomplete=${!!e.incomplete}`);
+  // find-uniqueness: the REAL find tool must return exactly the one needle id for the chosen terms
+  const pn = pickNeedle(items10, Math.floor(N10 * 0.7));
+  const fenv = buildEnv({ items: items10, provider: null, run: makeRun({ limits: 'none', rates }) });
+  await fenv.byName.find.execute({ var: 'input', terms: pn.terms });
+  check('dry: find returns exactly the one unique needle id', JSON.stringify(fenv.state.lastFind) === JSON.stringify([pn.item.id]), `terms=${JSON.stringify(pn.terms)} id=${pn.item.id} found=${JSON.stringify(fenv.state.lastFind)}`);
   // NC2
   const nc2 = add(await runEnv({ task: COUNT_TASK, items: items10, provider: scriptedProvider([['final_text', { text: '0' }]]), limits: accLimits, rates }));
   control('NC2 constant final_text("0")', scoreCount(nc2, items10), fmt(scoreCount(nc2, items10)));
@@ -357,9 +383,9 @@ if (DRY) {
   const sa = scoreCount(r10, items10);
   check('(a) count at 10x', sa.ok, r10.incomplete ? `incomplete(${r10.blocker}:${r10.brake || r10.limit || ''})` : fmt(sa));
   // (b) mixed
-  const K = Math.floor(N10 * 0.7), needleItem = items10[K];
+  const pn = pickNeedle(items10, Math.floor(N10 * 0.7)), needleItem = pn.item;
   const needle = norm(needleItem.text).split(' ').slice(0, 4).join(' ');
-  const rb = add(await runEnv({ task: `Two questions. (1) Quote the exact headline (text) of the item at index ${K} (0-based, id rec:${K}). (2) ${COUNT_TASK}`, items: items10, provider, limits: accLimits, rates }));
+  const rb = add(await runEnv({ task: `Two questions. (1) Quote the exact headline of the one item that mentions ${pn.terms.map((t) => `"${t}"`).join(' and ')}. (2) ${COUNT_TASK}`, items: items10, provider, limits: accLimits, rates }));
   const sb = scoreCount(rb, items10);
   const needleOk = !rb.incomplete && norm(typeof rb.result === 'string' ? rb.result : JSON.stringify(rb.result)).includes(needle);
   check('(b) mixed needle+count', needleOk && sb.ok, rb.incomplete ? `incomplete(${rb.blocker})` : `needle(${needle})=${needleOk} ${fmt(sb)}`);
