@@ -217,7 +217,7 @@ function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child
           if (!vars.has(v)) return reject(`unknown var "${v}"`);
           const k = kinds.get(v);
           if ((kind === 'count' || kind === 'ids') && k === 'ids') return accept(idsPayload(v), missingOf.get(v));
-          if (kind === 'text' && k === 'text') return accept(String(vars.get(v)), missingOf.get(v));
+          if (kind === 'text' && k === 'text') return hasWork(String(vars.get(v))) || missingOf.get(v)?.length ? accept(String(vars.get(v)), missingOf.get(v)) : reject(`var ${v} is blank — a blank answer is not a final`); // same blank rule as final_text; a DEAD slot (missing) keeps its honest incomplete path
           return reject(`var ${v} is kind ${k}`); } },
       { name: 'final_text', description: 'Final answer as literal text (ONLY for a text question; refused for count/ids questions). Ends the run.', parameters: obj({ text: S }, ['text']),
         execute: ({ text }) => (kind === 'text' && hasWork(text) ? accept(String(text)) : reject('final_text is not allowed for this answer kind')) },

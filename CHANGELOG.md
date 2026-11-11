@@ -50,6 +50,10 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 - `bare-agent/recurse-adapters` subpath export (`src/recurse-adapters.js`).
 - `src/recurse-brakes.js`, `src/recurse-finish.js`, `src/recurse-env.js` (internal). `poc/rlm-v2-env.mjs` (POC) and `poc/rlm-v2-shipped-replay.mjs` (drives the shipped `recurse`, exit code is the verdict).
 
+### Fixed (recurse v2)
+
+- `final(var)` on a blank (empty/whitespace-only) text var is refused exactly like a blank `final_text` (one nudge, then `{incomplete, blocker:'wrong-final'}`) instead of returning `{result:''}` as a success; a dead-slot var keeps its `missingSlices` incomplete path.
+
 ### Removed (recurse v2)
 
 - `src/recurse-synthesize.js`; `recurse`'s use of `Planner`/`runPlan`; the options listed in the migration table. Older POCs under `poc/` that import the removed v1 paths (`src/recurse-retrieval.js`) are historical and no longer run.

@@ -213,6 +213,21 @@ describe('recurse v2 — typed final: AI points, code decides (K1)', () => {
     assert.equal((await recurse(SIMPLE_TASK, { provider: ft.provider }, { input: corpusOf(2) })).result, 'direct');
   });
 });
+describe('recurse v2 — blank text var is never a final answer', () => {
+  for (const blank of ['', '   \n\t ']) {
+    it(`final(var) on a text var holding ${JSON.stringify(blank)} is refused like a blank final_text: {incomplete, wrong-final}`, async () => {
+      const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }], ['final', { var: 'v1' }]], leaf: { text: blank } }));
+      const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+      assert.equal(out.incomplete, true); assert.equal(out.blocker, 'wrong-final'); assert.equal(out.result, undefined);
+      assert.equal(out.receipts.nudges, 1, 'one nudge, then the run ends');
+    });
+  }
+  it('a non-blank text var still finalizes via final(var)', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], leaf: { text: 'REAL' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+    assert.equal(out.incomplete, undefined); assert.equal(out.result, 'REAL');
+  });
+});
 const shownCount = (m) => lastUser(m).split('PIECE:\n')[1].split('\n').length;
 
 describe('recurse v2 — classify (K2 K3 K4 K7)', () => {
