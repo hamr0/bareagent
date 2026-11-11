@@ -362,6 +362,15 @@
       "example": "const { result, passed } = await refine({ attempt, evaluate, maxIterations: 3 });\nif (!passed) escalate(result);"
     },
     {
+      "name": "refineWorker",
+      "category": "core",
+      "when": "you want a model to produce an artifact that a deterministic check (test/compile/lint) must pass, retried with fed-back gaps — one worker, no decomposition",
+      "import": "import { refineWorker } from 'bare-agent'",
+      "signature": "refineWorker(task: string, ctx?: RecurseCtx, opts?: RecurseOptions) => Promise<RecurseResult>",
+      "fails": "returns `{incomplete, best}` on non-recovery, halt, deny-spin (`blocker:'governance-deny'`) or a broken sensor (`blocker:'broken-sensor'`); throws on a missing task, provider or sensor",
+      "example": "const out = await refineWorker('write add(a,b)', { provider }, { tools: [editTool], refineLeaf: { sensor } });\nif (out.incomplete) console.log(out.blocker, out.best);"
+    },
+    {
       "name": "remember",
       "category": "evaluation",
       "when": "you want to distill durable facts from harvested transcript spans and persist them through a Store socket (the consolidation pass)",

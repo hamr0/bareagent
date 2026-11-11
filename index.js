@@ -20,6 +20,7 @@ const { Planner } = require('./src/planner');
 const { Evaluator } = require('./src/evaluator');
 const { refine } = require('./src/refine');
 const { recurse } = require('./src/recurse');
+const { refineWorker } = require('./src/refine-worker');
 const { buildSearchTool, buildExactTool, buildScanTool, litectxCorpus } = require('./src/recurse-retrieval');
 const { remember } = require('./src/remember');
 const { judge } = require('./src/judge');
@@ -54,6 +55,7 @@ module.exports = {
   Evaluator,
   refine,
   recurse,
+  refineWorker,
   buildSearchTool,
   buildExactTool,
   buildScanTool,

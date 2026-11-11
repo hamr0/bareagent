@@ -2,6 +2,19 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`refineWorker(task, ctx, opts)`** — the refineLeaf worker extracted into a standalone primitive
+  (`src/refine-worker.js`, exported from `bare-agent`). Takes the same `opts` as `recurse` (`refineLeaf`, `persona`,
+  `context`, `tools`, `contract`, `evaluate`; `maxDepth` defaults to 0) and returns the same shape, incl.
+  `receipts.refineLeaf` and the `governance-deny` / `broken-sensor` / `broken-verifier` labels. `recurse`'s refineLeaf
+  leaf path now DELEGATES to it (the BA-15 arbiter code and the verify slot moved with it, not copied), so
+  `recurse(task, ctx, {maxDepth:0, refineLeaf})` is byte-identical in behaviour. This is step 1 of the recurse v2
+  rebuild plan (`docs/product/rlm-prd.md` §0.1). Proof: `test/refine-worker.test.js` (direct API + equivalence with
+  the recurse route, mutation-proved); every existing recurse test passes unchanged.
+
 ## [0.59.0] - 2026-11-01
 
 ### Added
