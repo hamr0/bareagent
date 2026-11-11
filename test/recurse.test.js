@@ -1,1887 +1,705 @@
 'use strict';
 
-// RLM_PRD build step 3 — `recurse()` (NB-1 glue + NB-4 spawn A-tool / capability-scrub + NB-5 prompt).
-// Correctness-only, no live API (PRD §9: "integration tests suffice"). A scripted provider serves the WHOLE
-// recursion tree (parent worker, child workers, and the verifier all share it — routed by message content),
-// so each test can prove an invariant by inspecting what each Loop was handed. These are MUTATION-CHECKED:
-// each guarantee has a test that would fail if the glue leaked, mis-scrubbed, or faked success (PRD §9 /
-// RC-1,2,6,7,9,11,12). The live pull-vs-flat re-measurement is build step 7, not here.
+// recurse() v2 (docs/product/rlm-prd.md §0.1). Fake providers only — no network. One scripted provider serves the
+// WHOLE tree: a call WITH tools is an env worker (root or child), a call WITHOUT tools is a leaf sub-call (classify
+// judge / ask / map) or the isolated verifier (user message starts "GOAL:"). Each describe maps to keep-list items
+// (K1..K20 = docs/product/rlm-prd.md §0.1 keep-list); every guard has a test that goes red if the guard is removed.
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { recurse } = require('../src/recurse');
 const { HaltError } = require('../src/errors');
-const { DECOMPOSITION_POLICY, capabilityScrub } = require('../src/recurse-prompts');
-const { synthesize, concatReduce, MERGE_PROMPT } = require('../src/recurse-synthesize');
+const { classifySystem } = require('../src/recurse-prompts');
+const { capabilityScrub } = require('../src/recurse-prompts');
+const { formulaCap } = require('../src/recurse-brakes');
 
-// Tasks crafted to hit known assessComplexity tiers (see src/complexity.js):
-const SIMPLE_TASK = 'list the open files';                                   // simple verbs → 'simple'
-const COMPLEX_TASK = 'design and implement a notification pipeline across the entire system'; // → 'complex'
-const CRITICAL_TASK = 'investigate the security breach';                    // CRIT_INCIDENT 'breach' → 'critical'
-
-const lastUser = (messages) => { for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user') return messages[i].content || ''; return ''; };
-const systemOf = (messages) => (messages.find(m => m.role === 'system') || {}).content || '';
-const isVerify = (messages) => lastUser(messages).startsWith('GOAL:');
+const SIMPLE_TASK = 'list the open files';
+const CRITICAL_TASK = 'investigate the security breach';
+const lastUser = (m) => { for (let i = m.length - 1; i >= 0; i--) if (m[i].role === 'user') return m[i].content || ''; return ''; };
+const systemOf = (m) => (m.find((x) => x.role === 'system') || {}).content || '';
+const isVerify = (m) => lastUser(m).startsWith('GOAL:');
 const SATISFIED = '{"status":"satisfied","score":9,"critique":"","suggestions":[]}';
+const FAILED = '{"status":"failed","score":1,"critique":"wrong","suggestions":[]}';
 
-/**
- * A scripted provider whose `generate(messages, tools, options)` is driven by a caller `handler`. It records
- * a snapshot of every call (messages, tool NAMES, options) so a test can assert isolation/scrub/separation.
- */
-function scriptedProvider(handler, { model = 'stub-model', name = 'stub' } = {}) {
+function scripted(handler, { model = 'stub-model' } = {}) {
   const calls = [];
   return {
     calls,
     provider: {
-      model,
-      name,
+      model, name: 'stub',
       async generate(messages, tools, options) {
-        calls.push({
-          messages: messages.map(m => ({ role: m.role, content: m.content })),
-          tools: (tools || []).map(t => t.name),
-          options,
-        });
+        calls.push({ messages: messages.map((m) => ({ role: m.role, content: m.content })), system: systemOf(messages), user: lastUser(messages), tools: (tools || []).map((t) => t.name), toolDefs: tools || [], options });
         const r = (await handler(messages, tools, options, calls.length - 1)) || {};
-        return { text: r.text || '', toolCalls: r.toolCalls || [], usage: r.usage || { inputTokens: 5, outputTokens: 3 }, model, ...(r.temperatureDropped && { temperatureDropped: true }) };
+        return { text: r.text || '', toolCalls: r.toolCalls || [], usage: r.usage || { inputTokens: 5, outputTokens: 3 }, model, ...(r.stopReason && { stopReason: r.stopReason }) };
       },
     },
   };
 }
 
-// A worker that decomposes once: parent spawns a single child, then synthesizes the child's returned result.
-// The child answers directly. Verifier (if any) returns satisfied. Distinct, greppable strings let tests
-// prove what crossed which boundary.
-function decomposingHandler({ subtask = 'count the alpha records (self-contained)' } = {}) {
-  return (messages, tools) => {
-    if (isVerify(messages)) return { text: SATISFIED };
-    const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-    const gotChild = messages.some(m => m.role === 'tool');
-    const user = lastUser(messages);
-    if (hasSpawn && !gotChild) {
-      return { toolCalls: [{ id: 'c1', name: 'spawn_child', arguments: { subtask } }] };
-    }
-    if (gotChild) {
-      const childResults = messages.filter(m => m.role === 'tool').map(m => m.content).join(' | ');
-      return { text: `PARENT_SYNTHESIS[${childResults}]` };
-    }
-    // a leaf / child / single-shot worker — answers directly. CHILD_SCRATCH never crosses a boundary.
-    return { text: `CHILD_RESULT(${user.slice(0, 24)})` };
-  };
-}
-
-describe('recurse — wiring & guards', () => {
-  it('throws without a provider', async () => {
-    await assert.rejects(() => recurse('do a thing', {}, {}), /requires a provider/);
-  });
-
-  it('throws on an empty task', async () => {
-    const { provider } = scriptedProvider(() => ({ text: 'x' }));
-    await assert.rejects(() => recurse('', { provider }), /non-empty string/);
-  });
-
-});
-
-// Family B (NB-2) forced fan-out: a deterministic count → Planner (count seam) → runPlan waves → NB-3 reduce
-// → verify. The scripted provider serves the planner, the slice workers, the reducer, AND the verifier, routed
-// by message content. A planner call is the one whose SYSTEM prompt is the planning-agent prompt; it parses the
-// forced count from the injected OVERRIDE and emits exactly that many independent slices.
-const isPlanner = (messages) => systemOf(messages).includes('planning agent');
-function fanoutHandler({ failSliceIndex = -1 } = {}) {
-  return (messages) => {
-    if (isPlanner(messages)) {
-      const m = systemOf(messages).match(/EXACTLY (\d+)/);
-      const n = m ? Number(m[1]) : 3;
-      const steps = Array.from({ length: n }, (_, i) => ({
-        id: `s${i}`,
-        // 'count' → simple tier → each slice is a single-shot leaf (no nested planner / no spawn tool)
-        action: i === failSliceIndex ? `SLICE ${i}: FAILSLICE count alpha` : `SLICE ${i}: count the alpha records`,
-        dependsOn: [],
-      }));
-      return { text: JSON.stringify(steps) };
-    }
-    if (isVerify(messages)) return { text: SATISFIED };
-    const user = lastUser(messages);
-    if (user.includes('FAILSLICE')) throw new HaltError('slice halted by governance', { rule: 'test-cap' });
-    return { text: `RESULT(${user.slice(0, 20)})` };
-  };
-}
-
-describe('recurse — Family B forced fan-out (NB-2)', () => {
-  it('opts.count → Planner forced to EXACTLY that many slices → concat reduce joins all results', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 3 });
-    // the planner was told to make EXACTLY 3 independent slices (the NB-2 seam)
-    const planner = sp.calls.find(c => c.messages.some(m => m.role === 'system' && /planning agent/.test(m.content)));
-    assert.ok(planner, 'a planning call must have been made (else the fan-out never decomposed)');
-    assert.ok(/EXACTLY 3 independent/.test(systemOf(planner.messages)), 'planner must receive the forced count=3 directive');
-    // 3 slices ran and the lossless concat carries every slice's result (no survivor-drop)
-    assert.equal(out.incomplete, undefined);
-    for (let i = 0; i < 3; i++) assert.ok(String(out.result).includes(`SLICE ${i}`), `result must include slice ${i}`);
-    assert.equal(out.receipts.spawned.length, 3, 'receipts show 3 child slices (RC-10 lineage)');
-    // mutation check: Family B is deterministic — it must NEVER offer the model a spawn_child tool
-    assert.ok(sp.calls.every(c => !c.tools.includes('spawn_child')), 'forced fan-out must not offer spawn_child');
-  });
-
-  it('mode:"fanout" (no count) → count derived from the calibrated tier map (complex → 4)', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { mode: 'fanout' });
-    const planner = sp.calls.find(c => isPlanner(c.messages));
-    assert.ok(/EXACTLY 4 independent/.test(systemOf(planner.messages)), 'complex tier must force count=4');
-    assert.equal(out.receipts.spawned.length, 4);
-  });
-
-  it('opts.count OVERRIDES the tier map (count=2 on a complex task → 2, not 4) — RC-3 deterministic', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const a = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2 });
-    const b = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2 });
-    assert.equal(a.receipts.spawned.length, 2);
-    assert.equal(b.receipts.spawned.length, 2, 'same input+count ⇒ same slice count (deterministic)');
-  });
-
-  it('opts.synthesize FUNCTION is the deterministic code-reduce over child results (§9.1)', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const reduce = ({ results }) => `CODE_REDUCE:${results.length}`;
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 4, synthesize: reduce });
-    assert.equal(out.result, 'CODE_REDUCE:4', 'the code-reduce fn sees all 4 slice results');
-  });
-
-  it('RC-9: an incomplete slice → {incomplete, missingSlices}, NEVER a silent survivor-sum', async () => {
-    const sp = scriptedProvider(fanoutHandler({ failSliceIndex: 1 }));
-    // a code-reduce that would HAPPILY survivor-sum the surviving slices if recurse let it
-    const reduce = ({ results }) => `SUM:${results.filter(Boolean).length}`;
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 3, synthesize: reduce });
-    assert.equal(out.incomplete, true, 'one dead slice ⇒ the whole node is incomplete');
-    assert.equal(out.result, undefined, 'an incomplete fan-out must NOT return a clean result (no faked pass)');
-    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.some(s => /SLICE 1/.test(s)),
-      'the dead slice is named in missingSlices (the anti-undercount signal)');
-    assert.ok(out.best != null, 'the partial reduce is still surfaced as best (RC-9)');
-  });
-
-  it('a governance HaltError from the planner is a clean incomplete exit, not a thrown run', async () => {
-    const sp = scriptedProvider((messages) => {
-      if (isPlanner(messages)) throw new HaltError('planner halted', { rule: 'budget' });
-      return { text: 'x' };
-    });
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 4 });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true, 'the node records the governance halt');
-  });
-
-  // BA-5 data path: recurse has always returned `best: out.text || null` on its incomplete paths (RC-9),
-  // but the Loop zeroed the worker's text on every bound — so `best` was ALWAYS null and the partial work
-  // recurse was trying to hand back never existed. This asserts the whole path end to end: a worker halted
-  // by governance surfaces its pre-halt reasoning as `best`, while `incomplete` still keys off the error
-  // (a non-empty best NEVER means convergence — that's the RC-9 honesty invariant, unchanged).
-  it('a governance-halted worker surfaces its pre-halt text as `best` (BA-5), still incomplete', async () => {
-    let turn = 0;
-    const sp = scriptedProvider(() => {
-      turn += 1;
-      // Round 1: the worker reasons out loud, then reaches for a tool the gate halts on.
-      if (turn === 1) return { text: 'Ruled out tokenize.js; the regression is in store.js', toolCalls: [{ id: 'r1', name: 'probe', arguments: {} }] };
-      return { text: 'unreachable' };
-    });
-    const probe = { name: 'probe', description: 'probes', execute: async () => 'never runs' };
-    const policy = () => { throw new HaltError('cap', { rule: 'budget.maxCostUsd' }); };
-    const out = await recurse('investigate the failing test', { provider: sp.provider, policy }, { tools: [probe], maxDepth: 1 });
-    assert.equal(out.incomplete, true, 'a halted worker is STILL an honest incomplete — best never fakes a pass');
-    assert.equal(out.best, 'Ruled out tokenize.js; the regression is in store.js', 'the bounded attempt hands its work to the next one');
-    assert.equal(out.receipts.halted, true);
-  });
-
-  it('the decomposition call is METERED — its usage forwards to ctx.onLlmResult as kind:"plan"', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const events = [];
-    await recurse(COMPLEX_TASK, { provider: sp.provider, onLlmResult: (e) => events.push(e) }, { count: 2 });
-    // the plan call must be visible to the gate (the Family-B meter gap, now closed)
-    assert.ok(events.some(e => e.kind === 'plan'), 'the Planner decomposition call must forward usage (kind:plan)');
-    // mutation check: it is a REAL forwarded usage, not an empty placeholder
-    const plan = events.find(e => e.kind === 'plan');
-    assert.ok(plan.usage && typeof plan.usage.inputTokens === 'number', 'plan event carries real usage');
-  });
-
-  it('pre-wave gate checkpoint: ctx.policy is consulted with "recurse_fanout" BEFORE any worker runs', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const seen = [];
-    const policy = (tool) => { seen.push(tool); return true; };
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 3 });
-    assert.ok(seen.includes('recurse_fanout'), 'the fan-out width must be offered to the gate pre-wave');
-    assert.equal(out.receipts.spawned.length, 3, 'an allow verdict lets the wave run');
-  });
-
-  it('pre-wave HaltError halts BEFORE the worker burst — clean incomplete, zero slices spawned (RC-9)', async () => {
-    let workerRan = false;
-    const sp = scriptedProvider((messages) => {
-      if (isPlanner(messages)) return { text: JSON.stringify([0, 1, 2].map(i => ({ id: `s${i}`, action: `SLICE ${i}: count`, dependsOn: [] }))) };
-      if (isVerify(messages)) return { text: SATISFIED };
-      workerRan = true; // a slice worker actually executed — must NOT happen if the pre-wave halt fired
-      return { text: 'RESULT' };
-    });
-    // a gate that halts on the pre-wave fan-out commitment (the ≥80%/budget pause surfaced as a halt)
-    const policy = (tool) => { if (tool === 'recurse_fanout') throw new HaltError('budget near cap', { rule: 'budget' }); return true; };
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 3 });
-    assert.equal(out.incomplete, true, 'a pre-wave halt is a clean incomplete');
-    assert.equal(out.receipts.halted, true);
-    assert.equal(out.receipts.spawned.length, 0, 'NO slices spawned — the burst was bounded to zero');
-    assert.equal(workerRan, false, 'no worker executed after the pre-wave halt');
-  });
-
-  it('a plain policy DENY on "recurse_fanout" is advisory — it does NOT break the fan-out (allowlist safety)', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    // an allowlist-style policy that denies unknown tools must not accidentally kill the wave
-    const policy = (tool) => (tool === 'recurse_fanout' ? 'denied: unknown tool' : true);
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 2 });
-    assert.equal(out.incomplete, undefined, 'a non-halt deny must not block the wave');
-    assert.equal(out.receipts.spawned.length, 2, 'the wave still ran (only HaltError is load-bearing)');
-  });
-
-  it('W1: children do NOT verify against the parent contract — only the TOP node grades the merged answer', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2, contract: 'the WHOLE task must be complete' });
-    assert.ok(out.verdict, 'the top node verifies the merged result against the contract');
-    for (const child of out.receipts.spawned) {
-      assert.equal(child.verdict, null, 'a slice must NOT be graded against the whole-task definition-of-done');
-    }
-    // mutation check: EXACTLY ONE verify happened (the top), not one-per-slice — neuter forChild's
-    // contract-strip and this becomes 3 (2 slices + top), failing.
-    const verifyCalls = sp.calls.filter(c => isVerify(c.messages)).length;
-    assert.equal(verifyCalls, 1, 'exactly one grader call (top only), not one wasted call per slice');
-  });
-});
-
-describe('recurse — router (assessComplexity as a hint, not a gate)', () => {
-  it('simple task → single-shot: NO spawn tool is ever offered (§4.2 cost rail)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'here are the files' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
-    assert.equal(out.result, 'here are the files');
-    assert.equal(out.incomplete, undefined);
-    // mutation check: a spawn tool on a simple task would mean the router gated wrong
-    assert.ok(sp.calls.every(c => !c.tools.includes('spawn_child')), 'simple task must not be offered spawn_child');
-  });
-
-  it('critical task → forces adversarial verify even with NO contract (the safety floor)', async () => {
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'breach contained' }));
-    const out = await recurse(CRITICAL_TASK, { provider: sp.provider });
-    assert.ok(out.verdict, 'critical task must run the verifier');
-    assert.equal(out.verdict.pass, true);
-    assert.equal(out.receipts.critical, true);
-    // mutation check: the verifier really ran in a SEPARATE context (the grader system prompt), not the worker's
-    const verifyCall = sp.calls.find(c => isVerify(c.messages));
-    assert.ok(verifyCall, 'a verify call must exist');
-    assert.ok(!systemOf(verifyCall.messages).includes(DECOMPOSITION_POLICY), 'verifier must NOT share the worker system prompt');
-  });
-
-  it('a non-critical, no-contract task does NOT run the verifier (verify only when asked or critical)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'done' }));
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 0 }); // maxDepth 0 → no spawn, single pass
-    assert.equal(out.verdict, null);
-    assert.ok(sp.calls.every(c => !isVerify(c.messages)), 'no verify call expected');
-  });
-});
-
-// BA-13 — recurse INHERITS the Loop's terminal-signal fix for free. Its worker path branches on
-// `out.error` (the :527 catch-all), never on `out.stopReason`. Before the Loop error-tagged refusal, a
-// safety-refused sub-task returned out.error=null and was scored CONVERGED (result:'') up the tree. Once
-// the Loop returns error:'refusal', the SAME catch-all turns it into an honest {incomplete} — no recurse
-// change. An inline stub is used because scriptedProvider's wrapper does not thread stopReason.
-describe('recurse — BA-13: a refused worker is honest-incomplete, not silently converged', () => {
-  const stub = (stopReason, text) => ({
-    model: 'stub-1',
-    async generate() { return { text, toolCalls: [], usage: { inputTokens: 10, outputTokens: 0 }, stopReason }; },
-  });
-
-  it('refusal → {incomplete}, NOT a converged empty result (was result:"")', async () => {
-    const out = await recurse('say the word hello', { provider: stub('refusal', '') }, { maxDepth: 1 });
-    assert.equal(out.incomplete, true, 'a safety refusal must not score as convergence');
-    assert.equal(out.result, undefined, 'and must not surface a fake converged result');
-  });
-
-  it('context_exceeded → {incomplete} as well', async () => {
-    const out = await recurse('say the word hello', { provider: stub('context_exceeded', 'partial') }, { maxDepth: 1 });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.best, 'partial', 'BA-5: the partial worker text is preserved as best');
-  });
-
-  // NEGATIVE CONTROL: a genuine clean finish still converges — the fix must not turn every worker incomplete.
-  it('NEGATIVE CONTROL: a clean end_turn worker still converges', async () => {
-    const out = await recurse('say the word hello', { provider: stub('end_turn', 'hello') }, { maxDepth: 1 });
-    assert.equal(out.incomplete, undefined, 'a real finish must still converge');
-    assert.equal(out.result, 'hello');
-  });
-});
-
-describe('recurse — Family A decomposition (NB-4 spawn A-tool)', () => {
-  it('the model spawns a child via the A-tool; the parent synthesizes the returned result', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider });
-    assert.match(out.result, /^PARENT_SYNTHESIS\[/);
-    assert.equal(out.receipts.spawned.length, 1, 'one child spawned');
-    assert.equal(out.receipts.spawned[0].depth, 1, 'child filed at depth 1 (lineage, RC-10)');
-    // the child's RESULT crossed back into the synthesis; its SCRATCH did not
-    assert.match(out.result, /CHILD_RESULT/);
-  });
-
-  it('RC-2 copy-on-return IN: the child worker never sees the parent task (fresh window)', async () => {
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'isolated subtask body' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider });
-    // child calls = those whose last user message is the subtask, not the parent task
-    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('isolated subtask body'));
-    assert.ok(childCalls.length >= 1, 'the child worker ran');
-    for (const c of childCalls) {
-      const blob = JSON.stringify(c.messages);
-      assert.ok(!blob.includes('notification pipeline'), 'parent task text must NOT leak into the child window');
-    }
-  });
-
-  it('RC-2 copy-on-return OUT: only the child RESULT crosses back — its scratch never enters the parent transcript', async () => {
-    // The child does an internal tool step (scratch = CHILD_SCRATCH_SECRET) then answers (CHILD_RESULT_CLEAN).
-    // Only the answer may cross the boundary. Tokens are newline-free so substring checks genuinely bite.
-    const scratchTool = { name: 'note', description: 'scratch', parameters: { type: 'object', properties: {} }, execute: async () => 'CHILD_SCRATCH_SECRET' };
-    const handler = (messages, tools) => {
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-      const gotTool = messages.some(m => m.role === 'tool');
-      if (hasSpawn && !gotTool) return { toolCalls: [{ id: 'c1', name: 'spawn_child', arguments: { subtask: 'child subtask body' } }] };
-      if (hasSpawn && gotTool) {
-        const t = messages.filter(m => m.role === 'tool').map(m => m.content).join('|');
-        return { text: `PARENT_SYNTHESIS[${t}]` };
-      }
-      // the child (no spawn at maxDepth=1): scratch via the note tool, THEN answer
-      if (!gotTool) return { toolCalls: [{ id: 'n1', name: 'note', arguments: {} }] };
-      return { text: 'CHILD_RESULT_CLEAN' };
-    };
-    const sp = scriptedProvider(handler);
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 1, tools: [scratchTool] });
-    assert.match(out.result, /CHILD_RESULT_CLEAN/);
-    const parentSynthRound = sp.calls.find(c => c.tools.includes('spawn_child') && c.messages.some(m => m.role === 'tool'));
-    assert.ok(parentSynthRound, 'a parent synthesis round exists');
-    const blob = JSON.stringify(parentSynthRound.messages);
-    assert.ok(blob.includes('CHILD_RESULT_CLEAN'), 'child RESULT crosses back into the parent transcript');
-    // mutation check: the child's private scratch must NOT leak up (would fail if execute returned the transcript)
-    assert.ok(!blob.includes('CHILD_SCRATCH_SECRET'), 'child scratch must NOT leak into the parent transcript');
-  });
-});
-
-describe('recurse — worker persona seam (Gap 3 / 0.21.0)', () => {
-  const PERSONA = 'PERSONA::senior-security-engineer'; // newline-free + greppable so substring checks bite
-
-  it('opts.persona is PREPENDED to the top worker prompt and AUGMENTS (not replaces) the decomposition policy', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: PERSONA });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.ok(topCall, 'a top Family-A worker call exists');
-    const sys = systemOf(topCall.messages);
-    assert.ok(sys.includes(PERSONA), 'the persona is injected into the worker system prompt');
-    assert.ok(sys.includes(DECOMPOSITION_POLICY), 'the decomposition policy is STILL present (augment, not replace)');
-    // mutation: persona must come BEFORE the policy (prepend) so the worker reads its stance first
-    assert.ok(sys.indexOf(PERSONA) < sys.indexOf(DECOMPOSITION_POLICY), 'persona is prepended, not appended');
-  });
-
-  it('persona CARRIES DOWN to a spawned child (forChild preserves it — a durable stance, unlike contract/evaluate)', async () => {
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'child leaf body' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: PERSONA });
-    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('child leaf body'));
-    assert.ok(childCalls.length >= 1, 'the child worker ran');
-    // mutation: if forChild stripped persona, the child system would lack it
-    assert.ok(childCalls.every(c => systemOf(c.messages).includes(PERSONA)), 'the persona carries into the child window');
-  });
-
-  it('no persona ⇒ the worker prompt is byte-identical to the pre-0.21 default (backward-compatible)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.equal(systemOf(topCall.messages), DECOMPOSITION_POLICY + capabilityScrub(0, 3), 'default worker system = policy + scrub(0,3), no prefix');
-  });
-
-  it('a blank/whitespace persona is treated as ABSENT (no empty prefix added)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { persona: '   ' });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.equal(systemOf(topCall.messages), DECOMPOSITION_POLICY + capabilityScrub(0, 3), 'a blank persona adds nothing');
-  });
-
-  it('persona is NOT injected into the isolated verifier (the anti-sycophancy isolation, A1, holds)', async () => {
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'breach contained' }));
-    await recurse(CRITICAL_TASK, { provider: sp.provider }, { persona: PERSONA });
-    const verifyCall = sp.calls.find(c => isVerify(c.messages));
-    assert.ok(verifyCall, 'a verify call must exist (critical task forces it)');
-    assert.ok(!systemOf(verifyCall.messages).includes(PERSONA), 'the grader must NOT inherit the worker persona (isolation preserved)');
-  });
-});
-
-describe('recurse — working-context thread (BA-9 / relayfact F19)', () => {
-  const CONTEXT = 'CONTEXT::project-root=/abs/proj'; // newline-free + greppable so substring checks bite
-  const BLOCK = 'Working context (read-only):';
-
-  it('opts.context is PREPENDED to the top worker USER message as a Working-context block (so a worker can locate its artifact)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: CONTEXT });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.ok(topCall, 'a top Family-A worker call exists');
-    const user = lastUser(topCall.messages);
-    assert.ok(user.includes(BLOCK), 'the working-context block header is present on the worker task message');
-    assert.ok(user.includes(CONTEXT), 'the caller context string is present');
-    // mutation: the block must come BEFORE the task text (prepend), and the task itself must still be there
-    assert.ok(user.indexOf(CONTEXT) < user.indexOf(COMPLEX_TASK), 'context is prepended ahead of the task');
-    assert.ok(user.includes(COMPLEX_TASK), 'the original task is preserved, not replaced');
-  });
-
-  it('context CARRIES DOWN to a spawned child (forChild preserves it — durable run-state, like persona)', async () => {
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'child leaf body' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: CONTEXT });
-    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('child leaf body'));
-    assert.ok(childCalls.length >= 1, 'the child worker ran');
-    // mutation: if forChild stripped context, the child task message would lack it
-    assert.ok(childCalls.every(c => lastUser(c.messages).includes(CONTEXT)), 'the context carries into the child window');
-  });
-
-  it('no context ⇒ the worker task message is byte-identical to the task (backward-compatible)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.equal(lastUser(topCall.messages), COMPLEX_TASK, 'default task message = the raw task, no block');
-  });
-
-  it('a blank/whitespace context is treated as ABSENT (no empty block added)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { context: '   ' });
-    const topCall = sp.calls.find(c => c.tools.includes('spawn_child'));
-    assert.equal(lastUser(topCall.messages), COMPLEX_TASK, 'a blank context adds nothing');
-  });
-
-  it('Family-B: context is forwarded to the Planner as `info` so the slices it writes are path-aware', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { count: 2, context: CONTEXT });
-    const planner = sp.calls.find(c => isPlanner(c.messages));
-    assert.ok(planner, 'a planning call was made');
-    // planner.js pushes the info as a `Context: <info>` user message — the context must reach it
-    assert.ok(JSON.stringify(planner.messages).includes(CONTEXT), 'the planner sees the working-context as info');
-  });
-
-  it('context IS shown to the isolated verifier (neutral facts, NOT a stance — unlike persona)', async () => {
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'breach contained' }));
-    await recurse(CRITICAL_TASK, { provider: sp.provider }, { context: CONTEXT });
-    const verifyCall = sp.calls.find(c => isVerify(c.messages));
-    assert.ok(verifyCall, 'a verify call must exist (critical task forces it)');
-    // mutation: the grader's GOAL must carry the context (an agentic critic needs the path to exercise the artifact)
-    assert.ok(JSON.stringify(verifyCall.messages).includes(CONTEXT), 'the verifier sees the working-context');
-  });
-});
-
-describe('recurse — leaf retry-with-sensor (BA-8 / refineLeaf, relayfact F17)', () => {
-  // A leaf worker that returns a BROKEN answer first and a FIXED one once it sees the fed-back gap (unless
-  // recoverOnRetry:false → always broken). The retry is detected by the injected "previous attempt FAILED" text.
-  const refineLeafHandler = ({ recoverOnRetry = true } = {}) => (messages) => {
-    const user = lastUser(messages);
-    if (recoverOnRetry && user.includes('previous attempt FAILED')) return { text: 'here is the FIXED answer' };
-    return { text: 'broken answer' };
-  };
-  // Deterministic sensor (a Verdict): passes only when the result contains FIXED; greppable critique.
-  const PASS_ON_FIXED = (result) => (String(result).includes('FIXED')
-    ? { status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] }
-    : { status: 'needs_revision', pass: false, score: 0, critique: 'GAP::must contain FIXED', suggestions: [] });
-  const ALWAYS_PASS = () => ({ status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] });
-
-  it('a definite leaf with a failing sensor RETRIES and recovers (fresh feedback)', async () => {
-    const sp = scriptedProvider(refineLeafHandler());
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    assert.ok(String(out.result).includes('FIXED'), 'the recovered result is returned');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor finally passed');
-    assert.ok(out.receipts.refineLeaf.iterations >= 2, 'it took at least one retry to recover');
-  });
-
-  it('retry temperature ESCALATES 0.2→0.7→1.0 (the live-validated requirement)', async () => {
-    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false })); // always broken → exhausts iterations
-    await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    const temps = sp.calls.map(c => c.options && c.options.temperature);
-    assert.deepEqual(temps.slice(0, 3), [0.2, 0.7, 1.0], 'each retry raises the temperature');
-  });
-
-  it('the sensor GAP is fed FRESH into the retry message (anti-anchoring, D6/A1)', async () => {
-    const sp = scriptedProvider(refineLeafHandler());
-    await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    const retry = sp.calls.find(c => lastUser(c.messages).includes('previous attempt FAILED'));
-    assert.ok(retry, 'a retry attempt ran');
-    assert.ok(lastUser(retry.messages).includes('GAP::must contain FIXED'), 'the sensor critique is carried into the retry');
-  });
-
-  it('honest non-recovery: a never-passing sensor returns the result with passed=false (never a faked pass)', async () => {
-    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 2 } });
-    assert.equal(out.receipts.refineLeaf.passed, false, 'non-recovery is reported, not hidden');
-    assert.equal(out.receipts.refineLeaf.iterations, 2, 'bounded by maxIterations');
-    assert.equal(out.verdict.pass, false, 'the sensor failure surfaces as the node verdict');
-    assert.equal(out.incomplete, undefined, 'a sensor miss is not a halt/dead-worker incomplete — a result exists');
-  });
-
-  it('receipts.tokens SUMS spend across all refine attempts, not just the last', async () => {
-    // Same scripted per-call usage; a 3-attempt leaf must report 3× a 1-attempt leaf's tokens (last-only would tie).
-    const one = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
-    const a = await recurse(SIMPLE_TASK, { provider: one.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 1 } });
-    const three = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
-    const b = await recurse(SIMPLE_TASK, { provider: three.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
-    assert.equal(a.receipts.refineLeaf.iterations, 1);
-    assert.equal(b.receipts.refineLeaf.iterations, 3);
-    assert.ok(a.receipts.tokens.input > 0, 'a single attempt recorded some input tokens');
-    assert.equal(b.receipts.tokens.input, a.receipts.tokens.input * 3, 'three attempts sum to 3× one attempt (summed, not last-only)');
-    assert.equal(b.receipts.tokens.output, a.receipts.tokens.output * 3, 'output tokens sum too');
-  });
-
-  it('does NOT engage on a node that can spawn (an orchestrator is not a leaf)', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { refineLeaf: { sensor: ALWAYS_PASS } });
-    assert.equal(out.receipts.refineLeaf, undefined, 'the spawning top node is not refined');
-    assert.ok(out.receipts.spawned.length >= 1, 'it still decomposed normally');
-  });
-
-  // BA-10: on a temperature-fixed model the provider drops the escalating temperature and the leaf runs at
-  // the model's default. The seam must (a) still run — sonnet's whole leaf-refine collapsed to `incomplete`
-  // before the provider fix — and (b) report the EFFECTIVE temps (null = dropped), never claim the ignored ones.
-  const tempFixedHandler = ({ recoverOnRetry = true } = {}) => (messages, tools, options) => {
-    const user = lastUser(messages);
-    // On a temperature-fixed model the ADAPTIVE buffer engages (BA-14: escalation is inert, so the buffer is the
-    // lever), so a recovering worker sees the rejected-attempt ledger; pre-BA-14 it saw the plain critique. Accept
-    // either marker so the stub models a real worker that recovers from whichever feedback shape it's handed.
-    const recovered = recoverOnRetry && (user.includes('previous attempt FAILED') || user.includes('already tried the following'));
-    const text = recovered ? 'here is the FIXED answer' : 'broken answer';
-    // Simulate a model that rejected the requested temperature and ran at its default (provider dropped it).
-    return { text, temperatureDropped: options && options.temperature != null };
-  };
-
-  it('a temperature-fixed model still runs the leaf loop and the ADAPTIVE buffer engages (BA-10 + BA-14)', async () => {
-    const sp = scriptedProvider(tempFixedHandler());
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    assert.equal(out.incomplete, undefined, 'the leaf ran — the sensor was reached (pre-fix this was incomplete)');
-    assert.ok(String(out.result).includes('FIXED'), 'it recovered via the fed-back gap');
-    assert.equal(out.receipts.refineLeaf.passed, true);
-    // BA-14: a dropped temperature (temp-fixed model) is exactly the adaptive trigger — the buffer must engage,
-    // since escalation is inert here and the buffer is the sole recovery lever (poc/ba14: flat-temp 50%→100%).
-    assert.equal(out.receipts.refineLeaf.rejectedBuffer, true, 'the rejected-attempt buffer engaged on the temp-fixed model');
-  });
-
-  it('honest receipt: a dropped temperature is recorded as null (not the ignored requested temp)', async () => {
-    const sp = scriptedProvider(tempFixedHandler({ recoverOnRetry: false })); // exhaust so we see every attempt
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
-    // The model requested 0.2/0.7/1.0 but ran at default each time → the receipt must NOT claim [0.2,0.7,1.0].
-    assert.deepEqual(out.receipts.refineLeaf.temperatures, [null, null, null], 'effective temps: every attempt dropped');
-  });
-
-  it('a temperature-ACCEPTING model records the requested temps + adaptive buffer stays OFF (control)', async () => {
-    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false })); // never sets temperatureDropped
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 3 } });
-    assert.deepEqual(out.receipts.refineLeaf.temperatures, [0.2, 0.7, 1.0], 'accepting model → receipt is the requested escalation, byte-identical to before');
-    // BA-14 invariant: adaptive default must NOT touch the temperature-accepting path — escalation (BA-8) stands,
-    // the buffer never engages (ba14: it's redundant with escalation there, B==A). Zero behavior change.
-    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'adaptive default: buffer stays off when temperature is honored');
-    const buffered = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
-    assert.ok(!buffered, 'no rejected-attempt ledger was ever sent on a temp-accepting model under the default');
-  });
-
-  // A worker that recovers only once it SEES its prior failed attempt surfaced back (the BA-14 buffer prompt).
-  const bufferAwareHandler = () => (messages) => ({
-    text: lastUser(messages).includes('already tried the following') ? 'here is the FIXED answer' : 'broken answer',
-  });
-
-  it('BA-14: rejectedBuffer:true forces the buffer on a temp-ACCEPTING model and HOLDS temperature flat (ba14b)', async () => {
-    const sp = scriptedProvider(bufferAwareHandler());
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, rejectedBuffer: true } });
-    const retry = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
-    assert.ok(retry, 'the rejected-attempt buffer was injected even though temperature was honored (forced on)');
-    assert.ok(lastUser(retry.messages).includes('broken answer'), 'the prior FAILED attempt is surfaced VERBATIM in the ledger');
-    assert.equal(out.receipts.refineLeaf.rejectedBuffer, true, 'the receipt records the buffer engaged');
-    // ba14b: temperature is antagonistic to the buffer (100→70→50% across 0.2/0.7/1.0) → held flat at temps[0],
-    // NEVER escalated to 0.7. This is the load-bearing difference from the BA-8 escalation path.
-    const temps = sp.calls.map(c => c.options && c.options.temperature);
-    assert.deepEqual(temps.slice(0, 2), [0.2, 0.2], 'buffer holds temperature flat-low, not escalating');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'recovered via the buffer');
-  });
-
-  it('BA-14: rejectedBuffer:false keeps pure BA-8 escalation even on a temperature-fixed model', async () => {
-    const sp = scriptedProvider(tempFixedHandler()); // temp dropped → adaptive WOULD engage, but forced off
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED, rejectedBuffer: false } });
-    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'forced off — buffer never engaged despite the dropped temp');
-    const buffered = sp.calls.find(c => lastUser(c.messages).includes('already tried the following'));
-    assert.ok(!buffered, 'no buffer prompt was sent; the worker recovered via the plain critique');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'still recovers via the fed-back critique (BA-8 path intact)');
-  });
-
-  it('the refineLeaf receipt rides the INCOMPLETE (fault) path too — not just the clean pass (BA-10 invariant)', async () => {
-    // The leaf runs one attempt (broken), then the provider FAULTS on the retry (the leaf Loop, throwOnError:false,
-    // surfaces it as error:<msg> → recurseRefineLeaf rethrows → the catch → {incomplete}). Pre-fix the catch
-    // returned {incomplete} with NO refineLeaf receipt, silently dropping the attempts that DID spend + whether the
-    // buffer engaged. The receipt must ride this terminating path too (same invariant as BA-10's temperatureDropped):
-    // passed:false, the attempts made, the effective temps, buffer engagement.
-    let call = 0;
-    const sp = scriptedProvider(() => {
-      call += 1;
-      if (call >= 2) throw new Error('provider exploded mid-retry');
-      return { text: 'broken answer' };
-    });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    assert.equal(out.incomplete, true, 'a mid-loop provider fault is a clean incomplete');
-    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt is present on the incomplete path (was undefined pre-fix)');
-    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery — never a faked pass');
-    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'it reports the attempts that ran before the fault');
-    assert.equal(out.receipts.refineLeaf.rejectedBuffer, false, 'the buffer never engaged on this temp-accepting run');
-    assert.ok(Array.isArray(out.receipts.refineLeaf.temperatures), 'the effective-temps array rides the incomplete path');
-  });
-
-  it('a governance HALT mid-refine is a clean incomplete with node.halted + an honest receipt (BA-10 invariant)', async () => {
-    // With the loop.js provider-HaltError guard, a leaf Loop surfaces a provider-thrown HaltError as
-    // error:'halt:<rule>' → recurseRefineLeaf rethrows → the HaltError catch branch (halted:true). The receipt
-    // must still ride this path — distinct from the plain-fault path above, which lands in the generic branch.
-    let call = 0;
-    const sp = scriptedProvider(() => {
-      call += 1;
-      if (call >= 2) throw new HaltError('leaf halted by governance', { rule: 'budget.maxCostUsd' });
-      return { text: 'broken answer' };
-    });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    assert.equal(out.incomplete, true, 'a governance halt is a clean incomplete');
-    assert.equal(out.receipts.halted, true, 'the node records the governance halt (not a generic fault)');
-    assert.ok(out.receipts.refineLeaf, 'the refineLeaf receipt rides the halt branch too');
-    assert.equal(out.receipts.refineLeaf.passed, false, 'honest non-recovery');
-    assert.ok(out.receipts.refineLeaf.iterations >= 1, 'reports the attempts made before the halt');
-  });
-
-  it('refineLeaf is absent ⇒ a leaf is a single pass (backward-compatible)', async () => {
-    const sp = scriptedProvider(refineLeafHandler());
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
-    assert.equal(out.receipts.refineLeaf, undefined, 'no refine bookkeeping without the opt-in');
-    assert.equal(out.result, 'broken answer', 'the single-shot (unrefined) answer stands');
-  });
-
-  it('a governance HaltError during a refine attempt → clean incomplete (RC-9), never a thrown run', async () => {
-    // Realistic gate path: bareguard's budget halt surfaces via onLlmResult throwing HaltError (the BA1 path),
-    // which the Loop converts to out.error 'halt:<rule>' → the refine attempt re-throws → clean incomplete.
-    const sp = scriptedProvider(refineLeafHandler({ recoverOnRetry: false }));
-    const ctx = { provider: sp.provider, onLlmResult: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } };
-    const out = await recurse(SIMPLE_TASK, ctx, { refineLeaf: { sensor: PASS_ON_FIXED } });
-    assert.equal(out.incomplete, true, 'a halt mid-refine is an honest incomplete');
-    assert.equal(out.receipts.halted, true, 'the halt is recorded on the node');
-  });
-});
-
-describe('recurse — broken-sensor blocker (BA-15, "a broken arbiter is named, never coerced")', () => {
-  // Pre-BA-15 pathologies these tests are mutated against: (a) a sensor THROW fell through to the bare
-  // {incomplete, best:null} — byte-identical to a provider death, and the model's work was destroyed; (b) a
-  // MALFORMED verdict ({}, 'ok', {ok:true}) read as pass:false with critique:null, so refine burned every
-  // remaining attempt re-sending the PLAIN task (zero feedback), then the run surfaced as an honest-looking
-  // model non-recovery — or worse, a converged-shaped {result, verdict:{}}.
-  const OK = () => ({ status: 'satisfied', pass: true, score: 1, critique: '', suggestions: [] });
-
-  it('a THROWING sensor → labeled {incomplete, blocker:\'broken-sensor\'} with the detail, work preserved (BA-5)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'the model actually did the work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => { throw new Error('ENOENT: vitest not found'); } },
-    });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.blocker, 'broken-sensor', 'the faulty arbiter is NAMED (pre-fix: unlabeled, read as model failure)');
-    assert.equal(out.receipts.blocker, 'broken-sensor', 'receipts mirror the blocker (BA-11 pattern)');
-    assert.match(out.receipts.blockerDetail, /sensor threw: ENOENT: vitest not found/, 'the detail says WHAT broke');
-    assert.equal(out.best, 'the model actually did the work', 'best preserves the unjudged attempt — the sensor broke, not the model');
-    assert.equal(sp.calls.length, 1, 'stops at the first broken close');
-  });
-
-  it('a MALFORMED verdict stops the loop at the FIRST broken close — attempts are not burned with zero feedback', async () => {
-    const sp = scriptedProvider(() => ({ text: 'attempt' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => ({}), maxIterations: 3 },
-    });
-    assert.equal(out.blocker, 'broken-sensor', 'a garbage verdict is named, never coerced to pass:false');
-    assert.match(out.receipts.blockerDetail, /neither a usable `pass` nor a valid `status`/);
-    assert.equal(sp.calls.length, 1, 'pre-fix: 3 attempts burned, every retry a feedback-free re-send of the plain task');
-    assert.equal(out.result, undefined, 'never a converged-shaped return riding a garbage verdict');
-  });
-
-  it('malformed shapes are each caught: undefined, string, array, {ok:true}', async () => {
-    for (const bad of [() => undefined, () => 'ok', () => ['pass'], () => ({ ok: true })]) {
-      const sp = scriptedProvider(() => ({ text: 'attempt' }));
-      const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: bad } });
-      assert.equal(out.blocker, 'broken-sensor', `sensor ${bad} must be flagged`);
-      assert.equal(sp.calls.length, 1, 'one attempt only');
-    }
-  });
-
-  it('a genuine PROVIDER fault stays distinguishable — incomplete WITHOUT the broken-sensor label', async () => {
-    const sp = scriptedProvider(() => { throw new Error('connection reset by peer'); });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: OK } });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.blocker, undefined, 'a model/provider fault must NOT be pinned on the sensor');
-  });
-
-  it('a HaltError thrown by the sensor stays a clean governance halt, never relabeled broken-sensor', async () => {
-    const sp = scriptedProvider(() => ({ text: 'attempt' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } },
-    });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true, 'governance halt recorded');
-    assert.equal(out.blocker, undefined, 'a governance halt is not a sensor fault');
-  });
-
-  it('well-formed verdict shapes are untouched: minimal {pass} retries with critique; {status:\'failed\'} is terminal', async () => {
-    // Minimal {pass:false, critique} (no status) must still drive a retry carrying the critique — the
-    // validator accepts BOTH documented shapes, not just the full Verdict.
-    let n = 0;
-    const sp = scriptedProvider(() => ({ text: `attempt_${++n}` }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: (r) => (String(r).includes('_2') ? { pass: true } : { pass: false, critique: 'NEEDS_V2' }), maxIterations: 3 },
-    });
-    assert.equal(out.blocker, undefined, 'minimal {pass} shape is valid');
-    assert.ok(lastUser(sp.calls[1].messages).includes('NEEDS_V2'), 'the critique still reaches the retry');
-    assert.equal(out.receipts.refineLeaf.passed, true);
-
-    const sp2 = scriptedProvider(() => ({ text: 'attempt' }));
-    const out2 = await recurse(SIMPLE_TASK, { provider: sp2.provider }, {
-      refineLeaf: { sensor: () => ({ status: 'failed', critique: 'wrong approach' }) },
-    });
-    assert.equal(out2.blocker, undefined, 'status-only shape is valid');
-    assert.equal(sp2.calls.length, 1, 'terminal failed still stops after one attempt');
-    assert.equal(out2.receipts.refineLeaf.passed, false, 'honest non-pass, not a blocker');
-  });
-
-  it('a status-only {status:\'satisfied\'} verdict STOPS the leaf and reports passed — not burned as never-passed', async () => {
-    // The advertised contract lets a sensor return {status:'satisfied'} (no boolean pass). refine.js stops on
-    // verdict.pass, so pre-fix this ran all maxIterations (pass undefined → never stops) and reported
-    // passed:false — a satisfied close mislabeled as non-recovery + 3× the token spend. runArbiter now derives
-    // pass = status==='satisfied', so it stops on the first attempt and reports passed:true.
-    let n = 0;
-    const sp = scriptedProvider(() => ({ text: `attempt_${++n}` }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => ({ status: 'satisfied' }), maxIterations: 3 },
-    });
-    assert.equal(out.blocker, undefined, 'a satisfied status-only verdict is valid, not a blocker');
-    assert.equal(sp.calls.length, 1, 'stops on the first satisfied close (pre-fix: burned all 3)');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'reported as passed (pre-fix: false — pass was undefined)');
-  });
-
-  it('the HaltError branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
-    // Pre-fix the HaltError / governance-deny / generic-fault branches returned best:null even though the leaf
-    // had produced work — a BA-5 violation, inconsistent with the plain-worker path (best: out.text). They now
-    // return lastAttemptText, matching the broken-sensor branch and the plain worker.
-    let call = 0;
-    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new HaltError('cap', { rule: 'budget' }); return { text: 'attempt-1 work' }; });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true);
-    assert.equal(out.best, 'attempt-1 work', 'a halt on the retry preserves attempt 1 (pre-fix: best:null)');
-  });
-
-  it('a FIRST-attempt halt still preserves that attempt\'s text (BA-5 capture-before-throw)', async () => {
-    // Review-caught regression in the previous fix: `lastAttemptText` was assigned AFTER the halt/error throws,
-    // so the attempt that actually terminated had its text discarded — best:null on a first-attempt halt. The
-    // earlier test only halted on attempt 2 (where a prior clean attempt had already populated it), so it
-    // passed while the single-attempt case was broken. The Loop returns its last non-empty text on every
-    // terminating path, so the capture must precede the throws.
-    const sp = scriptedProvider(() => ({ text: 'partial work' }));
-    const ctx = { provider: sp.provider, onLlmResult: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); } };
-    const out = await recurse(SIMPLE_TASK, ctx, { refineLeaf: { sensor: () => ({ pass: false, critique: 'x' }) } });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true);
-    assert.equal(out.best, 'partial work', 'the halting attempt\'s own text survives (pre-fix: null)');
-  });
-
-  it('a child\'s broken-sensor blocker propagates to the PARENT in a nested tree (BA-15 anti-laundering)', async () => {
-    // A parent aggregates a dead child into {incomplete, missingSlices}; pre-fix the child's blocker label was
-    // dropped there, so a top-level caller branching on result.blocker saw nothing and would debug the model
-    // instead of its own broken sensor — the laundering BA-15 exists to close, reintroduced one level up.
-    const sp = scriptedProvider(decomposingHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      maxDepth: 2,
-      refineLeaf: { sensor: () => { throw new Error('ENOENT: harness missing'); } },
-    });
-    assert.equal(out.incomplete, true, 'a broken sensor at the leaf makes the tree incomplete');
-    assert.equal(out.blocker, 'broken-sensor', 'the child\'s label reaches the top (pre-fix: undefined)');
-    // The parent's OWN `blocker` stays clear: it means "THIS node's arbiter broke", and the parent's never ran.
-    // Stamping the descendant's label onto every ancestor made the receipts tree accuse innocent nodes, so the
-    // inherited label rides `blockerFrom` (with `blockerTask` naming the culprit) instead.
-    assert.equal(out.receipts.blocker, undefined, 'the parent is not accused of its child\'s fault');
-    assert.equal(out.receipts.blockerFrom.blocker, 'broken-sensor', 'recorded on the parent as INHERITED');
-    assert.equal(typeof out.blockerTask, 'string', 'and the culprit subtask is named');
-  });
-
-  it('a verify-slot halt after a PASSING sensor does not clobber the refineLeaf receipt to passed:false', async () => {
-    // verifyOrBlock is awaited INSIDE the try, so a halt at the verify slot reaches the catch even though the
-    // refine loop already completed and wrote an honest passed:true receipt. Overwriting it would report a
-    // sensor that never closed when it did.
-    const sp = scriptedProvider(() => ({ text: 'FIXED answer' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: (r) => ({ pass: String(r).includes('FIXED') }) },
-      contract: 'must be fixed',
-      evaluate: () => { throw new HaltError('cap', { rule: 'budget' }); },
-    });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true, 'the governance halt is recorded');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor DID close — receipt preserved (pre-fix: false)');
-  });
-
-  it('the generic-fault branch preserves the model\'s last attempt as best (BA-5), not null', async () => {
-    let call = 0;
-    const sp = scriptedProvider(() => { call += 1; if (call >= 2) throw new Error('provider exploded'); return { text: 'attempt-1 work' }; });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: () => ({ pass: false, critique: 'retry' }) } });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.blocker, undefined, 'a plain provider fault is not a labeled blocker');
-    assert.equal(out.best, 'attempt-1 work', 'the fault branch preserves attempt 1 (pre-fix: best:null)');
-  });
-
-  it('the refineLeaf receipt rides the broken-sensor path (every-terminating-path invariant)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'attempt' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => { throw new Error('boom'); } },
-    });
-    assert.ok(out.receipts.refineLeaf, 'receipt present');
-    assert.equal(out.receipts.refineLeaf.passed, false);
-    assert.equal(out.receipts.refineLeaf.iterations, 1, 'records the attempt that ran before the broken close');
-  });
-
-  // ---- Verifier seam (same fault class at the verify slot: a caller opts.evaluate is an arbiter too).
-  // Pre-fix pathologies: a THROWING caller verifier CRASHED the whole run as an exception on the plain-worker
-  // path (and laundered to a bare {incomplete} under refineLeaf); a GARBAGE return rode a CONVERGED-shaped
-  // {result, verdict:{}} out. The default Evaluator rubric path is deliberately NOT labeled (well-formed by
-  // construction; its failures are provider-class faults) — narrowest guard.
-
-  it('a THROWING caller verifier (opts.evaluate) → labeled broken-verifier, work preserved, never a crash', async () => {
-    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      contract: 'must do the thing', evaluate: () => { throw new Error('rubric grader exploded'); },
-    });
-    assert.equal(out.incomplete, true, 'pre-fix this line was unreachable — recurse() threw');
-    assert.equal(out.blocker, 'broken-verifier', 'the faulty verifier is NAMED');
-    assert.match(out.receipts.blockerDetail, /evaluate threw: rubric grader exploded/);
-    assert.equal(out.best, 'the actual work', 'the unjudged result is preserved as best (BA-5)');
-  });
-
-  it('a GARBAGE caller verdict never rides out converged-shaped', async () => {
-    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      contract: 'must do the thing', evaluate: () => ({}),
-    });
-    assert.equal(out.blocker, 'broken-verifier', 'pre-fix: {result, verdict:{}} — a converged shape riding garbage');
-    assert.equal(out.result, undefined, 'no result field on the labeled incomplete');
-    assert.match(out.receipts.blockerDetail, /neither a usable `pass` nor a valid `status`/);
-  });
-
-  it('under refineLeaf a broken verifier is labeled broken-VERIFIER (distinct from broken-sensor)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: OK },
-      contract: 'must do the thing', evaluate: () => { throw new Error('grader dead'); },
-    });
-    assert.equal(out.blocker, 'broken-verifier', 'the label says WHICH arbiter broke (sensor passed, verifier died)');
-    assert.equal(out.best, 'the actual work', 'work preserved');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'the sensor receipt is honest — the leaf loop itself succeeded');
-  });
-
-  it('a verifier HaltError is a clean governance halt — the return await regression guard', async () => {
-    // verifyOrBlock is called as `return await ...` INSIDE each path's try: a bare `return <promise>` exits
-    // the try before settling, so the HaltError would escape recurse() as an uncaught throw (caught live by
-    // the POC's [E4] control arm). This test fails if the await is dropped.
-    const sp = scriptedProvider(() => ({ text: 'work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      contract: 'must do the thing', evaluate: () => { throw new HaltError('budget cap', { rule: 'budget.maxCostUsd' }); },
-    });
-    assert.equal(out.incomplete, true, 'a clean incomplete, not a thrown run');
-    assert.equal(out.receipts.halted, true, 'recorded as a governance halt');
-    assert.equal(out.blocker, undefined, 'never relabeled broken-verifier');
-  });
-
-  it('a well-formed FAILING verdict from opts.evaluate stays judged-and-failed — {result, verdict}, no blocker', async () => {
-    const sp = scriptedProvider(() => ({ text: 'the actual work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      contract: 'must do the thing', evaluate: () => ({ status: 'needs_revision', pass: false, score: 3, critique: 'gap', suggestions: [] }),
-    });
-    assert.equal(out.blocker, undefined);
-    assert.equal(out.result, 'the actual work', 'a judged failure still returns the result + verdict');
-    assert.equal(out.verdict.pass, false);
-  });
-
-  it('the broken-verifier label rides the FANOUT dispatch path too (one helper, five paths)', async () => {
-    const sp = scriptedProvider(fanoutHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      count: 2, evaluate: () => { throw new Error('grader dead on fanout'); },
-    });
-    assert.equal(out.blocker, 'broken-verifier', 'the fanout path labels a broken verifier identically');
-    assert.ok(out.best, 'the reduced slices are preserved as best');
-  });
-
-  // ---------------------------------------------------------------- round-3 review regressions
-  // Each of the following reproduces a defect the third review round found in BA-15's OWN fixes, validated
-  // against the pre-fix code by `poc/ba15-round3-validate.mjs` before being fixed here.
-
-  it('a PROTOTYPE-backed verdict keeps its status/critique (spread would erase accessor fields)', async () => {
-    // A class-instance verdict passes the shape check by reading `.status` through a getter, but an object
-    // spread copies OWN enumerable props only — so status/critique came out ERASED: the critique never reached
-    // the retry prompt (zero-feedback burn, the exact thing BA-15 exists to stop) and `verdict.status` read
-    // undefined to the caller. Regression-proof: revert to `{...v, pass}` and both asserts go red.
-    class V {
-      constructor(s, c) { this._s = s; this._c = c; }
-      get status() { return this._s; }
-      get critique() { return this._c; }
-    }
-    const sp = scriptedProvider(() => ({ text: 'the work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      contract: 'must do the thing', evaluate: () => new V('satisfied', 'looks good'),
-    });
-    assert.equal(out.verdict.status, 'satisfied', 'prototype getter survives normalization');
-    assert.equal(out.verdict.critique, 'looks good', 'the critique is not erased');
-    assert.equal(out.verdict.pass, true, 'and `pass` is still derived from the status');
-  });
-
-  it('a TRUTHY non-boolean `pass` is accepted, not hard-blocked as a faulty arbiter', async () => {
-    // `{pass: 1}` is a long-standing yes/no convention and `refine` has always branched on truthiness, so a
-    // strict-boolean gate silently flipped previously-CONVERGING adopter sensors to a permanent first-attempt
-    // block. BA-15's job is a verdict with NO usable signal — not one answering clearly in another dialect.
-    const sp = scriptedProvider(() => ({ text: 'attempt output' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => ({ pass: 1, critique: '' }), maxIterations: 3 },
-    });
-    assert.equal(out.blocker, undefined, 'a truthy pass is a real verdict, not a broken arbiter');
-    assert.equal(out.incomplete, undefined, 'the leaf converges as it did before BA-15');
-    assert.equal(out.receipts.refineLeaf.passed, true, 'and is recorded as an honest pass');
-  });
-
-  it('a NON-ERROR throw still yields an actionable blockerDetail (never [object Object])', async () => {
-    const sp = scriptedProvider(() => ({ text: 'work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => { throw { code: 'ENOENT', path: '/usr/bin/vitest' }; } },
-    });
-    assert.equal(out.blocker, 'broken-sensor');
-    assert.doesNotMatch(out.receipts.blockerDetail, /\[object Object\]/, 'the detail must identify something');
-    assert.match(out.receipts.blockerDetail, /ENOENT/, 'the thrown value is described');
-  });
-
-  it('blockerDetail is BOUNDED and does not dump the thrown object wholesale (audit-log safety)', async () => {
-    // A thrown non-Error is typically a spawn/exec RESULT carrying a full stdout buffer and an env snapshot.
-    // blockerDetail rides into `receipts`, which a wired gate serializes VERBATIM to a plaintext audit log —
-    // so a whole-object JSON dump writes caller secrets to disk (the F16/BA-1 leak class). Only conventional
-    // diagnostic fields are taken, clamped. Mutation-proof: restore `JSON.stringify(err)` and both go red.
-    const sp = scriptedProvider(() => ({ text: 'work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: {
-        sensor: () => { throw { code: 'ENOENT', stdout: 'x'.repeat(50000), env: { SECRET_TOKEN: 'sk-live-abc123' } }; },
-      },
-    });
-    assert.ok(out.receipts.blockerDetail.length < 400, 'the detail is bounded, never an unbounded buffer dump');
-    assert.doesNotMatch(out.receipts.blockerDetail, /sk-live-abc123/, 'caller secrets never reach the audit record');
-    assert.match(out.receipts.blockerDetail, /ENOENT/, 'while still naming the actual fault');
-  });
-
-  it('an UNREADABLE returned verdict is named as such, not reported as the sensor throwing', async () => {
-    // A sensor returning a Proxy whose accessors throw RETURNED NORMALLY — reporting "sensor threw" sends the
-    // operator hunting a `throw` that does not exist. NB the fault surfaces during the `await`'s own `.then`
-    // probe, so the two cases must be separated around the await, not just around the shape inspection.
-    const sp = scriptedProvider(() => ({ text: 'work' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      refineLeaf: { sensor: () => new Proxy({}, { get() { throw new Error('trap'); } }) },
-    });
-    assert.equal(out.blocker, 'broken-sensor');
-    assert.match(out.receipts.blockerDetail, /could not be read/, 'the fault is the RETURNED VALUE, not a throw');
-    assert.doesNotMatch(out.receipts.blockerDetail, /threw: trap/, 'must not accuse the sensor body');
-  });
-
-  it('a method-reference verifier does not hard-fail as a broken arbiter (receiver restored)', async () => {
-    // `const evaluate = opts.evaluate` DETACHED the method; the call had always been `opts.evaluate(...)`, so
-    // `this` was the OPTIONS object. Detached, `this` became undefined and the first `this.x` read THREW —
-    // flipping a working (if degraded) integration to a hard broken-verifier. Binding back to `opts` restores
-    // the prior behavior exactly. NOTE the honest limit that restores: `this` is the options object, never the
-    // grader instance, so a method depending on its own fields still reads undefined. A caller wanting its own
-    // receiver must bind (`evaluate: g.check.bind(g)`) — asserted below so the contract is not overstated.
-    class Grader {
-      constructor() { this.threshold = 0.5; }
-      // UNGUARDED on purpose: detached (`this === undefined`) this THROWS, which is the regression. Bound to
-      // `opts` it reads undefined and degrades to false — exactly the pre-BA-15 behavior being restored.
-      check() { return { pass: this.threshold > 0, critique: '' }; }
-    }
-    const sp = scriptedProvider(() => ({ text: 'work' }));
-    const g = new Grader();
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: g.check });
-    assert.equal(out.blocker, undefined, 'a method reference must not become a broken-verifier (pre-fix: it did)');
-    assert.equal(out.verdict.pass, false, 'degraded exactly as before: `this` is opts, so threshold is undefined');
-
-    const bound = await recurse(SIMPLE_TASK, { provider: scriptedProvider(() => ({ text: 'work' })).provider }, {
-      contract: 'c', evaluate: g.check.bind(g),
-    });
-    assert.equal(bound.verdict.pass, true, 'a caller-bound method sees its own fields — the documented way');
-  });
-
-  it('a HALT after a broken-sensor child still names the child\'s blocker (halt catch inherits too)', async () => {
-    // The halt branches skipped the inherit entirely, so a gate tripping AFTER the children ran (here: mid-
-    // synthesize) dropped the label — the caller read a governance problem where their own sensor had crashed.
-    const sp = scriptedProvider(decomposingHandler());
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      maxDepth: 2,
-      refineLeaf: { sensor: () => { throw new Error('child sensor boom'); } },
-      synthesize: () => { throw new HaltError('budget cap', { rule: 'budget' }); },
-    });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true, 'it really was a halt');
-    assert.equal(out.blocker, 'broken-sensor', 'the child\'s label survives the halt (pre-fix: undefined)');
-  });
-
-  it('the spawn boundary tells the parent a child was BLOCKED, not just incomplete', async () => {
-    // Collapsed to a bare `[incomplete]`, the parent model cannot tell "the model failed" from "the judge is
-    // broken", so it re-delegates the same subtask into the same broken sensor, burning a full leaf attempt
-    // each time — BA-15's own spend-burn, one level up.
-    const sp = scriptedProvider(decomposingHandler());
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      maxDepth: 2,
-      refineLeaf: { sensor: () => { throw new Error('child sensor boom'); } },
-    });
-    const toolResults = sp.calls.flatMap(c => c.messages.filter(m => m.role === 'tool').map(m => m.content));
-    const blocked = toolResults.find(t => typeof t === 'string' && t.includes('broken-sensor'));
-    assert.ok(blocked, 'the parent model is told the ARBITER broke, not merely that the child failed');
-    assert.match(blocked, /do NOT re-delegate/i, 'and is told retrying hits the same broken check');
-  });
-
-  it('a broken-sensor child OUTRANKS a governance-denied sibling, and the parent is not accused', async () => {
-    // Two rules that had NO test before: (a) broken-* wins over governance-deny (a fault in the CALLER's own
-    // code is more actionable than a gate decision); (b) the inherited label rides `blockerFrom`, never the
-    // parent's own `blocker`. Driven through the public API, not an exported internal.
-    //   slice 0 → spins on a denied tool  ⇒ governance-deny  (and is FIRST, so a naive single `find` picks it)
-    //   slice 1 → its sensor throws       ⇒ broken-sensor
-    // Mutation-proof for (a): collapse inheritedBlocker to one `find(c => c.incomplete && c.blocker)` and the
-    // first assert goes red (governance-deny wins on array order).
-    const editTool = { name: 'edit', description: 'edit a file', execute: async () => 'edited' };
-    const sp = scriptedProvider((messages, tools, options, i) => {
-      if (isPlanner(messages)) {
-        return { text: JSON.stringify([0, 1].map(j => ({ id: `s${j}`, action: `SLICE ${j}: count the alpha records`, dependsOn: [] }))) };
-      }
-      if (isVerify(messages)) return { text: SATISFIED };
-      // slice 0's worker keeps calling the denied tool → the Loop's deny-spin guard short-circuits it
-      if (lastUser(messages).includes('SLICE 0')) return { toolCalls: [{ id: 'e' + i, name: 'edit', arguments: { n: i } }] };
-      return { text: 'slice 1 output' };
-    });
-    const out = await recurse(COMPLEX_TASK, {
-      provider: sp.provider,
-      policy: (tool) => (tool === 'edit' ? '[deny: fs.writeScope] out of scope' : true),
-    }, {
-      count: 2,
-      tools: [editTool],
-      refineLeaf: { sensor: (_r, c) => { if (String(c.task).includes('SLICE 1')) throw new Error('slice-1 sensor boom'); return { pass: true }; } },
-    });
-
-    assert.equal(out.incomplete, true);
-    assert.equal(out.blocker, 'broken-sensor', 'broken-sensor outranks the FIRST-listed governance-deny sibling');
-    assert.match(out.blockerTask, /SLICE 1/, 'and names WHICH sub-task broke');
-    assert.equal(out.receipts.blocker, undefined, 'the parent is not accused of its child\'s fault');
-    assert.equal(out.receipts.blockerFrom.blocker, 'broken-sensor', 'the inherited label is recorded separately');
-  });
-});
-
-describe('recurse — topology knob & capability-scrub (RC-11 / RC-12 / NB-4)', () => {
-  it('RC-11: maxDepth=1 ⇒ flat fan-out — the child is offered NO spawn tool (no nesting)', async () => {
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'leaf subtask' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 1 });
-    const childCalls = sp.calls.filter(c => lastUser(c.messages).includes('leaf subtask'));
-    assert.ok(childCalls.length >= 1, 'child ran');
-    assert.ok(childCalls.every(c => !c.tools.includes('spawn_child')), 'at maxDepth=1 a depth-1 child must NOT get spawn_child');
-  });
-
-  it('RC-12: a depth-1 child gets the conservative scrub prompt and a tool set ⊆ its parent\'s', async () => {
-    const handleTool = { name: 'recall', description: 'pull a slice', parameters: { type: 'object', properties: {} }, execute: async () => 'slice' };
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'scrubbed subtask' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 2, tools: [handleTool] });
-    const parentCall = sp.calls.find(c => lastUser(c.messages).includes('notification pipeline'));
-    const childCall = sp.calls.find(c => lastUser(c.messages).includes('scrubbed subtask'));
-    assert.ok(parentCall && childCall);
-    // prompt scrub: the depth-1 child is told to prefer direct action
-    assert.match(systemOf(childCall.messages), /PREFER DIRECT ACTION/);
-    assert.ok(!/PREFER DIRECT ACTION/.test(systemOf(parentCall.messages)), 'the depth-0 parent is not scrubbed');
-    // tool monotonicity: child tools ⊆ parent tools
-    const parentTools = new Set(parentCall.tools);
-    assert.ok(childCall.tools.every(t => parentTools.has(t)), 'child tool set must be a subset of the parent\'s');
-    assert.ok(childCall.tools.includes('recall'), 'the pull/handle tool is still offered to the child');
-  });
-
-  it('RC-11/RC-12: at the cap (depth >= maxDepth) the child gets the DEEPEST-LEVEL prompt — withhold the tool AND tell it to stop (honest incomplete)', async () => {
-    // RC-11 above proves the tool is absent at the cap; this proves the PROMPT half fires too — a worker with
-    // no spawn tool must also be TOLD it cannot delegate, and to return an honest incomplete rather than guess.
-    const sp = scriptedProvider(decomposingHandler({ subtask: 'capped subtask body' }));
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 1 }); // depth-1 child sits AT the cap
-    const childCall = sp.calls.find(c => lastUser(c.messages).includes('capped subtask body'));
-    assert.ok(childCall, 'the depth-1 (capped) child ran');
-    const sys = systemOf(childCall.messages);
-    assert.match(sys, /deepest level/, 'the capped child is told it is the deepest level');
-    assert.match(sys, /CANNOT delegate/, 'the capped child is told it cannot delegate further');
-    assert.match(sys, /incomplete/, 'the capped child is told an honest incomplete is correct');
-    // mutation check: it must get the DEEPEST message, not the milder intermediate one
-    assert.ok(!/PREFER DIRECT ACTION/.test(sys), 'a capped child must NOT get the milder intermediate scrub');
-  });
-
-  it('RC-12 depth-aware: across 0→1→2 the scrub strengthens and the tool set is monotone (spawn dropped exactly at the cap)', async () => {
-    // A 3-level nesting (maxDepth=2): depth0 spawns → depth1 spawns → depth2 sits at the cap and answers direct.
-    // Proves the scrub is DEPTH-aware (none → "prefer direct" → "deepest") and the tool set contracts monotonically
-    // child ⊆ parent, with spawn_child present only BELOW the cap. The DEPTHn subtasks are deliberately COMPLEX-tier
-    // (so a below-cap child would WANT to spawn — assessComplexity gates `canSpawn`); only the cap stops depth-2.
-    const D1 = 'DEPTH1 design and implement the pipeline across the entire system';
-    const D2 = 'DEPTH2 design and implement the pipeline across the entire system';
-    const handleTool = { name: 'recall', description: 'pull a slice', parameters: { type: 'object', properties: {} }, execute: async () => 'slice' };
-    const handler = (messages, tools) => {
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-      const gotChild = messages.some(m => m.role === 'tool');
-      const user = lastUser(messages);
-      if (gotChild) return { text: `SYNTH[${messages.filter(m => m.role === 'tool').map(m => m.content).join('|')}]` };
-      if (hasSpawn) {
-        const next = user.includes('DEPTH1') ? D2 : D1;
-        return { toolCalls: [{ id: 'c1', name: 'spawn_child', arguments: { subtask: next } }] };
-      }
-      return { text: `LEAF(${user.slice(0, 18)})` };
-    };
-    const sp = scriptedProvider(handler);
-    await recurse(COMPLEX_TASK, { provider: sp.provider }, { maxDepth: 2, tools: [handleTool] });
-
-    const d0 = sp.calls.find(c => lastUser(c.messages).includes('notification pipeline') && c.tools.includes('spawn_child'));
-    const d1 = sp.calls.find(c => lastUser(c.messages).includes('DEPTH1') && c.tools.includes('spawn_child'));
-    const d2 = sp.calls.find(c => lastUser(c.messages).includes('DEPTH2'));
-    assert.ok(d0 && d1 && d2, 'all three depth levels ran (0→1→2 nesting)');
-
-    // prompt scrub strengthens with depth
-    assert.ok(!/PREFER DIRECT ACTION/.test(systemOf(d0.messages)) && !/deepest level/.test(systemOf(d0.messages)), 'depth-0 is unscrubbed');
-    assert.match(systemOf(d1.messages), /PREFER DIRECT ACTION/);
-    assert.ok(!/deepest level/.test(systemOf(d1.messages)), 'depth-1 (below cap) is NOT the deepest message');
-    assert.match(systemOf(d2.messages), /deepest level/);
-
-    // tool set is monotone: spawn present at 0 & 1, dropped exactly at the cap (depth 2); handle tool survives all
-    assert.ok(d0.tools.includes('spawn_child') && d1.tools.includes('spawn_child'), 'spawn offered below the cap');
-    assert.ok(!d2.tools.includes('spawn_child'), 'spawn dropped exactly at the cap (depth 2)');
-    const sub = (a, b) => a.every(t => new Set(b).has(t));
-    assert.ok(sub(d1.tools, d0.tools) && sub(d2.tools, d1.tools), 'tools contract monotonically child ⊆ parent');
-    assert.ok(d0.tools.includes('recall') && d1.tools.includes('recall') && d2.tools.includes('recall'), 'the handle tool survives every level');
-  });
-});
-
-describe('capabilityScrub — depth-aware suffix unit (NB-4 / RC-12)', () => {
-  it('depth 0 (and below) → no scrub: the top worker decomposes freely', () => {
-    assert.equal(capabilityScrub(0, 3), '');
-    assert.equal(capabilityScrub(-1, 3), '');
-  });
-
-  it('0 < depth < maxDepth → the milder "prefer direct action" suffix, naming the depth', () => {
-    const s = capabilityScrub(1, 3);
-    assert.match(s, /PREFER DIRECT ACTION/);
-    assert.match(s, /DEPTH 1 of 3/);
-    assert.ok(!/deepest level/.test(s), 'a below-cap worker is NOT told it is the deepest');
-  });
-
-  it('depth >= maxDepth → the deepest-level suffix (boundary fires AT depth == maxDepth)', () => {
-    // The boundary itself is the mutation point: a `>` instead of `>=` would drop depth==maxDepth to the milder
-    // branch — so asserting the EQUAL case gets the deepest message is what proves the cap-inclusive boundary.
-    const at = capabilityScrub(2, 2);
-    assert.match(at, /deepest level/);
-    assert.match(at, /CANNOT delegate/);
-    assert.match(at, /incomplete/, 'the deepest worker is told an honest incomplete is correct');
-    assert.ok(!/PREFER DIRECT ACTION/.test(at), 'the deepest worker does not also get the milder suffix');
-    // beyond the cap stays the deepest message (defensive — depth should never exceed maxDepth, but the branch holds)
-    assert.match(capabilityScrub(5, 2), /deepest level/);
-  });
-});
-
-describe('recurse — honest non-convergence (RC-6 / RC-9)', () => {
-  it('a guard trip (policy HaltError) exits cleanly as { incomplete, best } — never a thrown run, never a faked pass', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    // a policy that halts the moment the model tries to spawn — simulates a depth/budget cap tripping
-    const policy = (tool) => { if (tool === 'spawn_child') throw new HaltError('budget exhausted', { rule: 'budget' }); return true; };
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider, policy });
-    assert.equal(out.incomplete, true, 'a tripped guard yields incomplete');
-    assert.equal(out.result, undefined, 'no fabricated result on guard exhaustion');
-    assert.equal(out.receipts.halted, true);
-    assert.ok('best' in out, 'a best partial is returned');
-  });
-
-  it('a dead worker (provider throws) → incomplete, not a thrown run', async () => {
-    const sp = scriptedProvider(() => { throw new Error('model exploded'); });
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.result, undefined);
-  });
-
-  it('§9 scenario 1 / RC-9: a dead CHILD propagates incomplete through the reduce — NEVER a silent survivor-sum', async () => {
-    // Two children: slice 0 returns a real count (10); slice 1's worker dies (its provider throws every call).
-    // A naive survivor-sum would return 10 with NO signal — the §9.1 undercount (99 vs 151). The honest path
-    // must flag incomplete + name the missing slice.
-    const handler = (messages, tools) => {
-      const user = lastUser(messages);
-      if (user.includes('slice 1')) throw new Error('worker 1 died'); // the dead child
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-      const gotChild = messages.some(m => m.role === 'tool');
-      if (hasSpawn && !gotChild) return { toolCalls: [0, 1].map(i => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
-      if (gotChild) return { text: 'PARENT_MODEL_TEXT' };
-      return { text: user.includes('slice 0') ? '10' : '0' };
-    };
-    const sp = scriptedProvider(handler);
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      synthesize: ({ results }) => results.reduce((a, r) => a + Number(r || 0), 0), // would survivor-sum to 10
-    });
-    // mutation check: drop the propagation and `out.result` would be 10 (a quiet undercount) with no signal
-    assert.equal(out.incomplete, true, 'a dead child must flag incomplete, not a survivor-sum');
-    assert.equal(out.result, undefined, 'no clean result is emitted over partial data');
-    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.some(s => s.includes('slice 1')), 'the missing slice is named');
-    assert.equal(out.best, 10, 'the partial reduce is still available as best');
-  });
-
-  it('§9 scenario 1: an incomplete child propagates even on the model-synthesis (default) path', async () => {
-    const handler = (messages, tools) => {
-      const user = lastUser(messages);
-      if (user.includes('slice 1')) throw new Error('worker 1 died');
-      const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-      const gotChild = messages.some(m => m.role === 'tool');
-      if (hasSpawn && !gotChild) return { toolCalls: [0, 1].map(i => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
-      if (gotChild) return { text: 'model combined what it got' };
-      return { text: 'ok' };
-    };
-    const sp = scriptedProvider(handler);
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }); // no synthesize override — model default
-    assert.equal(out.incomplete, true, 'even model-synthesis must not claim success when a child died');
-    assert.ok(out.missingSlices.some(s => s.includes('slice 1')));
-  });
-});
-
-describe('recurse — verify slot & synthesis seams (RC-7 / NB-3)', () => {
-  it('opts.evaluate overrides the verifier (the §7.1 verify slot)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'candidate answer' }));
-    let sawResult = null;
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, {
-      evaluate: (result, c) => { sawResult = result; return { status: 'satisfied', pass: true, score: 7, critique: '', suggestions: [], custom: c.task }; },
-    });
-    assert.equal(sawResult, 'candidate answer', 'the verifier received the synthesized result');
-    assert.equal(out.verdict.score, 7);
-    assert.equal(out.verdict.custom, SIMPLE_TASK);
-  });
-
-  it('opts.synthesize overrides reduce (the NB-3 code-reduce seam) and feeds the verifier the reduced value', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    let verified = null;
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      synthesize: ({ children }) => ({ deterministicReduce: children.length }),
-      evaluate: (result) => { verified = result; return { status: 'satisfied', pass: true, score: 10, critique: '', suggestions: [] }; },
-    });
-    assert.deepEqual(out.result, { deterministicReduce: 1 }, 'the code-reduce output replaced the model text');
-    assert.deepEqual(verified, { deterministicReduce: 1 }, 'the verifier graded the reduced value, not the raw text');
-  });
-});
-
-describe('recurse — deterministic shell (RC-1) & pull handles (RC-5)', () => {
-  it('RC-1: three distinct tasks all run through the identical shell and converge', async () => {
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'answer' }));
-    for (const t of ['list the config', 'what is the version', 'show the routes']) {
-      const out = await recurse(t, { provider: sp.provider });
-      assert.equal(out.result, 'answer');
-      assert.equal(out.incomplete, undefined);
-    }
-  });
-
-  it('RC-5: handle (pull) tools are offered to a worker so it can fetch a slice on demand', async () => {
-    let pulled = false;
-    const recall = { name: 'recall', description: 'pull a slice', parameters: { type: 'object', properties: {} }, execute: async () => { pulled = true; return 'EU-refunded: 42'; } };
-    const handler = (messages, tools) => {
-      if (messages.some(m => m.role === 'tool')) return { text: 'final: 42' };
-      if ((tools || []).some(t => t.name === 'recall')) return { toolCalls: [{ id: 'r1', name: 'recall', arguments: {} }] };
-      return { text: 'no tools' };
-    };
-    const sp = scriptedProvider(handler);
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { tools: [recall] });
-    assert.equal(pulled, true, 'the worker pulled a slice via the handle tool');
-    assert.equal(out.result, 'final: 42');
-  });
-});
-
-// A worker that fans out N children in one round (each assigned a value by index), then the parent emits a
-// throwaway model-text (which any reducer override must replace). Each child is a `simple`-tier subtask, so
-// it answers directly with its value — no further nesting.
-function aggHandler(values) {
-  return (messages, tools) => {
-    if (isVerify(messages)) return { text: SATISFIED };
-    if (systemOf(messages).includes('synthesis engine')) return { text: 'MERGED_ANSWER' }; // the 'merge' Loop
-    const hasSpawn = (tools || []).some(t => t.name === 'spawn_child');
-    const gotChild = messages.some(m => m.role === 'tool');
-    if (hasSpawn && !gotChild) {
-      return { toolCalls: values.map((_v, i) => ({ id: `c${i}`, name: 'spawn_child', arguments: { subtask: `count slice ${i}` } })) };
-    }
-    if (gotChild) return { text: 'PARENT_MODEL_TEXT' };
-    const m = lastUser(messages).match(/count slice (\d+)/);
-    return { text: m ? String(values[Number(m[1])]) : '0' };
-  };
-}
-
-describe('recurse — NB-3 synthesis / reduce (build step 4)', () => {
-  it('a code-reduce fn receives the child result VALUES and aggregates them deterministically (§9.1)', async () => {
-    const sp = scriptedProvider(aggHandler([10, 20, 12]));
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      synthesize: ({ results }) => results.reduce((a, r) => a + Number(r), 0),
-    });
-    // mutation check: step-3's seam handed receipts only — this would be NaN/0 if results weren't collected
-    assert.equal(out.result, 42, 'deterministic code-reduce summed the three child results');
-    assert.equal(out.receipts.spawned.length, 3);
-  });
-
-  it("strategy 'concat' losslessly joins the child results with no LLM merge call", async () => {
-    const sp = scriptedProvider(aggHandler(['alpha-fact', 'beta-fact']));
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { synthesize: 'concat' });
-    assert.match(out.result, /alpha-fact/);
-    assert.match(out.result, /beta-fact/);
-    assert.ok(!sp.calls.some(c => systemOf(c.messages).includes('synthesis engine')), 'concat must not spin up a merge Loop');
-  });
-
-  it("strategy 'merge' runs an ISOLATED synthesis Loop over the child results (separate context)", async () => {
-    const sp = scriptedProvider(aggHandler(['finding-X', 'finding-Y']));
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, { synthesize: 'merge' });
-    assert.equal(out.result, 'MERGED_ANSWER');
-    const mergeCall = sp.calls.find(c => systemOf(c.messages).includes('synthesis engine'));
-    assert.ok(mergeCall, 'a merge Loop ran');
-    // isolation: the merge context is NOT the worker's decomposition transcript, and it sees the partials
-    assert.equal(systemOf(mergeCall.messages), MERGE_PROMPT);
-    assert.ok(!systemOf(mergeCall.messages).includes('DECOMPOSE'), 'merge must not inherit the worker system prompt');
-    assert.match(lastUser(mergeCall.messages), /finding-X[\s\S]*finding-Y/, 'merge sees both child partials');
-  });
-
-  it("a string strategy with NO child spawned falls back to the model's own answer (nothing to reduce)", async () => {
-    const sp = scriptedProvider(() => ({ text: 'direct answer' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { synthesize: 'merge' });
-    assert.equal(out.result, 'direct answer');
-  });
-
-  it('a HaltError during synthesis exits cleanly as { incomplete, best } (RC-6)', async () => {
-    const sp = scriptedProvider(aggHandler([1, 2]));
-    const out = await recurse(COMPLEX_TASK, { provider: sp.provider }, {
-      synthesize: () => { throw new HaltError('budget exhausted mid-reduce', { rule: 'budget' }); },
-    });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true);
-    assert.ok('best' in out);
-  });
-
-  it('the synthesize() reducer is unit-correct: concat joins, an unknown strategy throws', async () => {
-    assert.match(concatReduce(['a', 'b']), /### Part 1[\s\S]*a[\s\S]*### Part 2[\s\S]*b/);
-    assert.equal(await synthesize('t', ['a', 'b'], { reduce: ({ results }) => results.join('+') }), 'a+b');
-    await assert.rejects(() => synthesize('t', ['a'], { strategy: 'bogus' }), /unknown strategy/);
-    await assert.rejects(() => synthesize('t', ['a'], { strategy: 'merge' }), /requires a provider/);
-  });
-});
-
-// ── RLM_PRD §10 step 7 — retrieval modes (scan / search / exact + completeness guard) ──────────────────────
-const {
-  impliesCompleteness,
-  normalizeCorpus,
-  buildExactTool,
-  buildSearchTool,
-  buildScanTool,
-  classifySystem,
-  litectxCorpus,
-  rotate,
-} = require('../src/recurse-retrieval');
-
-// A fake litectx exposing ONLY `enumerate` (the slice-source contract recurse depends on — NOT the whole
-// litectx API), paging a known fact set. Mirrors litectx 0.26's verified shape: items carry `.path` (the id)
-// and `.body`; `nextOffset` is null past the last row; `total` is the full count.
-function fakeLitectx(rows) {
-  const lc = {
-    calls: 0,
-    enumerate({ kind, offset = 0, limit = 100 }) {
-      lc.calls++;
-      const items = rows.slice(offset, offset + limit).map((r) => ({ path: r.id, body: r.text }));
-      const nextOffset = offset + items.length < rows.length ? offset + items.length : null;
-      return Promise.resolve({ items, total: rows.length, offset, nextOffset });
-    },
-  };
-  return lc;
-}
-
-const isClassify = (messages) => systemOf(messages).includes('precise classifier');
-const SCAN_TASK = 'how many of these records match?'; // 'how many' → completeness ask
-
-// A scan corpus of N records, even ids matching ('MATCH'), odd not — so the truth count is known to CODE.
-function corpusOf(n, { allMatch = false } = {}) {
-  return Array.from({ length: n }, (_, i) => ({
-    id: `r${i}`,
-    text: allMatch ? `MATCH item ${i}` : (i % 2 === 0 ? `MATCH item ${i}` : `plain item ${i}`),
-  }));
-}
-
-// The scripted scan judge: parses the items it was SHOWN, returns the ids whose text contains 'MATCH'.
-// Knobs simulate the failure modes the mechanism must survive:
-//   hallucinate  — also emit a foreign id never shown (must be dropped by the RC-2 intersect)
-//   tailMiss     — drop the LAST item of each window (simulates tail under-recall the multi-pass union fixes)
-//   deadWindowAt — the Nth classify call faults (plain error) → a DEAD window (RC-9)
-function scanJudge({ hallucinate = false, tailMiss = false, deadWindowAt = null } = {}) {
+// items: even ids match ('MATCH'), odd do not — truth is known to CODE
+const corpusOf = (n) => Array.from({ length: n }, (_, i) => ({ id: `r${i}`, text: i % 2 === 0 ? `MATCH item ${i}` : `plain item ${i}` }));
+const isClassify = (m) => systemOf(m).includes('precise classifier');
+const shownItems = (m) => lastUser(m).split('\n').map((l) => l.match(/^(\S+) => (.*)$/)).filter(Boolean).map((x) => ({ id: x[1], text: x[2] }));
+
+// leaf = the scripted classify judge: returns ids whose text matches /MATCH/. Knobs simulate failure modes.
+function judge({ foreign = [], foreignAt0 = [], deadAt = null, prose = false } = {}) {
   let seen = 0;
-  return (messages) => {
-    if (!isClassify(messages)) return { text: 'none' };
+  return (m) => {
     const idx = seen++;
-    if (deadWindowAt != null && idx === deadWindowAt) throw new Error('provider boom');
-    const items = [];
-    for (const line of lastUser(messages).split('\n')) {
-      const m = line.match(/^(\S+) => (.*)$/); // shipped display format: `<id> => <text>`
-      if (m) items.push({ id: m[1], text: m[2] });
-    }
-    let matched = items.filter((it) => /MATCH/.test(it.text));
-    if (tailMiss && items.length) {
-      const lastId = items[items.length - 1].id;
-      matched = matched.filter((it) => it.id !== lastId);
-    }
-    const ids = matched.map((it) => it.id);
-    if (hallucinate) ids.push('r999'); // never shown in any window → must be intersected away
-    return { text: ids.length ? ids.join(', ') : 'none' };
+    if (deadAt === idx) throw new Error('provider boom');
+    const ids = shownItems(m).filter((it) => /MATCH/.test(it.text)).map((it) => it.id).concat(foreign, idx === 0 ? foreignAt0 : []);
+    return { text: prose ? `I found 99 matches: ${ids.join(', ')}` : ids.length ? ids.join(', ') : 'none' };
   };
 }
 
-describe('recurse — retrieval scan (§10 step 7 / §9.2.1)', () => {
-  it('CODE-counts the unioned ids, and the RC-2 intersect drops a hallucinated foreign id', async () => {
-    const sp = scriptedProvider(scanJudge({ hallucinate: true }));
-    const corpus = corpusOf(20); // truth = 10 matches (even ids)
-    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { corpus, window: 4, passes: 1 });
-    assert.equal(out.result.count, 10, 'the count is the CODE-counted union of judged ids');
-    assert.equal(out.result.matchedIds.length, 10);
-    // mutation check: if the intersect-with-shown were removed, r999 would survive → count 11
-    assert.ok(!out.result.matchedIds.includes('r999'), 'a hallucinated id never shown in a window must be dropped (RC-2)');
-    assert.equal(out.receipts.retrieval, 'scan');
-    assert.equal(out.receipts.scan.scanned, 20);
-  });
-
-  it('default scan engages when a corpus is present (no retrieval opt needed)', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const out = await recurse('count the matching records', { provider: sp.provider }, { corpus: corpusOf(8), window: 4, passes: 1 });
-    assert.equal(out.receipts.retrieval, 'scan', 'a corpus with no retrieval opt defaults to scan');
-    assert.equal(out.result.count, 4);
-  });
-
-  it('multi-pass shuffled-boundary union recovers the tail a single pass misses (§9.2.1)', async () => {
-    const corpus = corpusOf(20, { allMatch: true }); // truth = 20; every record matches
-    const one = await recurse(SCAN_TASK, { provider: scriptedProvider(scanJudge({ tailMiss: true })).provider }, { corpus, window: 4, passes: 1 });
-    const two = await recurse(SCAN_TASK, { provider: scriptedProvider(scanJudge({ tailMiss: true })).provider }, { corpus, window: 4, passes: 2 });
-    assert.equal(one.result.count, 15, 'a single pass loses the last item of each of the 5 windows (5 dropped)');
-    assert.equal(two.result.count, 20, 'the 2nd pass shifts boundaries so the union recovers all 20 (mechanism bites)');
-    assert.equal(two.receipts.scan.passes, 2);
-  });
-
-  it('RC-9: a dead window → {incomplete, missingSlices}, never a silent undercount', async () => {
-    const sp = scriptedProvider(scanJudge({ deadWindowAt: 0 }));
-    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { corpus: corpusOf(12), window: 4, passes: 1 });
-    assert.equal(out.incomplete, true, 'a window we could not judge ⇒ the scan is incomplete');
-    assert.equal(out.result, undefined, 'an incomplete scan must NOT return a clean count (no faked pass)');
-    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.length > 0, 'the dead window is named in missingSlices');
-    assert.ok(out.best && typeof out.best.count === 'number', 'the partial count is surfaced as best (RC-9)');
-  });
-
-  it('a governance HaltError mid-scan is a clean incomplete exit, not a thrown run', async () => {
-    // A real budget halt fires through the GATE during metering (onLlmResult), not from the provider — the
-    // 2nd window's meter trips the cap. The Loop converts it to a clean `halt:` and the scan honors it.
-    const sp = scriptedProvider(scanJudge());
-    let metered = 0;
-    const onLlmResult = () => { if (++metered === 2) throw new HaltError('budget exhausted', { rule: 'budget' }); };
-    const out = await recurse(SCAN_TASK, { provider: sp.provider, onLlmResult }, { corpus: corpusOf(12), window: 4, passes: 1 });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.receipts.halted, true, 'a gate halt mid-scan sets halted (clean exit, not a thrown run)');
-  });
-
-  it('an empty/absent corpus is an honest incomplete (litectx-enumerate path deferred), never a fabricated zero', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const out = await recurse(SCAN_TASK, { provider: sp.provider }, { retrieval: 'scan', corpus: [] });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.result, undefined, 'no corpus must NOT yield count:0 (that would be a fabricated answer)');
-    assert.ok(out.missingSlices.some((s) => /corpus/.test(s)));
-  });
-});
-
-describe('recurse — retrieval "tools" mode (per-query scan-as-a-tool, §10 step-7 follow-on)', () => {
-  const toolsLitectx = { recall: async () => ({ fact: [{ path: 'f1', body: 'a fox fact' }], episode: [] }) };
-
-  it('offers scan_count + search_memory + exact_match together, and a "how many" ask is NOT upgraded away', async () => {
-    // The load-bearing distinction from `retrieval:'search'`: a completeness ask does NOT force-upgrade `tools`
-    // to scan (which would strip the search handle and break a MIXED task), because scan_count is ALREADY offered
-    // alongside — the complete path is reachable per sub-query.
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'DIRECT' }));
-    const out = await recurse(SCAN_TASK, { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools', corpus: corpusOf(8) });
-    assert.equal(out.receipts.retrieval, 'tools', 'tools mode is NOT force-upgraded to scan on a completeness ask');
-    assert.equal(out.receipts.retrievalUpgraded, undefined, 'no upgrade — scan_count is offered alongside search');
-    assert.ok(
-      sp.calls.some((c) => c.tools.includes('scan_count') && c.tools.includes('search_memory') && c.tools.includes('exact_match')),
-      'all three handle tools are offered together (the per-query face)',
-    );
-  });
-
-  it('the offered scan_count tool runs the full scan and threads a CODE-counted total back to the worker', async () => {
-    // One scripted provider serves both the WORKER (which calls scan_count) and the scan's isolated window JUDGE
-    // (the classify Loop inside scan_count). corpusOf(8) ⇒ 4 even-id MATCH records ⇒ the tool must report count=4.
-    const judge = scanJudge();
-    const sp = scriptedProvider((messages, tools) => {
-      if (isClassify(messages)) return judge(messages); // the scan's per-window judge
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasScan = (tools || []).some((t) => t.name === 'scan_count');
-      const gotTool = messages.some((m) => m.role === 'tool');
-      if (hasScan && !gotTool) return { toolCalls: [{ id: 'sc1', name: 'scan_count', arguments: { predicate: 'records containing MATCH' } }] };
-      const toolMsg = messages.filter((m) => m.role === 'tool').map((m) => m.content).join(' | ');
-      return { text: `WORKER_REPORT[${toolMsg}]` };
-    });
-    const out = await recurse('answer the question about the records', { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools', corpus: corpusOf(8), window: 4, passes: 1 });
-    assert.ok(sp.calls.some((c) => c.tools.includes('scan_count')), 'the scan_count handle was offered');
-    assert.match(out.result, /count=4 \(scanned 8 records/, 'the tool result carried the CODE-counted truth (4), not a model number');
-    assert.match(out.result, /matching ids: r0, r2, r4, r6/, 'the matching ids are the evidence (RC-10) threaded into the worker answer');
-  });
-
-  it('offers only the handles whose backend is present (no corpus ⇒ no scan/exact; no litectx ⇒ no search)', async () => {
-    const sp = scriptedProvider((messages) => (isVerify(messages) ? { text: SATISFIED } : { text: 'DIRECT' }));
-    // litectx present, NO corpus → only search_memory is offered (scan/exact need the corpus)
-    await recurse('answer about the records', { provider: sp.provider, litectx: toolsLitectx }, { retrieval: 'tools' });
-    assert.ok(sp.calls.some((c) => c.tools.includes('search_memory')), 'search offered when litectx present');
-    assert.ok(!sp.calls.some((c) => c.tools.includes('scan_count') || c.tools.includes('exact_match')), 'no corpus ⇒ no scan_count / exact_match');
-  });
-});
-
-describe('recurse — retrieval search/exact + completeness guard (§10 step 7)', () => {
-  const stubLitectx = { recall: async () => ({ fact: [{ path: 'f1', body: 'a fox fact' }], episode: [] }) };
-
-  it('the completeness guard UPGRADES a search on a "how many" ask to scan (never the reverse)', async () => {
-    const sp = scriptedProvider(scanJudge());
-    // search was requested, but the task implies completeness → must be upgraded to the only complete path
-    const out = await recurse(SCAN_TASK, { provider: sp.provider, litectx: stubLitectx }, { retrieval: 'search', corpus: corpusOf(8) });
-    assert.equal(out.receipts.retrieval, 'scan', 'search on a completeness ask is forced to scan');
-    assert.match(out.receipts.retrievalUpgraded, /search→scan/);
-    assert.equal(out.result.count, 4, 'and it actually scanned (code-count present)');
-    assert.ok(sp.calls.some((c) => isClassify(c.messages)), 'a scan judge ran (not a capped search)');
-  });
-
-  it('a needle search task is NOT upgraded and the worker is offered the search_memory tool', async () => {
-    const sp = scriptedProvider((messages, tools) => {
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasSearch = (tools || []).some((t) => t.name === 'search_memory');
-      const gotTool = messages.some((m) => m.role === 'tool');
-      if (hasSearch && !gotTool) return { toolCalls: [{ id: 's1', name: 'search_memory', arguments: { query: 'foxes' } }] };
-      return { text: 'NEEDLE_ANSWER' };
-    });
-    const out = await recurse('find the record about foxes', { provider: sp.provider, litectx: stubLitectx }, { retrieval: 'search' });
-    assert.equal(out.receipts.retrieval, 'search', 'a needle ask stays search (no completeness words)');
-    assert.equal(out.receipts.retrievalUpgraded, undefined, 'no upgrade on a needle ask');
-    assert.ok(sp.calls.some((c) => c.tools.includes('search_memory')), 'the worker was offered the search handle tool');
-    assert.equal(out.result, 'NEEDLE_ANSWER');
-  });
-
-  it('exact mode offers a code-side filter tool over the corpus', async () => {
-    const sp = scriptedProvider((messages, tools) => {
-      if (isVerify(messages)) return { text: SATISFIED };
-      const hasExact = (tools || []).some((t) => t.name === 'exact_match');
-      const gotTool = messages.some((m) => m.role === 'tool');
-      if (hasExact && !gotTool) return { toolCalls: [{ id: 'e1', name: 'exact_match', arguments: { terms: 'alpha' } }] };
-      return { text: 'EXACT_ANSWER' };
-    });
-    const corpus = [{ id: 'a', text: 'alpha record' }, { id: 'b', text: 'beta record' }];
-    const out = await recurse('select the alpha record', { provider: sp.provider }, { retrieval: 'exact', corpus });
-    assert.equal(out.receipts.retrieval, 'exact');
-    assert.ok(sp.calls.some((c) => c.tools.includes('exact_match')), 'the worker was offered the exact handle tool');
-  });
-
-  it('backward-compatible: no corpus and no retrieval opt ⇒ retrieval is null (unchanged behaviour)', async () => {
-    const sp = scriptedProvider(() => ({ text: 'direct' }));
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider });
-    assert.equal(out.receipts.retrieval, null, 'a plain reasoning task runs no retrieval mode');
-    assert.equal(out.result, 'direct');
-    assert.ok(!sp.calls.some((c) => c.tools.includes('search_memory') || c.tools.includes('exact_match')), 'no retrieval tools leak in');
-  });
-});
-
-describe('recurse-retrieval — helper units (mutation points)', () => {
-  it('impliesCompleteness fires on the "all / every / count / how many" family, not on a needle', () => {
-    for (const t of ['how many match?', 'list all the records', 'count the errors', 'every failing test', 'the total number of X']) {
-      assert.equal(impliesCompleteness(t), true, `should be a completeness ask: ${t}`);
+// a full-tree handler: `script` = [[tool, args], ...] driven by the number of root tool rounds so far
+function agent({ script = [], leaf = judge(), text = 'done', verify = SATISFIED, child = null } = {}) {
+  return (messages, tools, options, i) => {
+    if (isVerify(messages)) return { text: typeof verify === 'function' ? verify(messages) : verify };
+    if (tools && tools.length) {
+      if (child && /DEPTH \d+ of/.test(systemOf(messages))) return child(messages, tools, options, i);
+      const n = messages.filter((m) => m.role === 'assistant' && m.tool_calls && m.tool_calls.length).length;
+      const step = script[n];
+      if (!step) return { text };
+      return { toolCalls: [{ id: `c${n}`, name: step[0], arguments: step[1] }] };
     }
-    for (const t of ['find the fox record', 'what did Alice say', 'summarize the incident', null, undefined, 42]) {
-      assert.equal(impliesCompleteness(t), false, `should NOT be a completeness ask: ${t}`);
+    return typeof leaf === 'function' ? leaf(messages, tools, options, i) : leaf;
+  };
+}
+const PRED = 'records containing MATCH';
+const COUNT_SCRIPT = [['classify', { predicate: PRED, var: 'input' }], ['final', { var: 'v1' }]];
+const rootCalls = (sp) => sp.calls.filter((c) => c.tools.length > 0 && !c.user.startsWith('GOAL:'));
+const leafCalls = (sp) => sp.calls.filter((c) => c.tools.length === 0 && !c.user.startsWith('GOAL:'));
+const toolOf = (call, name) => call.toolDefs.find((t) => t.name === name);
+
+describe('recurse v2 — wiring & options', () => {
+  it('throws without a provider / on an empty task', async () => {
+    await assert.rejects(() => recurse('do a thing', {}, {}), /requires a provider/);
+    const sp = scripted(() => ({ text: 'x' }));
+    await assert.rejects(() => recurse('', { provider: sp.provider }), /non-empty string/);
+  });
+  it('removed v1 options fail LOUD with a migration hint (never a silently dead knob)', async () => {
+    const sp = scripted(() => ({ text: 'x' }));
+    for (const k of ['corpus', 'retrieval', 'mode', 'count', 'workerBudget', 'synthesize', 'window', 'passes']) {
+      await assert.rejects(() => recurse(SIMPLE_TASK, { provider: sp.provider }, { [k]: 1 }), (e) => e.name === 'ValidationError' && e.message.includes(`"${k}"`), k);
+    }
+    assert.equal(sp.calls.length, 0, 'rejected before any model call');
+  });
+  it('a bad kind throws; a non-text kind without input throws', async () => {
+    const sp = scripted(() => ({ text: 'x' }));
+    await assert.rejects(() => recurse(SIMPLE_TASK, { provider: sp.provider }, { kind: 'number' }), /kind must be one of/);
+    await assert.rejects(() => recurse(SIMPLE_TASK, { provider: sp.provider }, { kind: 'count' }), /needs opts.input/);
+  });
+  it('kind:"text" accepts a plain end_turn reply; a count task with a plain reply is no-final (never parsed)', async () => {
+    const sp = scripted(() => ({ text: 'the answer is 42' }));
+    const t = await recurse(SIMPLE_TASK, { provider: sp.provider });
+    assert.equal(t.result, 'the answer is 42');
+    const c = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(4), kind: 'count' });
+    assert.equal(c.incomplete, true); assert.equal(c.blocker, 'no-final'); assert.equal(c.result, undefined);
+    assert.equal(c.best, 'the answer is 42', 'BA-5: the last non-empty text is preserved, not null');
+  });
+  it('caller opts.tools are appended to the env tools and execute (RC-5 handle tools)', async () => {
+    const lookup = { name: 'lookup', description: 'look a thing up', parameters: { type: 'object', properties: {} }, execute: async () => 'LOOKED_UP' };
+    const sp = scripted(agent({ script: [['lookup', {}]], text: 'saw LOOKED_UP' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(4), tools: [lookup] });
+    assert.ok(sp.calls[0].tools.includes('lookup') && sp.calls[0].tools.includes('peek'));
+    assert.equal(out.result, 'saw LOOKED_UP');
+  });
+});
+
+describe('recurse v2 — context is a variable (K5 pull beats push)', () => {
+  it('the input is NEVER in the root prompt — only metadata (type, count, chars, short prefix)', async () => {
+    const items = corpusOf(60); items[59].text = 'LATEMARKER_91 end of data';
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: items, kind: 'count' });
+    assert.ok(!out.incomplete);
+    for (const c of rootCalls(sp)) {
+      const wire = JSON.stringify(c.messages);
+      assert.ok(!wire.includes('LATEMARKER_91'), 'late input content must not be in any root message');
+      assert.ok(!wire.includes('item 30'), 'no mid-input content either');
+    }
+    assert.match(rootCalls(sp)[0].system, /items=60/);
+    assert.match(rootCalls(sp)[0].system, /total_chars=\d+/);
+    assert.match(rootCalls(sp)[0].system, /MATCH item 0/, 'only the short prefix is shown');
+  });
+  it('a string input is described by type+length and not pasted either', async () => {
+    const big = 'LATE_STRING_MARKER ' + 'x'.repeat(5000);
+    const sp = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: 'y'.repeat(400) + big });
+    assert.match(sp.calls[0].system, /type=string, chars=\d+/);
+    assert.ok(!JSON.stringify(sp.calls[0].messages).includes('LATE_STRING_MARKER'));
+  });
+  it('tool replies are TRUNCATED previews with the full value stored under a var', async () => {
+    const items = [{ id: 'a', text: 'q'.repeat(5000) }, { id: 'b', text: 'short' }];
+    const sp = scripted(agent({ script: [['peek', { var: 'input', start: 0, len: 2 }], ['peek', { var: 'v1', start: 0, len: 1 }]], text: 'ok' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: items });
+    const toolMsg = sp.calls[1].messages.find((m) => m.role === 'tool').content;
+    assert.match(toolMsg, /var=v1 kind=items/); assert.match(toolMsg, /truncated; \d+ chars total, full value stored as var v1/);
+    assert.ok(toolMsg.length < 1800);
+    assert.equal(out.receipts.vars, 2);
+  });
+  it('find is literal AND-terms (no regex); peek/chunk work on a string input', async () => {
+    const items = [{ id: 'a', text: 'alpha beta' }, { id: 'b', text: 'alpha gamma' }, { id: 'c', text: 'a.c literal' }, { id: 'd', text: 'abc' }];
+    const sp = scripted(agent({ script: [['find', { var: 'input', terms: ['alpha', 'beta'] }], ['find', { var: 'input', terms: ['a.c'] }]], text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: items });
+    const r1 = sp.calls[1].messages.find((m) => m.role === 'tool').content;
+    assert.match(r1, /matches=1 ids=\["a"\]/, 'AND: both terms required');
+    const r2 = sp.calls[2].messages.filter((m) => m.role === 'tool')[1].content;
+    assert.match(r2, /matches=1 ids=\["c"\]/, '"a.c" is a literal, not a regex matching "abc"');
+    const s = scripted(agent({ script: [['peek', { var: 'input', start: 2, len: 3 }], ['chunk', { var: 'input', size: 4 }]], text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: s.provider }, { input: 'abcdefghij' });
+    const tm = s.calls[2].messages.filter((m) => m.role === 'tool');
+    assert.match(tm[0].content, /\ncde$/); assert.match(tm[1].content, /type=list\[3\]/);
+  });
+  it('the async input source is awaited ONCE; a throwing source is an honest incomplete (never count:0)', async () => {
+    let calls = 0;
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: async () => { calls++; return corpusOf(10); }, kind: 'count' });
+    assert.equal(calls, 1); assert.equal(out.result.count, 5);
+    const bad = scripted(agent({ script: COUNT_SCRIPT }));
+    const b = await recurse('how many?', { provider: bad.provider }, { input: async () => { throw new Error('enumerate blew up'); }, kind: 'count' });
+    assert.equal(b.incomplete, true); assert.equal(b.blocker, 'input'); assert.equal(b.result, undefined);
+    assert.equal(bad.calls.length, 0, 'no model call over a failed source');
+  });
+  it('malformed, duplicate and whitespace/comma ids are dropped and COUNTED, never silently miscounted', async () => {
+    const input = [{ id: 'a', text: 'x' }, { id: 'a', text: 'dup' }, { id: 'b c', text: 'sp' }, { id: 'd,e', text: 'cm' }, { id: 3, text: 'n' }, null, { id: 'ok', text: 'y' }];
+    const sp = scripted(agent({ text: 'ok' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input });
+    assert.deepEqual(out.receipts.input, { type: 'items', items: 2, dropped: 5 });
+  });
+});
+
+describe('recurse v2 — typed final: AI points, code decides (K1)', () => {
+  it('the count is DERIVED by code from the ids var — a number the model never typed', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT, leaf: judge({ prose: true }) })); // judge prose says "99 matches"
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.incomplete, undefined);
+    assert.equal(out.result.count, 10); assert.equal(out.result.ids.length, 10); assert.equal(out.result.count, out.result.ids.length);
+    assert.ok(out.result.ids.every((id) => /^r\d*[02468]$/.test(id)));
+  });
+  it('a wrong-kind final (literal number for a count) is REFUSED with exactly ONE nudge, then recovers', async () => {
+    const sp = scripted(agent({ script: [['final_text', { text: '10' }], ...COUNT_SCRIPT] }));
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.incomplete, undefined); assert.equal(out.result.count, 10);
+    assert.equal(out.receipts.nudges, 1);
+    const nudge = sp.calls[1].messages.find((m) => m.role === 'tool').content;
+    assert.match(nudge, /REJECTED \(final_text is not allowed for this answer kind\): answer is a count/);
+  });
+  it('a second wrong final ends the run {incomplete, blocker:"wrong-final"} — no number is ever parsed from text', async () => {
+    const sp = scripted(agent({ script: [['final_text', { text: '10' }], ['final_text', { text: '10' }], ...COUNT_SCRIPT] }));
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'wrong-final'); assert.equal(out.result, undefined);
+    assert.equal(out.receipts.nudges, 1); assert.equal(leafCalls(sp).length, 0, 'the run ended at the 2nd refusal');
+  });
+  it('final("<var>") must cite a var of the kind: an info var / unknown var is refused', async () => {
+    const sp = scripted(agent({ script: [['info', { var: 'input' }], ['final', { var: 'v1' }], ['final', { var: 'nope' }]] }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(4), kind: 'count' });
+    assert.equal(out.blocker, 'wrong-final'); assert.match(out.receipts.blockerDetail || out.detail || '', /unknown var|kind meta/);
+  });
+  it('kind:"ids" returns the ids; kind:"composite" returns {needle, count:{count, ids}} and refuses a non-ids count var', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const ids = await recurse('which?', { provider: sp.provider }, { input: corpusOf(6), kind: 'ids' });
+    assert.deepEqual(ids.result.ids.sort(), ['r0', 'r2', 'r4']);
+    const cs = scripted(agent({ script: [['find', { var: 'input', terms: ['item 3'] }], ['final_parts', { needle: 'plain item 3', count: 'v1' }], ['classify', { predicate: PRED, var: 'input' }], ['final_parts', { needle: 'plain item 3', count: 'v2' }]] }));
+    const out = await recurse('needle and count', { provider: cs.provider }, { input: corpusOf(6), kind: 'composite' });
+    assert.equal(out.receipts.nudges, 1, 'v1 is an items var, not a count var');
+    assert.equal(out.result.needle, 'plain item 3'); assert.equal(out.result.count.count, 3);
+  });
+  it('kind:"text": final_text and final(textVar) both work; join is a code reduction into a text var', async () => {
+    const sp = scripted(agent({ script: [['chunk', { var: 'input', size: 2 }], ['map', { prompt: 'summarise', listVar: 'v1' }], ['join', { listVar: 'v2' }], ['final', { var: 'v3' }]], leaf: (m) => ({ text: `ANS<${shownCount(m)}>` }) }));
+    const out = await recurse('summarise per chunk', { provider: sp.provider }, { input: corpusOf(4) });
+    assert.equal(out.result, 'ANS<2>\nANS<2>');
+    const ft = scripted(agent({ script: [['final_text', { text: 'direct' }]] }));
+    assert.equal((await recurse(SIMPLE_TASK, { provider: ft.provider }, { input: corpusOf(2) })).result, 'direct');
+  });
+});
+describe('recurse v2 — blank text var is never a final answer', () => {
+  for (const blank of ['', '   \n\t ']) {
+    it(`final(var) on a text var holding ${JSON.stringify(blank)} is refused like a blank final_text: {incomplete, wrong-final}`, async () => {
+      const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }], ['final', { var: 'v1' }]], leaf: { text: blank } }));
+      const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+      assert.equal(out.incomplete, true); assert.equal(out.blocker, 'wrong-final'); assert.equal(out.result, undefined);
+      assert.equal(out.receipts.nudges, 1, 'one nudge, then the run ends');
+    });
+  }
+  it('a non-blank text var still finalizes via final(var)', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], leaf: { text: 'REAL' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+    assert.equal(out.incomplete, undefined); assert.equal(out.result, 'REAL');
+  });
+});
+const shownCount = (m) => lastUser(m).split('PIECE:\n')[1].split('\n').length;
+
+describe('recurse v2 — classify (K2 K3 K4 K7)', () => {
+  it('K3: the judge gets the VERBATIM classify system prompt and the `<id> => <text>` layout', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(6), kind: 'count' });
+    const lc = leafCalls(sp);
+    assert.ok(lc.length > 0);
+    assert.equal(lc[0].system, classifySystem(PRED), 'a paraphrase dropped recall 0.93→0.29 — the wording is pinned');
+    for (const w of [/Examine EACH item individually/, /`<id> => <text>`/, /copy each matching item's <id> VERBATIM/, /Comma-separated\. If none, output "none"\. No count, no prose\./, /PREDICATE: records containing MATCH$/]) assert.match(lc[0].system, w);
+    assert.match(lc[0].user, /ITEMS:\nr0 => MATCH item 0\nr1 => plain item 1/);
+    assert.match(lc[0].user, /^\[run 0\] Find the items matching the predicate\./);
+  });
+  it('K4: window 8, 2 passes, half-window rotation on pass 2 — deterministic, no RNG (identical across runs)', async () => {
+    const run = async () => {
+      const sp = scripted(agent({ script: COUNT_SCRIPT }));
+      await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+      return leafCalls(sp).map((c) => shownItems([{ role: 'user', content: c.user }]).map((x) => x.id));
+    };
+    const a = await run(); const b = await run();
+    assert.deepEqual(a.map((w) => w.length), [8, 8, 4, 4, 8, 8], 'pass 0: 8,8,4 — pass 1 offset by half a window: 4,8,8');
+    assert.deepEqual(a[3], ['r0', 'r1', 'r2', 'r3']); assert.deepEqual(a[4].slice(0, 2), ['r4', 'r5']);
+    assert.deepEqual(a, b);
+  });
+  it('K2: the judge returns ids and CODE counts the union; RC-2 drops ids not shown in THAT window (foreign + other-window)', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT, leaf: judge({ foreign: ['r999'], foreignAt0: ['r15'] }) })); // r15 is real (odd, non-match) but NOT shown in window 0
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.ok(!out.result.ids.includes('r999'), 'a hallucinated id is intersected away');
+    assert.ok(!out.result.ids.includes('r15'), 'a real id claimed by the judge in a window where it was NOT shown is dropped (RC-2)');
+    assert.equal(out.result.count, 10);
+  });
+  it('K7: a dead window is a FLOOR, never a zero — final yields {incomplete, missingSlices, best} with the floor count', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT, leaf: judge({ deadAt: 0 }) }));
+    const out = await recurse('how many match?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.incomplete, true); assert.equal(out.result, undefined);
+    assert.deepEqual(out.missingSlices, ['classify window 0']);
+    assert.ok(out.best.count > 0 && out.best.count <= 10, 'a floor, not a fabricated zero and not a clean total');
+  });
+  it('classify over a string input is a tool error the model can see (needs items), not a crash', async () => {
+    const sp = scripted(agent({ script: [['classify', { predicate: PRED, var: 'input' }]], text: 'gave up' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: 'just some text' });
+    assert.match(sp.calls[1].messages.find((m) => m.role === 'tool').content, /classify needs a list var of items/);
+    assert.equal(out.result, 'gave up');
+  });
+});
+
+describe('recurse v2 — memo (K: bareloop saw ~48% re-reads)', () => {
+  it('a repeated classify/map with the same args costs ZERO calls and reports a memo hit', async () => {
+    const same = [['classify', { predicate: PRED, var: 'input' }], ['classify', { predicate: PRED, var: 'input' }], ['final', { var: 'v1' }]];
+    const sp = scripted(agent({ script: same }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(leafCalls(sp).length, 6, 'one scan = 6 windows; the repeat added none');
+    assert.equal(out.receipts.memoHits, 1); assert.equal(out.result.count, 10);
+    assert.match(rootCalls(sp)[2].messages.filter((m) => m.role === 'tool')[1].content, /already computed → var v1 \(memo hit, 0 LLM calls\)/);
+    const diff = scripted(agent({ script: [['classify', { predicate: PRED, var: 'input' }], ['classify', { predicate: PRED + ' x', var: 'input' }], ['final', { var: 'v1' }]] }));
+    await recurse('how many?', { provider: diff.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(leafCalls(diff).length, 12, 'different args are NOT memo hits');
+  });
+  it('map is memoized too (same prompt + same list var)', async () => {
+    const sp = scripted(agent({ script: [['chunk', { var: 'input', size: 2 }], ['map', { prompt: 'p', listVar: 'v1' }], ['map', { prompt: 'p', listVar: 'v1' }], ['final_text', { text: 'ok' }]], leaf: { text: 'a' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(6) });
+    assert.equal(leafCalls(sp).length, 3); assert.equal(out.receipts.memoHits, 1);
+  });
+});
+
+describe('recurse v2 — map / ask fan-out (K6 K11)', () => {
+  it('K6: a dead map slot → {incomplete, missingSlices}, NEVER a survivor-sum', async () => {
+    let n = 0;
+    const sp = scripted(agent({ script: [['chunk', { var: 'input', size: 2 }], ['map', { prompt: 'p', listVar: 'v1' }], ['join', { listVar: 'v2' }], ['final', { var: 'v3' }]], leaf: () => { if (n++ === 1) throw new Error('dead slot'); return { text: 'GOOD' }; } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(6) });
+    assert.equal(out.incomplete, true); assert.equal(out.result, undefined);
+    assert.deepEqual(out.missingSlices, ['map slot 1']);
+    assert.match(out.best, /GOOD/, 'the surviving answers are kept as best (BA-5), not presented as the result');
+  });
+  it('a dead ask is a missing slice too (cited downstream → incomplete)', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], leaf: () => { throw new Error('dead'); } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+    assert.equal(out.incomplete, true); assert.deepEqual(out.missingSlices, ['ask(input)']);
+  });
+  it('K11: a leaf sub-call has a FRESH window — it sees only the prompt + its piece, never the parent task or transcript', async () => {
+    const sp = scripted(agent({ script: [['chunk', { var: 'input', size: 3 }], ['map', { prompt: 'what is first?', listVar: 'v1' }], ['final_text', { text: 'ok' }]], leaf: { text: 'LEAF_SCRATCH' } }));
+    await recurse('PARENT_SECRET_TASK about alpha', { provider: sp.provider }, { input: corpusOf(6) });
+    for (const c of leafCalls(sp)) {
+      assert.equal(c.messages.length, 2, 'system + one user message only');
+      assert.ok(!JSON.stringify(c.messages).includes('PARENT_SECRET_TASK'));
+      assert.match(c.user, /^what is first\?\n\nPIECE:\nr\d+ => /);
     }
   });
-
-  it('normalizeCorpus drops malformed entries (a non-string id/text can neither be judged nor counted)', () => {
-    const out = normalizeCorpus([{ id: 'a', text: 'x' }, { id: 1, text: 'y' }, { id: 'b' }, null, { id: 'c', text: 'z' }]);
-    assert.deepEqual(out.map((r) => r.id), ['a', 'c']);
+  it('K11: only the sub-call RESULT string crosses back into the parent transcript', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], leaf: { text: 'THE_RESULT' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(2) });
+    assert.equal(out.result, 'THE_RESULT');
+    assert.match(rootCalls(sp)[1].messages.find((m) => m.role === 'tool').content, /var=v1 kind=text type=string\nTHE_RESULT/);
   });
-
-  it('buildExactTool is a deterministic AND-term filter over the corpus (embeddings-free, complete)', async () => {
-    const tool = buildExactTool([{ id: 'a', text: 'alpha beta' }, { id: 'b', text: 'alpha gamma' }, { id: 'c', text: 'delta' }]);
-    assert.match(await tool.execute({ terms: 'alpha' }), /^a: alpha beta\nb: alpha gamma$/);
-    assert.equal(await tool.execute({ terms: 'alpha beta' }), 'a: alpha beta'); // AND: both terms required
-    assert.equal(await tool.execute({ terms: 'zeta' }), 'no matches');
-    assert.match(await tool.execute({ terms: '' }), /requires/);
+  it('K12: at maxDepth>=2 an ask is a full in-process recurse (child receipts at depth 1) sharing the parent counter; only its result string comes back', async () => {
+    const sp = scripted(agent({
+      script: [['ask', { prompt: 'child question', var: 'input' }], ['final', { var: 'v1' }]],
+      child: () => ({ text: 'CHILD_ANSWER' }),
+    }));
+    const out = await recurse('PARENT_TASK', { provider: sp.provider }, { input: 'some long text', limits: { maxDepth: 2 } });
+    assert.equal(out.result, 'CHILD_ANSWER');
+    assert.equal(out.receipts.spawned.length, 1); assert.equal(out.receipts.spawned[0].depth, 1);
+    const childCall = sp.calls.find((c) => /DEPTH 1 of 2/.test(c.system));
+    assert.ok(childCall); assert.ok(!JSON.stringify(childCall.messages).includes('PARENT_TASK'), 'fresh window');
+    assert.equal(childCall.user, 'child question');
+    assert.equal(out.metrics.calls, sp.calls.length, 'one shared counter meters the whole tree');
+    assert.equal(out.receipts.spawned[0].metrics, undefined, 'only the root carries metrics');
   });
-
-  it('buildSearchTool caps recall and never returns the whole corpus (KNN_K)', async () => {
-    let capturedN = null;
-    const litectx = { recall: async (_q, opts) => { capturedN = opts.n; return { fact: [{ path: 'f', body: 'b' }], episode: [] }; } };
-    const tool = buildSearchTool(litectx);
-    const r = await tool.execute({ query: 'x' });
-    assert.equal(capturedN, 8, 'recall is capped at KNN_K=8 (cannot count)');
-    assert.match(r, /\[fact\] f: b/);
-  });
-
-  it('classifySystem keeps the §9.2-validated wording, forbids a model count, and pins ids unambiguously', () => {
-    const s = classifySystem('SPORTS news');
-    assert.match(s, /Examine EACH item individually/);
-    assert.match(s, /No count, no prose/);
-    assert.match(s, /PREDICATE: SPORTS news/);
-    // step-8 finding: a colon-ambiguous id instruction silently under-recalled (0.93→0.29); the fix is an
-    // unambiguous ` => ` delimiter + a VERBATIM-copy instruction that keeps colon-bearing ids whole.
-    assert.match(s, /VERBATIM/);
-    assert.match(s, /=> /);
-  });
-
-  it('rotate is a deterministic boundary shift (no RNG) — same input ⇒ same output', () => {
-    assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
-    assert.deepEqual(rotate([1, 2, 3, 4, 5], 2), [3, 4, 5, 1, 2]);
-    assert.deepEqual(rotate([], 3), []);
-  });
-
-  it('buildScanTool wraps the full scan into a per-query tool: CODE-counted head + matching-id evidence', async () => {
-    const sp = scriptedProvider(scanJudge()); // matches 'MATCH' in shown items
-    const tool = buildScanTool(corpusOf(6), { provider: sp.provider, window: 3, passes: 1 }); // 3 even-id matches
-    const r = await tool.execute({ predicate: 'records containing MATCH' });
-    assert.match(r, /^count=3 \(scanned 6 records, window=3, passes=1\)/, 'the head is the CODE-counted total (not a model number)');
-    assert.match(r, /matching ids: r0, r2, r4/, 'the matching ids are returned as evidence');
-    assert.match(await tool.execute({ predicate: '' }), /requires a non-empty predicate/, 'an empty predicate is rejected, not scanned');
-  });
-
-  it('buildScanTool surfaces a dead window as an explicit FLOOR (RC-9 at the tool boundary), never a clean hole', async () => {
-    const sp = scriptedProvider(scanJudge({ deadWindowAt: 0 })); // the first window faults
-    const tool = buildScanTool(corpusOf(8), { provider: sp.provider, window: 4, passes: 1 });
-    const r = await tool.execute({ predicate: 'records containing MATCH' });
-    assert.match(r, /INCOMPLETE/, 'a dead window is flagged, not hidden');
-    assert.match(r, /floor, not exact/, 'the count is presented as a floor (the worker must not treat it as exact)');
-  });
-
-  it('buildScanTool materializes an async slice-source ONCE (cached) and propagates a HaltError unwrapped', async () => {
-    let sourceCalls = 0;
-    const source = async () => { sourceCalls++; return corpusOf(4); };
-    const ok = scriptedProvider(scanJudge());
-    const tool = buildScanTool(source, { provider: ok.provider, window: 2, passes: 1 });
-    await tool.execute({ predicate: 'records containing MATCH' });
-    await tool.execute({ predicate: 'records containing MATCH' });
-    assert.equal(sourceCalls, 1, 'the async source is resolved once and cached (a re-scan reads the same set — RC-3)');
-
-    // A governance HaltError from the inner scan must PROPAGATE out of execute (the Loop turns it into a clean
-    // halt), never be swallowed into a ToolError (the 0.18.0 tool-execute invariant).
-    const onLlmResult = () => { throw new HaltError('budget exhausted', { rule: 'budget' }); };
-    const halting = buildScanTool(corpusOf(4), { provider: scriptedProvider(scanJudge()).provider, window: 2, passes: 1, onLlmResult });
-    await assert.rejects(() => halting.execute({ predicate: 'records containing MATCH' }), (e) => e instanceof HaltError);
+  it('K6: a dead child (K13) propagates as a dead slot; its label rides blockerFrom/blocker on the result, never stamped on the ancestor receipts', async () => {
+    const sp = scripted(agent({
+      script: [['ask', { prompt: 'child q', var: 'input' }], ['final', { var: 'v1' }]],
+      child: () => ({ toolCalls: [{ id: 'x', name: 'peek', arguments: { var: 'input', start: 0, len: 1 } }] }),
+    }));
+    const policy = (tool, _a, ctx) => (ctx && ctx.depth === 1 ? '[deny: fs.scope] nope' : true);
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy }, { input: 'text here', limits: { maxDepth: 2 } });
+    assert.equal(out.incomplete, true); assert.deepEqual(out.missingSlices, ['ask(input)']);
+    assert.equal(out.blocker, 'governance-deny', 'the descendant label is surfaced on the result');
+    assert.equal(out.blockerTask, 'child q');
+    assert.equal(out.receipts.blocker, undefined, 'never stamped as the ANCESTOR\'s own blocker');
+    assert.equal(out.receipts.blockerFrom.blocker, 'governance-deny');
+    assert.equal(out.receipts.spawned[0].blocker, 'governance-deny');
   });
 });
 
-describe('recurse — litectx-resident scan adapter (litectxCorpus / enumerate, step-7 follow-on)', () => {
-  it('litectxCorpus pages through EVERY row via enumerate and maps path→id, body→text', async () => {
-    const lc = fakeLitectx(corpusOf(20)); // 20 rows
-    const source = litectxCorpus(lc, { kind: 'fact', pageSize: 7 });
-    const slices = await source();
-    assert.equal(slices.length, 20, 'every row materialized across pages (no early stop)');
-    assert.equal(lc.calls, 3, `paginated EXACTLY ⌈20/7⌉=3 calls, got ${lc.calls}`); // catches BOTH under-pagination (1 call → 7 rows) AND wasteful over-pagination (an extra empty end-probe)
-    assert.deepEqual(slices[4], { id: 'r4', text: 'MATCH item 4' }, 'path→id and body→text mapping');
+describe('recurse v2 — brakes (K20) and the formula cap', () => {
+  it('the formula cap is in the receipts BEFORE the first call (and on the stream); tighten-only', async () => {
+    const events = []; let limitsAtFirstCall = null;
+    const sp = scripted((m, t) => { if (limitsAtFirstCall === null) limitsAtFirstCall = events.some((e) => e.type === 'recurse:limits'); return agent({ script: COUNT_SCRIPT })(m, t); });
+    const out = await recurse('how many?', { provider: sp.provider, stream: { emit: (e) => events.push(e) } }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(formulaCap({ items: 20 }), 33);
+    assert.equal(out.receipts.cap, 33); assert.equal(events[0].type, 'recurse:limits'); assert.equal(events[0].data.cap, 33);
+    assert.equal(limitsAtFirstCall, true, 'the limits event fired before the first model call');
+    const lowered = await recurse('how many?', { provider: scripted(agent({ script: COUNT_SCRIPT })).provider }, { input: corpusOf(20), kind: 'count', limits: { maxCalls: 5 } });
+    assert.equal(lowered.receipts.cap, 5);
+    const raised = await recurse('how many?', { provider: scripted(agent({ script: COUNT_SCRIPT })).provider }, { input: corpusOf(20), kind: 'count', limits: { maxCalls: 9999 } });
+    assert.equal(raised.receipts.cap, 33, 'a caller value can only LOWER the formula');
+    const verified = await recurse('how many?', { provider: scripted(agent({ script: COUNT_SCRIPT })).provider }, { input: corpusOf(20), kind: 'count', contract: 'c' });
+    assert.equal(verified.receipts.cap, 34, 'the cap funds the verify call');
   });
-
-  it('recurse scans a function (async) slice-source end-to-end — default scan, no retrieval opt', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const lc = fakeLitectx(corpusOf(20)); // truth = 10 matches (even ids)
-    const out = await recurse('how many records match?', { provider: sp.provider }, { corpus: litectxCorpus(lc), window: 4, passes: 1 });
-    assert.equal(out.receipts.retrieval, 'scan', 'a function slice-source defaults to scan (not Family-A)');
-    assert.equal(out.result.count, 10, 'the resident corpus is materialized then code-counted');
-    assert.equal(out.receipts.scan.scanned, 20);
-  });
-
-  it('a slice-source that throws is an honest incomplete, never a fabricated empty scan', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const badSource = async () => { throw new Error('enumerate blew up'); };
-    const out = await recurse('how many match?', { provider: sp.provider }, { retrieval: 'scan', corpus: badSource });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.result, undefined, 'a failed corpus source must NOT yield count:0');
-    assert.ok(out.missingSlices.some((s) => /corpus source failed/.test(s)));
-  });
-});
-
-describe('recurse — data-driven width partition (mode:"partition", NB-2 / §11)', () => {
-  it('width = ⌈size/workerBudget⌉ partitions the corpus into that many parallel scan-workers; union-counts', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const out = await recurse('how many records match?', { provider: sp.provider },
-      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10, window: 10, passes: 1 });
-    assert.equal(out.receipts.partition.dataWidth, 3, '⌈30/10⌉ = 3');
-    assert.equal(out.receipts.partition.width, 3);
-    assert.equal(out.receipts.spawned.length, 3, '3 parallel chunk-workers ran (RC-10 lineage)');
-    assert.equal(out.result.count, 15, 'the per-chunk scan counts union to the corpus truth (even ids)');
-    assert.equal(out.receipts.retrieval, null, 'partition is its own path (audit = receipts.partition), not the scan dispatch — but retrieval is DEFINED (null), never undefined, on every path');
-  });
-
-  it('opts.count is a FLOOR the data may raise but never lower (width = max(floor, dataWidth))', async () => {
-    const sp = scriptedProvider(scanJudge());
-    // small data (dataWidth=1) but floor=4 → width must be 4, not 1
-    const out = await recurse('how many match?', { provider: sp.provider },
-      { mode: 'partition', corpus: corpusOf(10), workerBudget: 100, count: 4, window: 10, passes: 1 });
-    assert.equal(out.receipts.partition.dataWidth, 1, '⌈10/100⌉ = 1');
-    assert.equal(out.receipts.partition.floor, 4);
-    assert.equal(out.receipts.partition.width, 4, 'the floor raised width above the data-derived 1');
-    assert.equal(out.receipts.spawned.length, 4);
-    // mutation check: if width ignored the floor, this would be 1, not 4
-  });
-
-  it('width is capped at the corpus size (no empty workers)', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const out = await recurse('count matches', { provider: sp.provider },
-      { mode: 'partition', corpus: corpusOf(3), workerBudget: 1, count: 10, window: 10, passes: 1 });
-    assert.equal(out.receipts.partition.width, 3, 'max(floor 10, dataWidth 3) = 10, capped at size 3');
-    assert.equal(out.receipts.spawned.length, 3);
-  });
-
-  it('RC-9: a dead chunk → {incomplete, missingSlices}, never a survivor-sum', async () => {
-    const sp = scriptedProvider(scanJudge({ deadWindowAt: 1 })); // one chunk's window faults
-    const out = await recurse('how many match?', { provider: sp.provider },
-      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10, window: 10, passes: 1 });
-    assert.equal(out.incomplete, true, 'one dead chunk ⇒ the whole partition is incomplete');
-    assert.equal(out.result, undefined, 'an incomplete partition must NOT return a clean count');
-    assert.ok(Array.isArray(out.missingSlices) && out.missingSlices.length > 0, 'the dead chunk is named in missingSlices');
-    assert.ok(out.best && typeof out.best.count === 'number', 'the partial union is surfaced as best');
-  });
-
-  it('pre-wave checkpoint: a governance Halt on recurse_partition halts BEFORE any worker spends', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const policy = (tool) => { if (tool === 'recurse_partition') throw new HaltError('budget', { rule: 'budget' }); };
-    const out = await recurse('how many match?', { provider: sp.provider, policy },
-      { mode: 'partition', corpus: corpusOf(30), workerBudget: 10 });
-    assert.equal(out.incomplete, true);
+  it('maxCalls trips a clean {incomplete, blocker:"brake", brake:"maxCalls"} with the work so far as best, calls <= cap', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count', limits: { maxCalls: 4 } });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'brake'); assert.equal(out.brake, 'maxCalls');
+    assert.ok(out.best && out.best.partial === true, 'BA-5: the windows judged before the brake are kept');
+    assert.ok(sp.calls.length <= 4, `calls ${sp.calls.length} > cap 4`);
     assert.equal(out.receipts.halted, true);
-    assert.equal(out.receipts.spawned.length, 0, 'NO chunk-worker ran (burst bounded to zero)');
-    assert.ok(!sp.calls.some((c) => isClassify(c.messages)), 'no scan judge fired before the halt');
   });
-
-  it('integration: mode:"partition" over a litectx-resident corpus (litectxCorpus + enumerate)', async () => {
-    const sp = scriptedProvider(scanJudge());
-    const lc = fakeLitectx(corpusOf(30));
-    const out = await recurse('how many records match?', { provider: sp.provider },
-      { mode: 'partition', corpus: litectxCorpus(lc), workerBudget: 10, window: 10, passes: 1 });
-    assert.equal(out.receipts.partition.size, 30, 'the resident corpus was measured');
-    assert.equal(out.receipts.partition.width, 3);
-    assert.equal(out.result.count, 15);
+  it('sub-calls count against the SAME brake as the root rounds (one shared counter)', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.metrics.calls, sp.calls.length); assert.equal(out.receipts.calls, sp.calls.length);
+    assert.equal(sp.calls.length, 6 + 2, '6 classify windows + 2 root rounds');
+  });
+  it('maxRounds bounds the root worker\'s rounds (a model that never finishes)', async () => {
+    const sp = scripted((m) => ({ toolCalls: [{ id: 'p' + m.length, name: 'peek', arguments: { var: 'input', start: 0, len: 1 } }] }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(4), limits: { maxRounds: 3 } });
+    assert.equal(out.blocker, 'brake'); assert.equal(out.brake, 'maxRounds'); assert.equal(sp.calls.length, 3);
+  });
+  it('maxWidth: a map wider than the cap is REFUSED (brake:maxWidth) before any sub-call spends', async () => {
+    const sp = scripted(agent({ script: [['chunk', { var: 'input', size: 2 }], ['map', { prompt: 'p', listVar: 'v1' }]], leaf: { text: 'a' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(10), limits: { maxWidth: 2 } });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'brake'); assert.equal(out.brake, 'maxWidth');
+    assert.equal(leafCalls(sp).length, 0, 'zero sub-calls were made');
+  });
+  it('limits:"none" disables the brakes and marks unbraked:true; default brakes stay ON even with a gate wired', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const none = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count', limits: 'none' });
+    assert.equal(none.unbraked, true); assert.equal(none.result.count, 10); assert.equal(none.receipts.cap, Infinity);
+    const gated = await recurse('how many?', { provider: scripted(agent({ script: COUNT_SCRIPT })).provider, policy: () => true }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(gated.unbraked, undefined); assert.equal(gated.receipts.cap, 33);
+  });
+  it('a gate halt INSIDE a child halts the whole run (labelled halt:<rule>), it is not downgraded to a dead slot; a child brake does too', async () => {
+    const child = () => ({ toolCalls: [{ id: 'k', name: 'peek', arguments: { var: 'input', start: 0, len: 1 } }] });
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child }));
+    const policy = (_t, _a, ctx) => { if (ctx.depth === 1) throw new HaltError('budget', { rule: 'budget' }); return true; };
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy }, { input: 'abc', limits: { maxDepth: 2 } });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'halt'); assert.equal(out.halt, 'budget'); assert.equal(out.missingSlices, undefined);
+    const bp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'c' }) }));
+    const b = await recurse(SIMPLE_TASK, { provider: bp.provider }, { input: 'abc', limits: { maxDepth: 2, maxCalls: 1 } });
+    assert.equal(b.blocker, 'brake'); assert.equal(b.brake, 'maxCalls'); assert.equal(bp.calls.length, 1);
+  });
+  it('K20: a gate halt is labelled halt:<rule> (distinct from brake) with the work preserved as best', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const policy = (tool) => { if (tool === 'final') throw new HaltError('budget', { rule: 'budget' }); return true; };
+    const out = await recurse('how many?', { provider: sp.provider, policy }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'halt'); assert.equal(out.halt, 'budget'); assert.equal(out.brake, undefined);
+    assert.equal(out.best.count, 10, 'the finished classify result survives the halt');
+  });
+  it('a HaltError from the verify slot is a clean incomplete (return await inside the try), result kept as best', async () => {
+    const sp = scripted(() => ({ text: 'the work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => { throw new HaltError('verify budget', { rule: 'budget' }); } });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'halt'); assert.equal(out.best, 'the work');
+  });
+  it('root metrics: whole-tree calls/tokens/cost on the root return only', async () => {
+    const sp = scripted(agent({ script: COUNT_SCRIPT }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(6), kind: 'count' });
+    assert.equal(out.metrics.calls, sp.calls.length);
+    assert.equal(out.metrics.tokens.input, 5 * sp.calls.length); assert.equal(out.metrics.tokens.output, 3 * sp.calls.length);
+    assert.ok(out.metrics.costUsd === null || out.metrics.costUsd >= 0);
+  });
+  it('opts.rates prices metrics.costUsd authoritatively (per-1K, all tiers summed across the whole tree); absent usage => null, never 0', async () => {
+    const sp = scripted((m, t, o, i) => ({ ...agent({ script: COUNT_SCRIPT })(m, t, o, i), usage: { inputTokens: 1000, outputTokens: 1000 } }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(6), kind: 'count', rates: { in: 1, out: 2 } });
+    assert.equal(out.metrics.calls, sp.calls.length);
+    assert.ok(Math.abs(out.metrics.costUsd - sp.calls.length * 3) < 1e-9, `cost ${out.metrics.costUsd} != ${sp.calls.length * 3}`);
+    const inner = scripted(agent({ script: COUNT_SCRIPT })).provider;
+    const noUsage = { model: 'm', async generate(...a) { const r = await inner.generate(...a); return { ...r, usage: null }; } };
+    const bad = await recurse('how many?', { provider: noUsage }, { input: corpusOf(6), kind: 'count', rates: { in: 1, out: 2 } });
+    assert.equal(bad.metrics.costUsd, null, 'an absent usage block is an honest null');
+  });
+  it('rootPeakInput records the max per-round input tokens of the worker (the bounded-window claim)', async () => {
+    const toks = [100, 700, 300];
+    const sp = scripted((m, t, o, i) => ({ ...agent({ script: [['info', { var: 'input' }], ['info', { var: 'input' }], ['final_text', { text: 'ok' }]] })(m, t, o, i), usage: { inputTokens: toks[i], outputTokens: 1 } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(4) });
+    assert.equal(out.receipts.rootPeakInput, 700); assert.equal(out.receipts.rounds, 3);
   });
 });
 
-// F16 / BA-1 (relayfact probe-03) — the live `provider` (with `apiKey`) must NOT reach the audited ctx. recurse
-// threads its wiring blob (including the provider) down the tree, and a wired gate records the run ctx VERBATIM
-// as `action._ctx`; without scrubbing, `_ctx.provider.apiKey` lands in the plaintext audit. These prove the
-// provider is stripped from every ctx that becomes a governance `_ctx` (worker run, direct policy checkpoints),
-// while STILL reaching the worker so it runs. Mutation: drop auditSafeCtx and the secret reappears below.
-describe('recurse — no API key leaks into the audited ctx (F16 / BA-1)', () => {
+describe('recurse v2 — depth-aware prompts, ask withheld at the cap (K10)', () => {
+  const SUB = ['ask', 'map', 'classify'];
+  it('below the cap the root is offered ask/map/classify; AT the cap they are WITHHELD and the prompt says so', async () => {
+    const open = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: open.provider }, { input: corpusOf(4) });
+    for (const t of SUB) assert.ok(open.calls[0].tools.includes(t), `${t} offered by default`);
+    assert.ok(!/DEPTH/.test(open.calls[0].system), 'depth 0 below the cap: no scope suffix');
+    const capped = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: capped.provider }, { input: corpusOf(4), limits: { maxDepth: 0 } });
+    for (const t of SUB) assert.ok(!capped.calls[0].tools.includes(t), `${t} withheld at the cap`);
+    assert.ok(capped.calls[0].tools.includes('peek') && capped.calls[0].tools.includes('final'));
+    assert.match(capped.calls[0].system, /DEPTH 0 of 0 — this is the deepest level. You CANNOT delegate/);
+    assert.ok(!/classify\(predicate/.test(capped.calls[0].system), 'the rules do not advertise a withheld tool');
+  });
+  it('a nested child gets the milder "prefer direct action" prompt below the cap and the deepest-level prompt AT it; ask withheld there', async () => {
+    const sp = scripted(agent({
+      script: [['ask', { prompt: 'q1', var: 'input' }], ['final', { var: 'v1' }]],
+      child: (m, tools) => (tools.some((t) => t.name === 'ask') && !m.some((x) => x.role === 'tool') && /DEPTH 1 of 3/.test(systemOf(m))
+        ? { toolCalls: [{ id: 'k', name: 'ask', arguments: { prompt: 'q2', var: 'input' } }] } : { text: 'LEAFY' }),
+    }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: 'text', limits: { maxDepth: 3 } });
+    const d1 = sp.calls.find((c) => /DEPTH 1 of 3/.test(c.system));
+    assert.match(d1.system, /PREFER DIRECT ACTION/); assert.ok(d1.tools.includes('ask'), 'depth 1 < cap 3 may still delegate');
+    const d2 = sp.calls.find((c) => /DEPTH 2 of 3/.test(c.system));
+    assert.match(d2.system, /PREFER DIRECT ACTION/);
+    // a node AT the cap (here via ctx.depth) gets the deepest-level prompt and no ask/map/classify
+    const atCap = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: atCap.provider, depth: 2 }, { input: 'text', limits: { maxDepth: 2 } });
+    assert.match(atCap.calls[0].system, /DEPTH 2 of 2 — this is the deepest level/);
+    for (const t of SUB) assert.ok(!atCap.calls[0].tools.includes(t));
+  });
+  it('at the cap a node cannot make children: default maxDepth 1 => an ask is a plain LEAF sub-call (no tools, no recursion)', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], leaf: { text: 'LEAF' } }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: 'text' });
+    assert.equal(out.result, 'LEAF'); assert.equal(out.receipts.spawned.length, 0);
+    assert.equal(leafCalls(sp)[0].system, 'You answer one question about one piece of data. Be brief and literal.');
+  });
+  it('K10 unit: capabilityScrub (still used by refineWorker) is depth-aware and fires AT depth == maxDepth', () => {
+    assert.equal(capabilityScrub(0, 3), '');
+    assert.match(capabilityScrub(1, 3), /DEPTH 1 of 3.*PREFER DIRECT ACTION/s);
+    assert.match(capabilityScrub(3, 3), /deepest level/);
+    assert.match(capabilityScrub(2, 2), /CANNOT delegate/);
+  });
+  it('K19: tool DESCRIPTIONS route by question shape — classify for how-many/all, ask for one piece (and says never to count)', async () => {
+    const sp = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: corpusOf(4) });
+    const c = sp.calls[0];
+    assert.match(toolOf(c, 'classify').description, /"how many"\/"all"/); assert.match(toolOf(c, 'classify').description, /never count yourself/);
+    assert.match(toolOf(c, 'ask').description, /for counting use classify/); assert.match(toolOf(c, 'find').description, /specific item by words/);
+  });
+});
+
+describe('recurse v2 — F16 audit-safe ctx (K9)', () => {
   const SECRET = 'sk-ant-api03-LEAKME-secret-key';
-  const hasSecret = (v) => JSON.stringify(v ?? null).includes(SECRET);
-  const carriesProvider = (c) => !!(c && typeof c === 'object' && c.provider);
-
-  it('Family-A: the provider/apiKey never reaches onLlmResult.ctx or policy.ctx — but the worker still runs', async () => {
-    const sp = scriptedProvider(decomposingHandler());
-    sp.provider.apiKey = SECRET; // a real provider carries its key on the instance
-    const llmCtxs = [];
-    const policyCtxs = [];
-    const out = await recurse(
-      COMPLEX_TASK,
-      {
-        provider: sp.provider,
-        onLlmResult: (e) => { llmCtxs.push(e.ctx); },
-        policy: (_tool, _args, ctx) => { policyCtxs.push(ctx); return true; },
-      },
-    );
-    // the worker still ran (provider reached the Loop constructor): a real synthesized answer came back
-    assert.ok(typeof out.result === 'string' && out.result.startsWith('PARENT_SYNTHESIS'), 'worker produced a result');
-    // the gate saw at least one LLM round AND the spawn_child policy check — the two leak vectors
-    assert.ok(llmCtxs.length > 0, 'onLlmResult fired (the confirmed probe-03 {type:llm} leak vector)');
-    assert.ok(policyCtxs.length > 0, 'policy fired for the worker tool call');
-    for (const c of llmCtxs) {
-      assert.equal(carriesProvider(c), false, 'onLlmResult.ctx must not carry the live provider');
-      assert.equal(hasSecret(c), false, 'onLlmResult.ctx must not contain the apiKey');
-      assert.equal(c.depth >= 0, true, 'depth is still threaded for the gate');
-    }
-    for (const c of policyCtxs) {
-      assert.equal(carriesProvider(c), false, 'policy ctx must not carry the live provider');
-      assert.equal(hasSecret(c), false, 'policy ctx must not contain the apiKey');
-    }
-  });
-
-  it('Family-B fan-out: the recurse_fanout pre-wave checkpoint ctx is scrubbed of the provider/apiKey', async () => {
-    const sp = scriptedProvider(fanoutHandler());
+  const leaks = (v) => JSON.stringify(v ?? null).includes(SECRET) || !!(v && v.provider);
+  it('the provider/apiKey never reaches policy ctx or onLlmResult ctx at ANY boundary (root loop, classify judges, ask leaves, children, verify)', async () => {
+    const sp = scripted(agent({ script: [['classify', { predicate: PRED, var: 'input' }], ['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'c' }) }));
     sp.provider.apiKey = SECRET;
-    let fanoutCtx;
-    const policy = (tool, _args, ctx) => { if (tool === 'recurse_fanout') fanoutCtx = ctx; return true; };
-    await recurse(COMPLEX_TASK, { provider: sp.provider, policy }, { count: 2 });
-    assert.ok(fanoutCtx, 'the recurse_fanout checkpoint fired');
-    assert.equal(carriesProvider(fanoutCtx), false, 'checkpoint ctx must not carry the live provider');
-    assert.equal(hasSecret(fanoutCtx), false, 'checkpoint ctx must not contain the apiKey');
-    assert.equal(fanoutCtx.depth >= 0, true, 'depth is still threaded for the gate');
+    const seen = []; const llm = [];
+    const out = await recurse('how many?', { provider: sp.provider, policy: (_t, _a, ctx) => { seen.push(ctx); return true; }, onLlmResult: (e) => llm.push(e.ctx) },
+      { input: corpusOf(6), kind: 'count', contract: 'c' });
+    assert.ok(!out.incomplete, JSON.stringify(out.blocker));
+    assert.ok(seen.length >= 2 && llm.length >= sp.calls.length - 1, 'both leak vectors fired (policy + the {type:llm} meter)');
+    for (const c of [...seen, ...llm]) { assert.equal(leaks(c), false, 'ctx carries no provider/apiKey'); }
+    assert.ok(seen.every((c) => c.depth >= 0), 'depth is still threaded for the gate');
   });
 });
 
-describe('recurse — governance deny-spin short-circuit (BA-11 / relayfact F35)', () => {
-  // A worker that KEEPS calling a tool the policy denies (the probe-16 pathology: the model retries variants of
-  // a governance-denied write, believing a rephrase will pass). The Loop's deny-spin guard (default 3) stops it;
-  // recurse surfaces a LABELED incomplete so a caller can tell a governance block from a model failure.
-  const editTool = { name: 'edit', description: 'edit a file', execute: async () => 'edited' };
-  const alwaysEdit = (m, t, o, i) => ({ toolCalls: [{ id: 'e' + i, name: 'edit', arguments: { n: i } }] });
-  const denyEdit = (tool) => (tool === 'edit' ? '[deny: fs.writeScope] out of scope' : true);
-
-  it('a single-shot worker spinning on a policy deny → {incomplete, blocker:"governance-deny"} (not a burn to the cap)', async () => {
-    const sp = scriptedProvider(alwaysEdit);
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool] });
-    assert.equal(out.incomplete, true, 'a denied spin is honest non-convergence, never a faked pass');
-    assert.equal(out.blocker, 'governance-deny', 'labeled so the caller can widen scope / re-gate / escalate');
-    assert.equal(out.receipts.blocker, 'governance-deny', 'the audit node carries the blocker too');
-    assert.equal(sp.calls.length, 3, 'the worker Loop stopped at the 3rd consecutive denial (the default guard)');
+describe('recurse v2 — persona & working-context (K18)', () => {
+  it('persona is PREPENDED to the root system prompt, augments the env prompt, carries to children, and never reaches the verifier or judge', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'c' }), verify: SATISFIED }));
+    await recurse('t', { provider: sp.provider }, { input: 'abc', persona: 'You are a senior engineer.', limits: { maxDepth: 2 }, contract: 'c' });
+    assert.ok(sp.calls[0].system.startsWith('You are a senior engineer.\n\nYou answer questions about data you cannot see'));
+    assert.ok(sp.calls.find((c) => /DEPTH 1 of 2/.test(c.system)).system.startsWith('You are a senior engineer.'), 'carries down');
+    const verifier = sp.calls.find((c) => c.user.startsWith('GOAL:'));
+    assert.ok(!JSON.stringify(verifier.messages).includes('senior engineer'), 'isolated verifier never sees the persona');
+    const j = scripted(agent({ script: COUNT_SCRIPT }));
+    await recurse('t', { provider: j.provider }, { input: corpusOf(4), kind: 'count', persona: 'PERSONA_X' });
+    assert.ok(leafCalls(j).every((c) => !c.system.includes('PERSONA_X')), 'the classify judge is not persona-ed');
   });
-
-  it('a refineLeaf attempt spinning on a policy deny → {incomplete, blocker:"governance-deny"} (sensor never reached)', async () => {
-    const sp = scriptedProvider(alwaysEdit);
-    // A sensor that would never pass — but the point is the spin throws BEFORE the sensor is ever consulted.
-    let sensorCalls = 0;
-    const sensor = () => { sensorCalls++; return { status: 'needs_revision', pass: false, score: 0, critique: 'x', suggestions: [] }; };
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool], refineLeaf: { sensor } });
-    assert.equal(out.incomplete, true);
-    assert.equal(out.blocker, 'governance-deny');
-    assert.equal(out.receipts.blocker, 'governance-deny');
-    assert.equal(sensorCalls, 0, 'the deterministic close never ran — the attempt short-circuited on the deny');
+  it('no/blank persona => the prompt has no empty prefix', async () => {
+    const a = scripted(agent({ text: 'ok' })); const b = scripted(agent({ text: 'ok' }));
+    await recurse(SIMPLE_TASK, { provider: a.provider }, { input: 'x' });
+    await recurse(SIMPLE_TASK, { provider: b.provider }, { input: 'x', persona: '   ' });
+    assert.equal(a.calls[0].system, b.calls[0].system); assert.ok(a.calls[0].system.startsWith('You answer questions'));
   });
-
-  it('a legit deny→pivot inside a worker does NOT short-circuit (allowlist-safe; the default guard is not trigger-happy)', async () => {
-    // The worker is denied `edit` once, then calls an ALLOWED tool, then answers. 1 denial < 3 → no blocker.
-    const okTool = { name: 'note', description: 'jot a note', execute: async () => 'noted' };
-    const pivotHandler = (messages, tools, o, i) => {
-      if (i === 0) return { toolCalls: [{ id: 'e0', name: 'edit', arguments: {} }] };      // denied
-      if (i === 1) return { toolCalls: [{ id: 'n1', name: 'note', arguments: {} }] };      // allowed → reset
-      return { text: 'done despite the one deny' };
-    };
-    const sp = scriptedProvider(pivotHandler);
-    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: denyEdit }, { tools: [editTool, okTool] });
-    assert.equal(out.incomplete, undefined, 'a single deny then a pivot is not a spin — the worker converges');
-    assert.equal(out.blocker, undefined);
-    assert.ok(String(out.result).includes('done'), 'the worker completed normally');
+  it('opts.context is a Working-context block on the USER message (root, children, leaf asks) and is shown to the verifier', async () => {
+    const sp = scripted(agent({ script: [['ask', { prompt: 'leafq', var: 'input' }], ['final', { var: 'v1' }]], leaf: { text: 'a' } }));
+    await recurse('mytask', { provider: sp.provider }, { input: 'abc', context: 'root: /abs/proj', contract: 'c' });
+    assert.equal(sp.calls[0].user, 'Working context (read-only):\nroot: /abs/proj\n\nmytask');
+    assert.match(leafCalls(sp)[0].user, /^Working context \(read-only\):\nroot: \/abs\/proj\n\nleafq\n\nPIECE:/);
+    assert.match(sp.calls.find((c) => c.user.startsWith('GOAL:')).user, /root: \/abs\/proj/);
+    const ch = scripted(agent({ script: [['ask', { prompt: 'cq', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'c' }) }));
+    await recurse('mytask', { provider: ch.provider }, { input: 'abc', context: 'root: /abs/proj', limits: { maxDepth: 2 } });
+    assert.match(ch.calls.find((c) => /DEPTH 1 of 2/.test(c.system)).user, /^Working context \(read-only\):\nroot: \/abs\/proj\n\ncq/);
+  });
+  it('absent/blank context => the user message is byte-identical to the task', async () => {
+    const a = scripted(agent({ text: 'ok' })); const b = scripted(agent({ text: 'ok' }));
+    await recurse('mytask', { provider: a.provider }, { input: 'x' });
+    await recurse('mytask', { provider: b.provider }, { input: 'x', context: '  ' });
+    assert.equal(a.calls[0].user, 'mytask'); assert.equal(b.calls[0].user, 'mytask');
   });
 });
 
-// Review finding (BA-5 fallout): mergeReduce guarded its LOSSLESS-concat fallback on `out.text` being falsy —
-// an invariant BA-5 removed. A faulted merge Loop now returns its partial, aborted prose, so the old
-// `out.text || concatReduce(results)` silently shipped that fragment as the synthesized answer and lost every
-// child result (the survivor-sum class RC-9 exists to prevent). Reachable because the merge Loop registers NO
-// tools: a hallucinated tool call is fed back as `[Loop] Unknown tool` and the round loop CONTINUES.
-describe('synthesize — a faulted merge falls back to the LOSSLESS concat, never a partial (BA-5 fallout)', () => {
-  const { synthesize } = require('../src/recurse-synthesize');
-  const RESULTS = ['child A answer', 'child B answer', 'child C answer'];
-
-  it('a provider error mid-merge returns every child result, not the aborted prose', async () => {
-    let round = 0;
-    const provider = {
-      name: 'p', model: 'm',
-      async generate() {
-        round += 1;
-        // Round 1: prose + a hallucinated tool call (no tools registered → Unknown tool → loop continues).
-        if (round === 1) return { text: 'PARTIAL MERGE, cut off mid-', toolCalls: [{ id: 'x1', name: 'ghost', arguments: {} }], usage: {} };
-        throw new Error('upstream 503');
-      },
-    };
-    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
-    assert.equal(round, 2, 'the harness really did drive a 2nd round (else this test proves nothing)');
-    for (const r of RESULTS) assert.ok(String(out).includes(r), `lossless concat must retain "${r}"`);
-    assert.ok(!String(out).includes('PARTIAL MERGE'), 'the aborted partial must NOT be returned as the answer');
+describe('recurse v2 — one tail: verify (decision 1), blockers, BA-5 best (K8 K13 K14 K15 K16)', () => {
+  it('K16: a critical task forces an isolated verifier with NO contract; a plain task does not verify', async () => {
+    const c = scripted(agent({ text: 'ok' }));
+    const out = await recurse(CRITICAL_TASK, { provider: c.provider });
+    assert.equal(c.calls.filter((x) => x.user.startsWith('GOAL:')).length, 1); assert.equal(out.verdict.pass, true);
+    const p = scripted(agent({ text: 'ok' }));
+    const plain = await recurse(SIMPLE_TASK, { provider: p.provider });
+    assert.equal(p.calls.filter((x) => x.user.startsWith('GOAL:')).length, 0); assert.equal(plain.verdict, null);
   });
+  it('K15: the verifier is an ISOLATED context (never the generator transcript) graded against the contract', async () => {
+    const sp = scripted(agent({ script: [['final_text', { text: 'ANSWER_Z' }]], verify: SATISFIED }));
+    await recurse('mytask', { provider: sp.provider }, { input: 'abc', contract: 'MUST_SAY_Z' });
+    const v = sp.calls.find((c) => c.user.startsWith('GOAL:'));
+    assert.ok(v.messages.length <= 2 && !v.tools.length); assert.match(v.user, /MUST_SAY_Z/); assert.match(v.user, /ANSWER_Z/);
+    assert.ok(!JSON.stringify(v.messages).includes('final_text'), 'no generator tool transcript');
+  });
+  it('DECISION 1: a verifier verdict of failed OR needs_revision is {incomplete, blocker:"verify-failed", verdict, best} — never converged-shaped', async () => {
+    const sp = scripted(agent({ text: 'the work', verify: FAILED }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c' });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'verify-failed'); assert.equal(out.result, undefined);
+    assert.equal(out.verdict.pass, false); assert.equal(out.best, 'the work');
+    const nr = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => ({ status: 'needs_revision', pass: false, critique: 'more' }) });
+    assert.equal(nr.incomplete, true); assert.equal(nr.blocker, 'verify-failed'); assert.equal(nr.verdict.critique, 'more');
+  });
+  it('children never grade against the parent contract/evaluate — only the TOP node verifies the answer', async () => {
+    let evals = 0;
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'c' }) }));
+    const out = await recurse('t', { provider: sp.provider }, { input: 'abc', limits: { maxDepth: 2 }, contract: 'c', evaluate: () => { evals++; return { status: 'satisfied', pass: true, critique: '' }; } });
+    assert.equal(evals, 1); assert.equal(out.verdict.pass, true);
+  });
+  it('K14: a THROWING caller verifier → broken-verifier (named, detail, work kept), never a crash', async () => {
+    const sp = scripted(() => ({ text: 'the actual work' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => { throw new Error('rubric grader exploded'); } });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'broken-verifier');
+    assert.match(out.blockerDetail, /evaluate threw: rubric grader exploded/); assert.equal(out.best, 'the actual work');
+  });
+  it('K14: garbage verdicts are broken-verifier; truthy non-boolean pass is accepted; a prototype-backed verdict keeps its fields; a method-reference verifier keeps its receiver', async () => {
+    const sp = scripted(() => ({ text: 'work' }));
+    const g = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => ({}) });
+    assert.equal(g.blocker, 'broken-verifier'); assert.equal(g.result, undefined); assert.match(g.blockerDetail, /neither a usable `pass` nor a valid `status`/);
+    const t = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => ({ pass: 1, critique: '' }) });
+    assert.equal(t.blocker, undefined); assert.equal(t.result, 'work');
+    class V { constructor(s, c) { this._s = s; this._c = c; } get status() { return this._s; } get critique() { return this._c; } }
+    const p = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => new V('satisfied', 'looks good') });
+    assert.equal(p.verdict.status, 'satisfied'); assert.equal(p.verdict.critique, 'looks good'); assert.equal(p.verdict.pass, true);
+    class Grader { constructor() { this.threshold = 0.5; } check() { return { pass: this.threshold > 0, critique: '' }; } }
+    const gr = new Grader();
+    const m = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: gr.check });
+    assert.equal(m.blocker, 'verify-failed', 'receiver is opts (documented): judged-and-failed, NOT a broken arbiter');
+    const b = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: gr.check.bind(gr) });
+    assert.equal(b.verdict.pass, true);
+  });
+  it('K14: blockerDetail is BOUNDED and a non-Error throw still yields an actionable detail', async () => {
+    const sp = scripted(() => ({ text: 'work' }));
+    const long = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => { throw new Error('x'.repeat(5000)); } });
+    assert.ok(long.blockerDetail.length < 600);
+    const weird = await recurse(SIMPLE_TASK, { provider: sp.provider }, { contract: 'c', evaluate: () => { throw { code: 1, secret: 'sk-leak' }; } });
+    assert.ok(!/\[object Object\]/.test(weird.blockerDetail) && !weird.blockerDetail.includes('sk-leak'));
+  });
+  it('K13 BA-11: a worker spinning on a policy deny → {incomplete, blocker:"governance-deny"} (stops at the 3rd denial, not the cap)', async () => {
+    const editTool = { name: 'edit', description: 'edit', parameters: { type: 'object', properties: {} }, execute: async () => 'edited' };
+    const sp = scripted((m, t, o, i) => ({ toolCalls: [{ id: 'e' + i, name: 'edit', arguments: { n: i } }] }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: (t) => (t === 'edit' ? '[deny: fs.writeScope] out' : true) }, { tools: [editTool] });
+    assert.equal(out.incomplete, true); assert.equal(out.blocker, 'governance-deny'); assert.equal(out.receipts.blocker, 'governance-deny');
+    assert.equal(sp.calls.length, 3);
+  });
+  it('K13: a legit deny→pivot does NOT short-circuit (allowlist-safe)', async () => {
+    const note = { name: 'note', description: 'n', parameters: { type: 'object', properties: {} }, execute: async () => 'noted' };
+    const edit = { name: 'edit', description: 'e', parameters: { type: 'object', properties: {} }, execute: async () => 'x' };
+    const sp = scripted((m, t, o, i) => (i === 0 ? { toolCalls: [{ id: 'e0', name: 'edit', arguments: {} }] } : i === 1 ? { toolCalls: [{ id: 'n1', name: 'note', arguments: {} }] } : { text: 'done despite the deny' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider, policy: (t) => (t === 'edit' ? '[deny: x] no' : true) }, { tools: [edit, note] });
+    assert.equal(out.incomplete, undefined); assert.match(out.result, /done despite/);
+  });
+  it('K8 BA-5/BA-13: a refused / dead / truncated worker is {incomplete} (never converged-empty) and keeps its partial text', async () => {
+    const ref = scripted(() => ({ text: 'partial thoughts', stopReason: 'refusal' }));
+    const r = await recurse(SIMPLE_TASK, { provider: ref.provider });
+    assert.equal(r.incomplete, true); assert.equal(r.blocker, 'error'); assert.equal(r.error, 'refusal'); assert.equal(r.best, 'partial thoughts');
+    const trunc = scripted(() => ({ text: 'cut off', stopReason: 'max_tokens' }));
+    assert.match((await recurse(SIMPLE_TASK, { provider: trunc.provider })).error, /truncated/);
+    const dead = scripted(() => { throw new Error('provider down'); });
+    const d = await recurse(SIMPLE_TASK, { provider: dead.provider });
+    assert.equal(d.incomplete, true); assert.equal(d.result, undefined);
+    const ok = scripted(() => ({ text: 'fine', stopReason: 'end_turn' }));
+    assert.equal((await recurse(SIMPLE_TASK, { provider: ok.provider })).result, 'fine', 'negative control: a clean finish converges');
+  });
+  it('depth is threaded into every policy check (the gate enforces limits.maxDepth)', async () => {
+    const depths = [];
+    const sp = scripted(agent({ script: [['ask', { prompt: 'q', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ toolCalls: [{ id: 'k', name: 'peek', arguments: { var: 'input', start: 0, len: 1 } }] }) }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider, policy: (_t, _a, ctx) => { depths.push(ctx.depth); return true; } }, { input: 'abc', limits: { maxDepth: 2 } });
+    assert.ok(depths.includes(0) && depths.includes(1));
+  });
+});
 
-  it('a clean merge still returns the model text (the fallback must not fire on success)', async () => {
-    const provider = { name: 'p', model: 'm', async generate() { return { text: 'MERGED OK', toolCalls: [], usage: {} }; } };
-    const out = await synthesize('merge these', RESULTS, { strategy: 'merge', provider });
-    assert.equal(out, 'MERGED OK', 'a successful merge is not clobbered by the fallback');
+describe('recurse v2 — compat shim for relayfact (decision 3)', () => {
+  const sensor = (n) => { let i = 0; return () => (++i >= n ? { status: 'satisfied', pass: true, critique: '' } : { status: 'needs_revision', pass: false, critique: 'try again' }); };
+  it('recurse(…, {maxDepth:0, refineLeaf}) forwards to refineWorker: escalating temperatures, receipts.refineLeaf, same shape', async () => {
+    const sp = scripted(() => ({ text: 'attempt' }));
+    const out = await recurse(SIMPLE_TASK, { provider: sp.provider }, { maxDepth: 0, refineLeaf: { sensor: sensor(3) } });
+    assert.equal(out.result, 'attempt'); assert.equal(out.receipts.refineLeaf.passed, true);
+    assert.deepEqual(sp.calls.map((c) => c.options && c.options.temperature), [0.2, 0.7, 1.0]);
+  });
+  it('warns ONCE per process (fresh module instance), not once per call', async () => {
+    const warns = []; const orig = console.warn; console.warn = (...a) => warns.push(a.join(' '));
+    const path = require.resolve('../src/recurse');
+    const saved = require.cache[path]; delete require.cache[path];
+    try {
+      const fresh = require('../src/recurse').recurse;
+      const sp = scripted(() => ({ text: 'a' }));
+      for (let i = 0; i < 3; i++) await fresh(SIMPLE_TASK, { provider: sp.provider }, { maxDepth: 0, refineLeaf: { sensor: sensor(1) } });
+    } finally { console.warn = orig; require.cache[path] = saved; }
+    assert.equal(warns.filter((w) => /refineWorker/.test(w)).length, 1);
+  });
+  it('refineLeaf without maxDepth:0 is refused loudly (use refineWorker), not silently ignored', async () => {
+    const sp = scripted(() => ({ text: 'a' }));
+    await assert.rejects(() => recurse(SIMPLE_TASK, { provider: sp.provider }, { refineLeaf: { sensor: sensor(1) } }), /refineWorker/);
+    await assert.rejects(() => recurse(SIMPLE_TASK, { provider: sp.provider }, { maxDepth: 1, refineLeaf: { sensor: sensor(1) } }), /refineWorker/);
+  });
+  it('K17/K13: the shim keeps refineLeaf semantics — broken sensor named, deny-spin labelled, rejected buffer adaptive (via refineWorker)', async () => {
+    const sp = scripted(() => ({ text: 'work' }));
+    const bs = await recurse(SIMPLE_TASK, { provider: sp.provider }, { maxDepth: 0, refineLeaf: { sensor: () => { throw new Error('harness crashed'); } } });
+    assert.equal(bs.blocker, 'broken-sensor'); assert.equal(bs.best, 'work'); assert.match(bs.blockerDetail, /harness crashed/);
+    const dropped = scripted((m, t, o) => ({ text: 'again', ...(o && o.temperature != null ? {} : {}) }));
+    const never = await recurse(SIMPLE_TASK, { provider: dropped.provider }, { maxDepth: 0, refineLeaf: { sensor: () => ({ status: 'needs_revision', pass: false, critique: 'no' }), maxIterations: 2 } });
+    assert.equal(never.receipts.refineLeaf.passed, false); assert.equal(never.incomplete, undefined, 'honest non-recovery rides the refineWorker result shape, unchanged');
+  });
+});
+
+describe('recurse v2 — ledger fixes (union removed, root-only critical floor, no memo of incomplete)', () => {
+  const ids10 = Array.from({ length: 10 }, (_, i) => ({ id: String(i + 1), text: `item ${i + 1}` }));
+  it('no `union` tool is offered and no tool description or system prompt mentions it', async () => {
+    const sp = scripted(agent({ script: [['final', { var: 'input' }]], text: 'x' }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: ids10, kind: 'count', limits: { maxDepth: 1 } });
+    for (const c of sp.calls) {
+      assert.ok(!c.tools.includes('union'), 'union not offered');
+      assert.ok(!/union/i.test(JSON.stringify(c.toolDefs.map((t) => ({ n: t.name, d: t.description, p: t.parameters })))), 'no tool description mentions union');
+      assert.ok(!/union/i.test(String(c.system || '')), 'system prompt does not mention union');
+    }
+    assert.ok(sp.calls.length > 0);
+  });
+  it('the isCritical floor fires at the ROOT only: a critical-sounding child ask runs no verify; a critical root still does', async () => {
+    const mk = (root) => scripted(agent({ script: [['ask', { prompt: 'investigate the security breach in production', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'CHILD' }) }));
+    const a = mk(); const out = await recurse(SIMPLE_TASK, { provider: a.provider }, { input: 'some text', limits: { maxDepth: 2 } });
+    assert.equal(out.result, 'CHILD'); assert.equal(a.calls.filter((c) => c.user.startsWith('GOAL:')).length, 0);
+    const b = mk(); const crit = await recurse(CRITICAL_TASK, { provider: b.provider }, { input: 'some text', limits: { maxDepth: 2 } });
+    assert.equal(b.calls.filter((c) => c.user.startsWith('GOAL:')).length, 1, 'only the root verifies'); assert.equal(crit.verdict.pass, true);
+  });
+  it('a classify that lost a window is NOT memoized: the identical re-run re-calls the provider and recovers', async () => {
+    const sp = scripted(agent({ script: [['classify', { predicate: PRED, var: 'input' }], ['classify', { predicate: PRED, var: 'input' }], ['final', { var: 'v2' }]], leaf: judge({ deadAt: 2 }) }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(leafCalls(sp).length, 12, 'the retry re-ran all 6 windows'); assert.equal(out.receipts.memoHits, 0);
+    assert.equal(out.result.count, 10); assert.equal(out.incomplete, undefined);
   });
 });

@@ -13,7 +13,7 @@ bareagent is a lightweight agent orchestration library (small core, zero require
 npm install bare-agent
 ```
 
-Eight entry points:
+Nine entry points:
 - `require('bare-agent')` — Loop, Planner, **assessComplexity** (pure-code no-LLM pre-planner → `{level, score, needsPlanning, signals}`), StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, **toUnits, fromUnits, unitAssembler** (the `assemble` context-units adapter, v0.13+), **unitTrimmer, harvestKey** (the destructive `trim` seam adapter — RT-2 harvest-before-evict, needs a consumer on litectx ≥ 0.16.0), BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
 - `require('bare-agent/errors')` — same error classes via a stable subpath (v0.10.1+) for adopters who want to import only the error surface
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback (the canonical short names; `*Provider` aliases — `OpenAIProvider`, `AnthropicProvider`, etc. — are also exported and match the class names, so either destructure works, v0.12.1+)
@@ -22,6 +22,7 @@ Eight entry points:
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, resolveToolPath, createSpawnTool, createDeferTool, spawnChild, readDeferQueue, liteCtxMcpBridgeConfig
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools, listServerTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
+- `require('bare-agent/recurse-adapters')` — buildScanTool, buildSearchTool, buildExactTool, litectxCorpus (ordinary tools / an `input` source for `recurse`; moved off the root export in the recurse v2 rebuild)
 
 **TypeScript:** bareagent is pure JS + JSDoc but ships `.d.ts` declarations (generated from that JSDoc, v0.11+). Every entry point above resolves types automatically — `import { Loop } from 'bare-agent'` and `import { OpenAI } from 'bare-agent/providers'` give full autocomplete and type-checking, including required-option enforcement (e.g. `new Loop({})` is a type error: `provider` is required). No `@types/bare-agent` needed. Shared shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`) are exported from the package's `types/`. The repo itself runs `tsc --checkJs` in CI on every push/PR so the JSDoc and the code can't drift.
 
@@ -34,11 +35,11 @@ Eight entry points:
 | Size a goal before planning (no LLM) | assessComplexity — `needsPlanning` gates a Planner pass |
 | Kill a spawned child that hangs silently | createSpawnTool / spawnChild `{ idleTimeoutMs }` |
 | Execute a step DAG with parallelism | runPlan + executeFn |
-| Decompose a hard task into a verified tree (RLM) | recurse — decompose → fan-out → verify → synthesize in one call (**wire a gate**, cost is open by design) |
-| Count / answer "how many / all" over a corpus, honestly | recurse(task, ctx, `{ corpus, retrieval: 'scan' }`) — scans every slice, CODE-counts |
-| Give recurse workers a persona/role (senior-dev stance) | recurse(task, ctx, `{ persona }`) — prepended to every worker, carries down the tree; not applied to the verifier |
-| Tell recurse workers WHERE they are (paths/cwd) so a slice can find its file | recurse(task, ctx, `{ context }`) — read-only blob on every worker's task message + the Planner + verifier; carries down (facts, not a stance) |
-| Let a recurse LEAF retry its own failure with a deterministic check | recurse(task, ctx, `{ refineLeaf: { sensor } }`) — leaf becomes a bounded generate→sense→regenerate loop; your sensor (test/compile/lint) judges the RETURNED result, gap fed back, escalating temperature; `rejectedBuffer` feeds prior failed attempts back on a temp-fixed model |
+| Answer a question about data too big for one prompt (RLM), with hard call limits | recurse(task, ctx, `{ input, kind }`) — input lives in an env var, fixed tools, typed final, formula-capped brakes (**wire a gate for money**) |
+| Count / answer "how many / all" over a corpus, honestly | recurse(task, ctx, `{ input: slices, kind: 'count' }`) — the `classify` tool scans every slice, code derives the count |
+| Give recurse workers a persona/role (senior-dev stance) | recurse(task, ctx, `{ persona }`) — prepended to every env worker, carries down; not applied to the verifier |
+| Tell recurse workers WHERE they are (paths/cwd) so a slice can find its file | recurse(task, ctx, `{ context }`) — read-only blob on every worker's task message + the verifier; carries down (facts, not a stance) |
+| Let a worker retry its own failure against a deterministic check | refineWorker(task, ctx, `{ refineLeaf: { sensor } }`) (the `recurse(…,{maxDepth:0, refineLeaf})` shim is deprecated) |
 | Track task state (pending/running/done/failed) | StateMachine |
 | Run agent turns on a schedule (cron, timers) | Scheduler |
 | Require human approval before dangerous actions | Checkpoint |
@@ -824,75 +825,45 @@ const results = await runPlan(steps, async (step) => {
 // results: [{ id: 's1', status: 'done', result: '...' }, { id: 's2', status: 'failed', error: '...' }, ...]
 ```
 
-## Wiring with recurse (RLM — decompose → fan-out → verify → synthesize)
+## Wiring with recurse (RLM — input in an environment, fixed tools, hard call limits)
 
-`recurse(task, ctx, opts)` is the **Recursive Language Models** primitive (v0.20.0): one import that decomposes a hard task into fresh-context workers, verifies against a setpoint, and synthesizes one result. It is **thin glue composed around `Loop`/`Planner`/`runPlan`/`Evaluator`/`spawn`** — not a new engine, never imported by `loop.js`. Returns `{ result, verdict, receipts }` on convergence, or `{ incomplete, best, missingSlices, receipts }` on guard exhaustion / a dead worker — **never a fabricated success** (RC-9).
-
-> **⚠️ Cost is open by DESIGN — wire a gate.** `recurse()` adds NO intrinsic total-work cap. On the **Family-A default** (model-driven) a node can spawn up to ~100 children per level, each recursing to `opts.maxDepth` (default 3) — so token/$ spend compounds and is bounded **only by your gate**, not by recurse. A live POC saw a weak model do 40–117 calls in one run. **Always wire bareguard** (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces depth/budget/call caps and turns a runaway into a clean `{ incomplete }` (proven: a wired `Gate` cut a 43–117-call runaway to 4–5 calls). The local brake without a gate is `opts.maxDepth: 1` (flat, no nesting). The forced modes (`mode:'fanout'`/`'partition'`) ARE bounded (deterministic count + concurrency cap).
+`recurse(task, ctx, opts)` is the **Recursive Language Models** primitive, rebuilt in v2 (breaking, see CHANGELOG): the data lives in an **environment variable** the model inspects through **fixed tools** — it is never pasted into the prompt — and the answer is a var of a **kind you declare**, derived by code. Composes around `Loop`/`Evaluator`, never imported by `loop.js`. Returns `{ result, verdict, receipts, metrics }`, or `{ incomplete, best, blocker, receipts, metrics }` — **never a faked success**; `incomplete` is the ONE "not done" signal.
 
 ```javascript
 const { recurse, wireGate } = require('bare-agent');
-const { Gate } = require('bareguard');
 
-// ALWAYS run governed for real work — the gate is the total-work bound.
-const gate = new Gate({ budget: { maxCostUsd: 0.50 }, limits: { maxTurns: 30, maxDepth: 3 }, humanChannel: async () => ({ decision: 'deny' }) });
-await gate.init();
-const { policy, onLlmResult } = wireGate(gate);
-
-// ctx = runtime wiring threaded down the whole tree; opts = policy knobs.
-const ctx = { provider, policy, onLlmResult };     // policy + onLlmResult = the gate over every node + the verifier
-const out = await recurse('Audit this 2000-line module for security bugs and rank them', ctx, { maxDepth: 3 });
-
-if (out.incomplete) {
-  console.warn('did not converge:', out.missingSlices, '— best partial:', out.best);  // honest, never a faked pass
-} else {
-  console.log(out.result, out.verdict);            // the synthesized answer + the verifier's gap report
-}
-console.log(out.receipts.spawned.length);          // RC-10 audit tree: parent→child lineage, per-node tokens/verdict
-```
-
-> **Audit-safe by construction (since Unreleased).** You pass `provider` on `ctx`, and a wired gate records the per-run ctx VERBATIM as `action._ctx`. `recurse()` **strips the live provider** (and thus its `apiKey`) from the ctx at every governance boundary before it reaches `gate.record`/`gate.check`, so the key never lands in the audit JSONL — only the provider *name* does (identity, not secret). The provider still reaches the worker (it runs); only the audited copy is cleaned. (bareguard's own secret-redaction is opt-in and value/pattern-based, so do not rely on it to catch a key you put on `ctx` — but DO scrub any *other* secret-bearing field you thread on `ctx` yourself, or configure `gate` `secrets`.)
-
-**Control families (how the tree is shaped):**
-
-- **Family A — model-driven (default).** The worker is handed an in-process `spawn_child` tool and *decides* whether to split. `assessComplexity` is a **hint, not a gate** (only `simple → single-shot`, and the non-overridable `critical → force adversarial verify` safety floor). Nothing extra to set.
-- **Family B — forced fan-out (opt-in).** `{ count: N }` → exactly N independent parallel workers via `Planner`→`runPlan`; or `{ mode: 'fanout' }` → count derived from the complexity tier (medium/complex/critical → 2/4/6). Deterministic + concurrency-capped.
-- **`{ mode: 'partition', corpus, workerBudget }`** — data-driven WIDTH: measure the corpus, split into `max(count floor, ⌈size/workerBudget⌉)` parallel scan-workers, union-count. A pre-wave `recurse_partition` policy checkpoint fires before any worker spends.
-
-**Retrieval over a corpus** (`opts.corpus = {id,text}[]` or an async `() => Promise<Slice[]>`, e.g. `litectxCorpus(litectx, {kind})`). Context reaches a worker as a HANDLE routed by question shape:
-
-| `retrieval` | For | Note |
-|---|---|---|
-| `'scan'` *(default when `corpus` present)* | "how many / all / count" | scans every slice, LLM-judges, **CODE-counts** the union — the only path that can't undercount; `window` 8, `passes` 2 |
-| `'search'` | find a needle | litectx `recall` tool (needs `ctx.litectx`), embeddings on — **cannot count** |
-| `'exact'` | rule / exact-term match | code-side AND-filter, embeddings off |
-| `'tools'` | mixed task (needle *and* count) | offers `scan_count` + `search_memory` + `exact_match`; worker picks per sub-query by tool description |
-
-A completeness guard **upgrades** a `'search'` on a "how many / all" ask to `'scan'` (upgrade-only, never a silent downgrade). Aggregation is **always code**, never a model-stated number.
-
-```javascript
-// Honest count over a corpus — scans every slice, code-counts the matches.
-const { result } = await recurse(
-  'How many of these support tickets are billing disputes?',
-  { provider, policy },                            // still wire the gate
-  { corpus: tickets /* {id,text}[] */, retrieval: 'scan' },
-);
-console.log(result.count, result.matchedIds);      // a code-derived count + the ids that back it
-```
-
-**Synthesis (`opts.synthesize`):** a **function** (deterministic code-reduce over child `results` — use for arithmetic/aggregation; LLM arithmetic over partials carried ~10–15% error), or `'concat'` (lossless no-LLM join), or `'merge'` (isolated Loop-driven subjective merge). Default = the parent model's own closing-turn synthesis. **`opts.contract`** = a definition-of-done the verifier grades against (instead of the loose task); **`opts.evaluate`** overrides the verifier. Exported helpers for the per-query face: `buildScanTool`, `buildSearchTool`, `buildExactTool`, `litectxCorpus`.
-
-**Worker persona (`opts.persona`, v0.21.0):** a string PREPENDED to every Family-A worker's system prompt — give workers a stance (`persona: 'You are a senior security engineer; be specific and cite the exact file:line'`). It **augments**, never replaces, the built-in decomposition policy + depth-scrub (those drive the spawn mechanics), and **carries down the whole tree** (a child of a "senior security engineer" is still one). It is deliberately **not** applied to the isolated verifier (that isolation is what defeats self-grading sycophancy) nor the deterministic scan judge. Absent ⇒ the worker prompt is unchanged from pre-0.21. **Security:** treat `persona` like a system prompt — it is prepended ahead of the decomposition policy and can override it for every worker, so pass caller-trusted text only, never untrusted/end-user input.
-
-```javascript
-const out = await recurse('Audit auth.js, billing.js, gateway.js for authz bugs', ctx, {
-  persona: 'You are a blunt senior application-security engineer. Report each finding as file:line + impact + fix.',
+const ctx = { provider, policy, onLlmResult };      // gate over every call in the tree + the verifier (money stays bareguard's)
+const out = await recurse('How many of these tickets are billing disputes?', ctx, {
+  input: tickets,            // string | {id,text}[] | async () => {id,text}[]  — lives in env var `input`; root prompt shows only type/size/short prefix
+  kind: 'count',             // 'count' | 'ids' | 'text' (default) | 'composite' {needle, count}
 });
+if (out.incomplete) console.warn(out.blocker, out.missingSlices, out.best);   // brake | halt | wrong-final | no-final | verify-failed | input | governance-deny | ...
+else console.log(out.result.count, out.result.ids);                           // count DERIVED by code from the ids var
 ```
 
-**Worker context (`opts.context`, v0.23.0):** a read-only working-context string (paths/cwd) PREPENDED to every worker's TASK message as a `Working context:` block — so a sliced child can **locate its artifact** (the Planner paraphrases the goal into subtasks and drops absolute paths; without this, workers guess `.`/`~`/`/tmp` and get denied). Forwarded to the Planner as `info` (path-aware slices) and shown to the verifier too (neutral FACTS, not a stance — distinct from `persona`, which is a privileged SYSTEM-prompt stance). Carries down the tree. **Security:** it still becomes part of the prompt, so pass caller-trusted run-state only, never untrusted/end-user text (lower-privilege than `persona` — user message, not system — but still an injection surface). Absent ⇒ the task message is unchanged.
+**Fixed tools (no model-written code):** `info`, `peek`, `find` (literal AND-terms, no regex), `chunk`, `ask` (one sub-call on a piece), `map` (code-driven fan-out over a list var, every slot required), `classify` (scan every item with an LLM judge, window 8 x 2 passes, **code-counts** the union of returned ids — the verbatim, measured wording; RC-2 drops ids the judge was not shown), `join`/`count` (code reductions), `final(var)` / `final_text(text)` / `final_parts`. Every tool returns a truncated preview and stores the full value under a var name; your `opts.tools` are appended. `classify`/`map`/`ask` are withheld at the depth cap (and the prompt says so). Repeating `classify`/`map`/`find` with the same args over the same data is a **memo hit: zero calls**.
 
-**Leaf self-correction (`opts.refineLeaf`, v0.23.0, opt-in):** turn a **definite leaf** (a node offered no `spawn_child` — `simple` tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass: `{ sensor, maxIterations?, temperatures?, rejectedBuffer? }`. `sensor(result, { task, context, contract }) → Verdict` is YOUR **deterministic** close (test/compile/lint — not a model judge); on a non-pass its `critique` (the gap, not the transcript) is fed FRESH into the next attempt and — **on models that accept `temperature`** — the **retry temperature ESCALATES** (default `[0.2, 0.7, 1.0]` — load-bearing there: a weak model at a flat temperature regenerates identical wrong code and ignores even crisp feedback). On a **temperature-fixed model** (e.g. `claude-sonnet-5`, which 400s any non-default temperature) the provider silently drops the param (see below), the escalation lever is inert, and the fed-back gap critique carries recovery alone; `receipts.refineLeaf.temperatures` then records the EFFECTIVE temps — a `null` marks an attempt that ran at the model's default (never the ignored requested value). Each attempt is gate-checked + metered; a HaltError mid-loop → clean `{ incomplete }`; honest non-recovery → `receipts.refineLeaf.passed === false` (never a faked pass); `receipts.tokens` sums all attempts. The error-keyed `recall` stays YOUR tool (`opts.tools`), keyed off the fed-back critique — bareagent stays litectx-agnostic. Carries down (engages at the leaves). Absent ⇒ a leaf is a single pass.
+**Typed final — "AI points, code decides".** For `count`/`ids` the model must cite a classify var with `final("<var>")`; code derives `{count, ids}` (the model never types a number, and no number is parsed from prose). A wrong-kind final (or a `final(var)` on a blank/whitespace-only text var, same as a blank `final_text`) gets ONE nudge, then `{ incomplete, blocker:'wrong-final' }`; no final at all is `blocker:'no-final'`. (A `text` task may also end with a plain reply.) A dead window/slot is **never a zero or a survivor-sum**: it surfaces as `{ incomplete, missingSlices, best:<floor> }`.
+
+**Brakes — structural, default ON (even with a gate), counting only.** `limits: { maxDepth: 1, maxCalls, maxWidth: 16, maxRounds: 20 }`. ONE call counter in a closure the model cannot read or raise meters **every** `generate` in the tree (worker rounds, sub-calls, classify windows, the verifier). `maxCalls` defaults to a **formula cap** computed by code from the input size — `ceil((ceil(items/8)*2 + maxRounds) * 1.25) + verify` (60 items: 45, 600: 213, 7,600: 2,400) — exposed in `receipts.cap`/`receipts.limits` and a `recurse:limits` stream event BEFORE the first call, and **tighten-only** (your `maxCalls` can only lower it). A tripped brake returns `{ incomplete, blocker:'brake', brake:'maxCalls'|'maxWidth'|'maxRounds', best }` with the work so far preserved (BA-5); a gate halt stays `blocker:'halt', halt:<rule>`, so "my brake" and "the gate" are distinguishable. `limits:'none'` disables them and every return carries `unbraked:true`. No dollars/tokens/wall-clock here — that is bareguard's; pass `rates` (per-1K, like `Loop({rates})`) to make `metrics.costUsd` authoritative (null if any round has no usage). Root `metrics: { calls, tokens, costUsd }` sums the whole tree.
+
+**Measured (live, `poc/rlm-v2-shipped-replay.mjs`, deepseek-flash, AG News).** Shipped `recurse` at 7,600 items (the whole test set, past the model's context): recall 0.99, precision 0.96, **root peak 2,284 tokens**, 1,903 calls vs cap 2,400; the same task inlined in a plain `Loop` returns `end_turn` with no error but recall 0.12 (a silent failure). At 600 items: RLM recall 0.99 vs inline 0.91 (paired), root peak ~2.2k vs ~35k inline. The needle+count mixed task passes; `maxCalls:5` brakes cleanly; the constant-final control fails.
+
+> **Audit-safe by construction.** `ctx.provider` (and its `apiKey`) is stripped from the ctx at every governance boundary (root loop, classify judges, sub-calls, children) before it reaches `gate.record`/`gate.check` — only the provider name lands in the audit. Scrub any *other* secret you put on `ctx` yourself.
+
+**Depth.** `limits.maxDepth` (shorthand `opts.maxDepth`) defaults to 1: sub-calls are plain leaf Loops (fresh window, only the result string comes back). At `maxDepth >= 2` an `ask`/`map` below the cap is a full in-process `recurse` one level down, sharing the parent's counter (children can only tighten it). Deeper nodes get a depth-aware prompt ("prefer direct action" / "deepest level, you cannot delegate").
+
+**Verify / setpoint.** `opts.contract` (definition of done) or `opts.evaluate` (your verifier) or an `isCritical` task (frozen safety floor) runs an isolated adversarial verifier on the final answer; the cap funds that call. A verdict of `failed`/`needs_revision` is `{ incomplete, blocker:'verify-failed', verdict, best }` (v2: it used to return a converged-shaped result). Children never grade against the parent's contract — the top node verifies once.
+
+**Adapters** (`require('bare-agent/recurse-adapters')`, moved from the root export): `buildScanTool`, `buildSearchTool` (litectx recall, needle only), `buildExactTool`, `litectxCorpus(litectx, {kind})` (an async `input` source over a litectx corpus). They are ordinary tools / an `input` source now, not recurse modes.
+
+**Worker persona (`opts.persona`):** a string PREPENDED to every env worker's system prompt (e.g. `'You are a senior security engineer; cite file:line'`); carries down; never applied to the isolated verifier nor the classify judge. **Security:** privileged system-prompt seam — caller-trusted text only.
+
+**Worker context (`opts.context`):** a read-only working-context string (paths/cwd) put on the USER message of every worker (and shown to the verifier) so a worker can locate its artifact. Carries down. Trusted run-state only; lower privilege than `persona`.
+
+**Removed options fail loud** (`ValidationError` with a migration hint): `corpus`, `retrieval`, `window`, `passes`, `mode`, `count`, `workerBudget`, `synthesize`; `refineLeaf` is only honoured through the one-release compat shim `recurse(…, { maxDepth: 0, refineLeaf })` (forwards to `refineWorker`, warns once per process) — otherwise use `refineWorker`.
+
+**Leaf self-correction (`refineWorker(task, ctx, { refineLeaf, ... })`; reached from `recurse` only through the `maxDepth:0` compat shim):** run ONE worker as a bounded generate→sense→regenerate loop: `{ sensor, maxIterations?, temperatures?, rejectedBuffer? }`. `sensor(result, { task, context, contract }) → Verdict` is YOUR **deterministic** close (test/compile/lint — not a model judge); on a non-pass its `critique` (the gap, not the transcript) is fed FRESH into the next attempt and — **on models that accept `temperature`** — the **retry temperature ESCALATES** (default `[0.2, 0.7, 1.0]` — load-bearing there: a weak model at a flat temperature regenerates identical wrong code and ignores even crisp feedback). On a **temperature-fixed model** (e.g. `claude-sonnet-5`, which 400s any non-default temperature) the provider silently drops the param (see below), the escalation lever is inert, and the fed-back gap critique carries recovery alone; `receipts.refineLeaf.temperatures` then records the EFFECTIVE temps — a `null` marks an attempt that ran at the model's default (never the ignored requested value). Each attempt is gate-checked + metered; a HaltError mid-loop → clean `{ incomplete }`; honest non-recovery → `receipts.refineLeaf.passed === false` (never a faked pass); `receipts.tokens` sums all attempts. The error-keyed `recall` stays YOUR tool (`opts.tools`), keyed off the fed-back critique — bareagent stays litectx-agnostic. One worker, no decomposition.
 
 > **Sensor integrity (`refineLeaf.sensor`):** the sensor must judge the **returned result** (tamper-proof — build/run the returned string in isolation), never a worker **side-effect** a worker with edit tools could game (writing a passing file then returning junk, or editing the failing test itself). The loop optimizes against whatever the sensor reads — keep the close outside what the worker can write. (RSI field lesson: reward-hacking appeared in every optimization loop with a gameable close. **Demonstrated in-repo** — `poc/sensor-gaming-blocked.mjs`: the moment the honest path was blocked, `claude-sonnet-5` faked a pass on an unsatisfiable on-disk check **5/5** — both by editing the test and by making the returned function non-pure — while a tamper-proof close that runs the returned artifact in isolation was not gameable.)
 
@@ -901,13 +872,11 @@ const out = await recurse('Audit auth.js, billing.js, gateway.js for authz bugs'
 > **`rejectedBuffer` (BA-14, v0.30.0):** a second lever for a **temperature-fixed** model, where escalation is inert. Instead of only the latest critique, it surfaces the model's OWN prior failed attempts VERBATIM — *"you wrote these, they failed X — write something STRUCTURALLY DIFFERENT."* This is **directed** diversity (attack the specific repeated mistake); escalation is **random** diversity, and the two are **antagonistic** — temperature monotonically degrades the buffer (`poc/ba14b`: flat-0.2 100% → 0.7 70% → 1.0 50%), so when the buffer engages the retry temperature is **held flat** at `temperatures[0]`, never escalated. Trigger: `true` = force on (also on temperature-accepting models); `false` = force off (pure BA-8 escalation); **unset = adaptive** — engage only once a prior attempt's temperature was dropped (i.e. a temp-fixed model where escalation is inert and the buffer is the sole lever). On a temperature-accepting model the default leaves behavior byte-identical. `receipts.refineLeaf.rejectedBuffer` reports whether it engaged. Efficacy is a **weak-model / fixation** phenomenon (live on `claude-sonnet-5` it engaged 6/6 but recovered no better than critique-only — cost-neutral, hence adaptive-not-always-on).
 
 ```javascript
-const out = await recurse('Fix the failing function in calc.js', ctx, {
+const out = await refineWorker('Fix the failing function in calc.js', ctx, {
   context: `project root: ${process.cwd()}\nresolve relative paths against it`,
   refineLeaf: { sensor: (code) => runTestsAndGrade(code) },   // your deterministic test/compile close
 });
 ```
-
-**What a delegated child inherits (important — the setpoint is the TOP node's job):** when a worker delegates with `spawn_child`, the child runs a **fresh `recurse`** that inherits `tools`, `synthesize`, `maxDepth`, `persona`, `context`, and `refineLeaf` — but the parent's **`contract`/`evaluate` are stripped** (and the forced `count`/`mode` + the corpus `retrieval` knobs). A slice is not graded against the *whole*-task definition-of-done (that verdict is the top node's, and a slice satisfying the whole DoD is the wrong question); only the top `recurse` verifies the synthesized result. The non-overridable `critical → force-verify` safety floor still fires per node (it keys on the task text, not the contract). So: set `contract`/`evaluate` once at the top; they do not — and should not — re-run per intermediate node.
 
 ## Wiring with Evaluator + refine (output-side verification)
 

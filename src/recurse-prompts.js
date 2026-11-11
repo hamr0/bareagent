@@ -68,4 +68,72 @@ function capabilityScrub(depth, maxDepth) {
   ].join('\n');
 }
 
-module.exports = { DECOMPOSITION_POLICY, capabilityScrub };
+
+// ── v2 env prompts (docs/product/rlm-prd.md §0.1; wording ported from poc/rlm-v2-env.mjs, validated live) ──────
+
+/** System prompt of a leaf sub-call (`ask`/`map` at the depth cap): one question, one piece, no tools. */
+const SUB_SYSTEM = 'You answer one question about one piece of data. Be brief and literal.';
+
+/** The typed-final rule + ONE legal example per answer kind ("AI points, code decides"). */
+const TYPED_FINAL = {
+  count: 'ANSWER KIND: count. End with final("<var>") citing the var returned by classify (e.g. classify(...) returned var=v2, so call final("v2")). CODE derives the number from that var\'s ids — NEVER type a number; final_text is refused.',
+  ids: 'ANSWER KIND: ids. End with final("<var>") citing the var returned by classify (e.g. final("v2")).',
+  composite: 'ANSWER KIND: needle text + count. End with final_parts(needle="<exact text of the item>", count="<var of kind count>"), e.g. final_parts(needle="Some exact headline", count="v3"). CODE derives the number from the count var — NEVER type a number.',
+  text: 'ANSWER KIND: text. End with final_text("<your answer>"), or cite a text var with final("<var>").',
+};
+
+/**
+ * Depth-aware scope text for the env worker (NB-4/RC-12 for v2): at/after the cap the sub-call tools are withheld
+ * and the prompt says so (honest "incomplete" beats a fabricated answer); below the cap but nested, prefer direct action.
+ * @param {number} depth @param {number} maxDepth @returns {string}
+ */
+function envScope(depth, maxDepth) {
+  if (depth >= maxDepth) {
+    return `\nDEPTH ${depth} of ${maxDepth} — this is the deepest level. You CANNOT delegate: ask, map and classify are not available. Work directly with info/peek/find/chunk/join/count; if the task cannot be answered faithfully, say so rather than guessing.`;
+  }
+  if (depth > 0) return `\nDEPTH ${depth} of ${maxDepth} — you are inside a delegated sub-task. PREFER DIRECT ACTION; only delegate further when a part is genuinely too large for one pass.`;
+  return '';
+}
+
+/**
+ * The env worker's system prompt. The input is NEVER here — only `meta` (type, size, short prefix).
+ * @param {{persona?: string, meta: string|null, kind: string, canSub: boolean, depth: number, maxDepth: number}} p
+ * @returns {string}
+ */
+function envSystem({ persona, meta, kind, canSub, depth, maxDepth }) {
+  const lines = meta ? [
+    'You answer questions about data you cannot see. It lives OUTSIDE your prompt as env var `input`.',
+    meta,
+    'Every tool returns a truncated preview and stores the full value under a var name you can pass to the next tool.',
+    'Rules: never guess the data. ' + (canSub
+      ? 'For "how many"/"all" questions call classify(predicate, "input") — it counts in CODE; do not count by hand. For a subjective question about one piece use ask(prompt, var); to run one question over every chunk use chunk then map. '
+      : '') + 'To locate an item by words it contains use find(var, terms); to read by position use peek.',
+  ] : ['Answer the task. Use the provided tools if any.'];
+  lines.push(TYPED_FINAL[/** @type {keyof typeof TYPED_FINAL} */ (kind)]);
+  const p = typeof persona === 'string' ? persona.trim() : '';
+  return (p ? p + '\n\n' : '') + lines.join('\n') + envScope(depth, maxDepth);
+}
+
+// §9.2.1 LOCKED defaults: WINDOW is the one calibrated number (recall knee ≈ 8, per-model); PASSES=2 (offset-window union → recall ~0.9+).
+const SCAN_WINDOW = 8;
+const SCAN_PASSES = 2;
+
+/**
+ * The §9.2-validated classify system prompt, GENERALIZED from the POC's hardcoded "SPORTS news" predicate to
+ * an arbitrary one. The load-bearing wording is verbatim ("Examine EACH item individually", "Output ONLY the
+ * IDs", "Comma-separated. If none, output 'none'. No count, no prose.") — the predicate is the only variable.
+ * It MUST return ids, not a count: counting is CODE's job (RC-5 / §9.1), so the judge never does arithmetic.
+ * @param {string} predicate - The task/goal the items are judged against.
+ * @returns {string}
+ */
+function classifySystem(predicate) {
+  return (
+    'You are a precise classifier. Examine EACH item individually. Each item is shown on its own line as ' +
+    '`<id> => <text>`. Output ONLY the IDs of the items that match the predicate below — copy each matching ' +
+    'item\'s <id> VERBATIM (the exact characters before " => "; an id may itself contain ":" — keep all of ' +
+    'it). Comma-separated. If none, output "none". No count, no prose.\n\nPREDICATE: ' +
+    predicate
+  );
+}
+
+module.exports = { DECOMPOSITION_POLICY, capabilityScrub, SUB_SYSTEM, TYPED_FINAL, envScope, envSystem, classifySystem, SCAN_WINDOW, SCAN_PASSES };

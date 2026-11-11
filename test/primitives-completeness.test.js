@@ -51,6 +51,12 @@ const EXCLUDED = new Set([
   'CALIBRATION_CASES', 'INJECTION_BATTERY', 'scoreCase', 'gradeRun', 'constantHonored',
   // Neutral-unit converters: the SEAMS (unitAssembler/unitTrimmer/harvestKey) are the primitives.
   'toUnits', 'fromUnits',
+  // recurse-adapters internals (exported plainly for tests; the four builders are the primitives):
+  'scanCount',      // the engine behind buildScanTool — not a standalone capability
+  'judgeWindow',    // one scan window judge, an implementation detail of scanCount
+  'normalizeCorpus',// slice validation helper
+  'rotate',         // deterministic array rotation helper
+  'KNN_K',          // litectx recall cap constant
   // Niche config helper (the default action translator for wireGate).
   'defaultActionTranslator',
 ]);

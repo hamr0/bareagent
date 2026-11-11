@@ -2,6 +2,62 @@
 
 All notable changes to bare-agent are documented here. Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [SemVer](https://semver.org/).
 
+## [0.60.0] - 2026-11-11
+
+### Added
+
+- **`refineWorker(task, ctx, opts)`** — the refineLeaf worker extracted into a standalone primitive
+  (`src/refine-worker.js`, exported from `bare-agent`). Takes the same `opts` as `recurse` (`refineLeaf`, `persona`,
+  `context`, `tools`, `contract`, `evaluate`; `opts.evaluate`'s verdict is the TOP verdict, overriding the sensor's; `opts.maxDepth` is REJECTED with a `ValidationError` — a worker is always a leaf, the recurse shim strips it) and returns the same shape, incl.
+  `receipts.refineLeaf` and the `governance-deny` / `broken-sensor` / `broken-verifier` labels. `recurse`'s refineLeaf
+  leaf path now DELEGATES to it (the BA-15 arbiter code and the verify slot moved with it, not copied), so
+  `recurse(task, ctx, {maxDepth:0, refineLeaf})` is byte-identical in behaviour. This is step 1 of the recurse v2
+  rebuild plan (`docs/product/rlm-prd.md` §0.1). Proof: `test/refine-worker.test.js` (direct API + equivalence with
+  the recurse route, mutation-proved); every existing recurse test passes unchanged.
+
+### BREAKING — `recurse()` v2 (a real RLM over a fixed-tool environment)
+
+`recurse()` was rebuilt, not patched (`docs/product/rlm-prd.md` §0.1). The old call shapes do not work; removed options now THROW a `ValidationError` naming the replacement (fail loud, never a silently dead knob).
+
+- **Context is a variable.** `opts.input` (`string | {id,text}[] | async () => {id,text}[]`) lives in an env var; the root prompt shows only type, size and a 200-char prefix. Malformed/duplicate/whitespace-or-comma ids are dropped and counted in `receipts.input.dropped`; a throwing source is `{incomplete, blocker:'input'}`.
+- **Fixed tools, no model-written code:** `info`, `peek`, `find` (literal AND-terms), `chunk`, `ask`, `map`, `classify` (the measured scan: verbatim judge wording, `<id> => <text>`, window 8, 2 deterministic passes, ids not shown are dropped, a dead window is a floor), `join`/`count`, `final`/`final_text`/`final_parts`. Every tool returns a truncated preview and stores the full value in a var. Caller `opts.tools` append.
+- **Typed final, "AI points, code decides".** `opts.kind` (`count|ids|text|composite`, default `text`); `final(var)` must cite a var of that kind and CODE derives `{count, ids}`; one nudge then `{incomplete, blocker:'wrong-final'}`; no final is `blocker:'no-final'`. No number is ever parsed from prose (kind `text` accepts a plain reply).
+- **Structural brakes, default ON (even with a gate).** `opts.limits` `{maxDepth:1, maxCalls, maxWidth:16, maxRounds:20}` plus ONE shared call counter metering every `generate` in the tree (worker, sub-call, classify window, verify). `maxCalls` defaults to a formula cap from the input size, `ceil((ceil(items/8)*2 + maxRounds) * 1.25) + verify` (60 items: 45; 600: 213; 7,600: 2,400), shown in `receipts.cap` and a `recurse:limits` stream event before the first call; a caller `maxCalls` can only lower it. A trip returns `{incomplete, blocker:'brake', brake:'maxCalls'|'maxWidth'|'maxRounds', best}` (work preserved); a gate halt is `blocker:'halt', halt:<rule>`. `limits:'none'` disables the brakes and marks `unbraked:true`.
+- **One tail.** Every path ends in a single `finish()` (verify, halt/brake mapping, `best`, blockers). Root returns carry `metrics {calls, tokens, costUsd}` for the whole tree; new `opts.rates` (per-1K, like `Loop({rates})`) makes `costUsd` authoritative, honest null otherwise. Receipts gain `limits`, `cap`, `rounds`, `rootPeakInput`, `vars`, `memoHits`, `nudges`, `toolCalls`, `calls`.
+- **Memo:** `classify`/`map`/`find` by exact args (vars are write-once, so no input hash); a repeat costs 0 calls. A result carrying missing slices is NOT memoized — an identical re-run retries the dead window.
+- **`union` tool removed.** No tool produces a list of `{ids}` elements (map → strings, chunk → items, classify → one `{ids}`), so it could only refuse; it was never used in the live replays. Counting stays `classify` + `final(var)`; reductions are `join`/`count`.
+- **The `isCritical` verify floor fires at the TOP task only.** A child's task is a model-written `ask`/`map` prompt; a critical-sounding one no longer adds unplanned grader calls per child. `contract`/`evaluate` behaviour unchanged.
+- **Verifier verdict `failed`/`needs_revision` now returns `{incomplete, blocker:'verify-failed', verdict, best}`**, not a converged-shaped `{result, verdict}`. `incomplete` is the one "not done" signal.
+- **Measured live (shipped replay, deepseek-flash, AG News, one rep):** at the full 7,600-item set (past the model's context) RLM recall 0.99, precision 0.96, root peak 2,284 tokens, 1,903 calls under a 2,400 cap, while the same task inlined in one `Loop` returned `end_turn` with no error and recall 0.12. At 600 items RLM recall 0.99 vs inline 0.91; mixed needle+count, `maxCalls:5` brake, `limits:'none'` and the constant-final negative control all behaved as pre-registered. One model only.
+- **Kept:** the audit-safe ctx (`auditSafeCtx`), depth-aware prompts with `ask`/`map`/`classify` withheld at the cap, fresh window per sub-call, in-process self-call at `maxDepth>=2` (shared counter, tighten-only), `persona`/`context`, `isCritical` forced verify, BA-5 `best`, `governance-deny`/`broken-verifier` labels with `blockerFrom` for descendants.
+
+**Migration**
+
+| Before | After |
+|---|---|
+| relayfact `recurse(…, {maxDepth:0, refineLeaf})` | `refineWorker(task, ctx, {persona, tools, sensor, temperatures})`. A one-release compat shim still forwards and `console.warn`s once per process; `refineLeaf` with any other `maxDepth` throws |
+| `corpus` / `retrieval` / `window` / `passes` | `input` + `kind:'count'` (the `classify` tool); the `window`/`passes` knobs are fixed at 8/2 |
+| `mode:'fanout'` / `mode:'partition'` / `count` / `workerBudget` | `limits.maxWidth`, `opts.concurrency` (no Planner fan-out; the model chunks and maps) |
+| `synthesize` (function or `'concat'`/`'merge'`) | removed; use the `join`/`count` code tools |
+| `spawn_child` prose delegation, `simple` routing | `ask`/`map` over pieces of `input`; no tier routing (`isCritical` still forces verify) |
+| receipts `retrieval` / `scan` / `partition` / `refineLeaf` fields | `receipts.calls`, `vars`, `limits`, `cap`, ... (`refineWorker` keeps `receipts.refineLeaf`) |
+| `{result, verdict:{pass:false}}` | `{incomplete, blocker:'verify-failed', verdict}` |
+| open cost ("wire a gate or it can burn") | brakes ON by default; `limits:'none'` opts out (`unbraked:true`); money still the gate's |
+| `import { buildScanTool, buildSearchTool, buildExactTool, litectxCorpus } from 'bare-agent'` | `from 'bare-agent/recurse-adapters'` (new subpath; no re-export from the root). They are plain tools / an `input` source now; `impliesCompleteness` (the completeness regex) is gone |
+
+### Added (recurse v2)
+
+- `bare-agent/recurse-adapters` subpath export (`src/recurse-adapters.js`).
+- `src/recurse-brakes.js`, `src/recurse-finish.js`, `src/recurse-env.js` (internal). `poc/rlm-v2-env.mjs` (POC) and `poc/rlm-v2-shipped-replay.mjs` (drives the shipped `recurse`, exit code is the verdict).
+
+### Fixed (recurse v2)
+
+- `final(var)` on a blank (empty/whitespace-only) text var is refused exactly like a blank `final_text` (one nudge, then `{incomplete, blocker:'wrong-final'}`) instead of returning `{result:''}` as a success; a dead-slot var keeps its `missingSlices` incomplete path.
+
+### Removed (recurse v2)
+
+- `src/recurse-synthesize.js`; `recurse`'s use of `Planner`/`runPlan`; the options listed in the migration table. Older POCs under `poc/` that import the removed v1 paths (`src/recurse-retrieval.js`) are historical and no longer run.
+
 ## [0.59.0] - 2026-11-01
 
 ### Added

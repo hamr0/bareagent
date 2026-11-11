@@ -1,5 +1,7 @@
 # RLM_EXPLAINED — Recursive Language Models, Coding Agents & the Loop
 
+> **Superseded by `docs/product/rlm-prd.md` §0.1 (recurse v2, 2026-11-11).** `mode:'fanout'`/`'partition'`, `count`, `workerBudget`, `retrieval`/`corpus`/`window`/`passes`, `synthesize` strings, the Planner fan-out and the prose `spawn_child` tool described below were REMOVED (they now throw). `recurse()` takes `opts.input` + `opts.kind` over a fixed-tool environment with structural brakes; the measured findings below (scan wording/window/passes, code aggregation, pull over push) survive as the `classify` tool and the typed final. The scan helpers moved to `bare-agent/recurse-adapters`. Kept here as history, not rewritten.
+
 > Session capture (2026-06-26). A grounded walkthrough of Recursive Language
 > Models (RLM), recursive coding agents, the two orchestration families, how the
 > "LLM-from-code" loop actually works, where Markdown specs (`prose.md` /

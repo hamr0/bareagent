@@ -20,7 +20,7 @@ const { Planner } = require('./src/planner');
 const { Evaluator } = require('./src/evaluator');
 const { refine } = require('./src/refine');
 const { recurse } = require('./src/recurse');
-const { buildSearchTool, buildExactTool, buildScanTool, litectxCorpus } = require('./src/recurse-retrieval');
+const { refineWorker } = require('./src/refine-worker');
 const { remember } = require('./src/remember');
 const { judge } = require('./src/judge');
 const { calibrate, CALIBRATION_CASES, INJECTION_BATTERY, scoreCase, gradeRun, constantHonored } = require('./src/judge-calibration');
@@ -54,10 +54,7 @@ module.exports = {
   Evaluator,
   refine,
   recurse,
-  buildSearchTool,
-  buildExactTool,
-  buildScanTool,
-  litectxCorpus,
+  refineWorker,
   remember,
   judge,
   calibrate,

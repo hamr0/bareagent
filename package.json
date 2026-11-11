@@ -1,6 +1,6 @@
 {
   "name": "bare-agent",
-  "version": "0.59.0",
+  "version": "0.60.0",
   "files": [
     "index.js",
     "index.d.ts",
@@ -55,6 +55,10 @@
     "./mcp": {
       "types": "./src/mcp.d.ts",
       "default": "./src/mcp.js"
+    },
+    "./recurse-adapters": {
+      "types": "./src/recurse-adapters.d.ts",
+      "default": "./src/recurse-adapters.js"
     },
     "./bareguard": {
       "types": "./src/bareguard-adapter.d.ts",
