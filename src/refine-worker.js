@@ -18,7 +18,7 @@ const { Loop } = require('./loop');
 const { Evaluator } = require('./evaluator');
 const { assessComplexity, isCritical } = require('./complexity');
 const { refine } = require('./refine');
-const { HaltError } = require('./errors');
+const { HaltError, ValidationError } = require('./errors');
 const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
 
 // BA-8 leaf-refine: temperature ESCALATES per retry. The live POC (poc/ba8-leaf-refine.mjs) found that at a flat
@@ -538,7 +538,10 @@ function newNode(task, depth, assessment, critical) {
  * temperature-fixed model. Does exactly what `recurse(task, ctx, {maxDepth:0, refineLeaf, ...})` does and returns
  * the SAME shape (`{result, verdict, receipts}` or `{incomplete, best, blocker?, receipts}`), incl.
  * `receipts.refineLeaf`. Takes the same `opts` as `recurse` (`refineLeaf`, `persona`, `context`, `tools`,
- * `contract`, `evaluate`, `maxDepth` default 0). Governance is the caller's gate (`ctx.policy`/`onLlmResult`).
+ * `contract`, `evaluate`; `maxDepth` is REJECTED with a ValidationError — a worker is always a leaf). Governance is the caller's gate (`ctx.policy`/`onLlmResult`).
+ * `opts.evaluate` (optional `(result, {contract, task}) => Verdict`) is supported: when set (as with a `contract` or
+ * a critical task) it runs AFTER the sensor loop and its verdict is the TOP verdict — it overrides the sensor's
+ * (a failing sensor verdict is replaced by the evaluate verdict; a throwing/garbage evaluate is `blocker:'broken-verifier'`).
  * @when you want a model to produce an artifact that a deterministic check (test/compile/lint) must pass, retried with fed-back gaps — one worker, no decomposition
  * @fails returns `{incomplete, best}` on non-recovery, halt, deny-spin (`blocker:'governance-deny'`) or a broken sensor (`blocker:'broken-sensor'`); throws on a missing task, provider or sensor
  * @param {string} task
@@ -550,6 +553,9 @@ function newNode(task, depth, assessment, critical) {
  *   if (out.incomplete) console.log(out.blocker, out.best);
  */
 async function refineWorker(task, ctx = {}, opts = {}) {
+  if (/** @type {any} */ (opts).maxDepth !== undefined) {
+    throw new ValidationError('refineWorker: opts.maxDepth is not supported (a refineWorker is always a depth-0 leaf; there is nothing to cap) — remove it');
+  }
   const sensor = opts.refineLeaf && opts.refineLeaf.sensor;
   if (typeof sensor !== 'function') {
     throw new Error('[refineWorker] opts.refineLeaf.sensor must be a function');
@@ -563,7 +569,7 @@ async function refineWorker(task, ctx = {}, opts = {}) {
     const provider = ctx.provider || opts.provider;
     if (!provider) throw new Error('[refineWorker] requires a provider on ctx.provider (or opts.provider)');
     const depth = Number.isInteger(ctx.depth) ? /** @type {number} */ (ctx.depth) : 0;
-    const maxDepth = Number.isInteger(opts.maxDepth) ? /** @type {number} */ (opts.maxDepth) : 0;
+    const maxDepth = 0; // a refineWorker is always a leaf (opts.maxDepth is rejected above)
     const assessment = assessComplexity(task);
     const critical = isCritical(task);
     state = {

@@ -7,7 +7,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { refineWorker } = require('../index');
 const { recurse } = require('../src/recurse');
-const { HaltError } = require('../src/errors');
+const { HaltError, ValidationError } = require('../src/errors');
 
 const TASK = 'list the open files';
 const lastUser = (messages) => { for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user') return messages[i].content || ''; return ''; };
@@ -138,7 +138,7 @@ describe('refineWorker — equivalence with recurse(maxDepth:0, refineLeaf) (the
       const a = mk(), b = mk();
       const spA = scriptedProvider(a.handler), spB = scriptedProvider(b.handler);
       const viaRecurse = await recurse(TASK, { provider: spA.provider }, { maxDepth: 0, persona: 'P', context: 'C', refineLeaf: a.refineLeaf });
-      const viaWorker = await refineWorker(TASK, { provider: spB.provider }, { maxDepth: 0, persona: 'P', context: 'C', refineLeaf: b.refineLeaf });
+      const viaWorker = await refineWorker(TASK, { provider: spB.provider }, { persona: 'P', context: 'C', refineLeaf: b.refineLeaf });
       assert.deepEqual(viaWorker, viaRecurse);
       assert.deepEqual(spB.calls, spA.calls, 'same prompts and temperatures on the wire');
     });
@@ -158,5 +158,40 @@ describe('refineWorker — equivalence with recurse(maxDepth:0, refineLeaf) (the
     const viaWorker = await refineWorker(TASK, { provider: spB.provider, depth: 1 }, { refineLeaf: { sensor: PASS_ON_FIXED } });
     assert.deepEqual(viaWorker, viaRecurse);
     assert.deepEqual(spB.calls, spA.calls);
+  });
+});
+
+describe('refineWorker — maxDepth rejected, evaluate overrides sensor', () => {
+  for (const md of [0, 2]) {
+    it(`opts.maxDepth:${md} throws ValidationError (type-only message)`, async () => {
+      const sp = scriptedProvider(recovering());
+      await assert.rejects(
+        () => refineWorker(TASK, { provider: sp.provider }, { maxDepth: md, refineLeaf: { sensor: PASS_ON_FIXED } }),
+        (e) => e instanceof ValidationError && /maxDepth/.test(e.message) && !e.message.includes(String(md === 2 ? 'x2x' : 'x0x')),
+      );
+      assert.equal(sp.calls.length, 0);
+    });
+  }
+
+  it('the recurse compat shim strips maxDepth, still works, and warns once', async () => {
+    const warns = []; const orig = console.warn; console.warn = (m) => warns.push(String(m));
+    try {
+      const sp = scriptedProvider(recovering());
+      const out = await recurse(TASK, { provider: sp.provider }, { maxDepth: 0, refineLeaf: { sensor: PASS_ON_FIXED } });
+      assert.ok(out.result && out.verdict.pass);
+      assert.ok(out.receipts.refineLeaf, 'ran through refineWorker');
+      assert.ok(warns.filter(w => w.includes('deprecated')).length <= 1, 'deprecation warns at most once per process');
+    } finally { console.warn = orig; }
+  });
+
+  it("opts.evaluate's verdict is the TOP verdict, overriding a failing sensor", async () => {
+    const sp = scriptedProvider(recovering({ recover: false }));
+    const out = await refineWorker(TASK, { provider: sp.provider }, {
+      refineLeaf: { sensor: PASS_ON_FIXED, maxIterations: 2 },
+      evaluate: async () => ({ status: 'satisfied', pass: true, score: 1, critique: 'EVAL', suggestions: [] }),
+    });
+    assert.equal(out.receipts.refineLeaf.passed, false, 'sensor failed');
+    assert.equal(out.verdict.critique, 'EVAL', 'evaluate verdict wins');
+    assert.equal(out.verdict.pass, true);
   });
 });

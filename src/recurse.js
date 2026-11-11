@@ -144,7 +144,8 @@ async function recurse(task, ctx = {}, opts = {}) {
   if (opts.refineLeaf) { // decision 3: one-release compat shim for relayfact's recurse(…, {maxDepth:0, refineLeaf})
     if (opts.maxDepth === 0 && typeof opts.refineLeaf.sensor === 'function') {
       if (!shimWarned) { shimWarned = true; console.warn('[bare-agent] recurse(…, {maxDepth:0, refineLeaf}) is deprecated: call refineWorker(task, ctx, opts) instead (shim removed next release).'); }
-      return refineWorker(task, ctx, opts);
+      const { maxDepth: _dropped, ...workerOpts } = opts; // refineWorker rejects maxDepth (dead knob there)
+      return refineWorker(task, ctx, workerOpts);
     }
     throw new ValidationError('recurse: opts.refineLeaf is only supported through the maxDepth:0 compat shim — use refineWorker()');
   }

@@ -8,7 +8,7 @@ All notable changes to bare-agent are documented here. Format: [Keep a Changelog
 
 - **`refineWorker(task, ctx, opts)`** — the refineLeaf worker extracted into a standalone primitive
   (`src/refine-worker.js`, exported from `bare-agent`). Takes the same `opts` as `recurse` (`refineLeaf`, `persona`,
-  `context`, `tools`, `contract`, `evaluate`; `maxDepth` defaults to 0) and returns the same shape, incl.
+  `context`, `tools`, `contract`, `evaluate`; `opts.evaluate`'s verdict is the TOP verdict, overriding the sensor's; `opts.maxDepth` is REJECTED with a `ValidationError` — a worker is always a leaf, the recurse shim strips it) and returns the same shape, incl.
   `receipts.refineLeaf` and the `governance-deny` / `broken-sensor` / `broken-verifier` labels. `recurse`'s refineLeaf
   leaf path now DELEGATES to it (the BA-15 arbiter code and the verify slot moved with it, not copied), so
   `recurse(task, ctx, {maxDepth:0, refineLeaf})` is byte-identical in behaviour. This is step 1 of the recurse v2
