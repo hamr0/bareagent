@@ -39,6 +39,7 @@
 //   node poc/rlm-v2-env.mjs --dry                                   # no keys, scripted fake: (d)(e)+NC2+sanity
 //   OPENAI_API_KEY=...    node poc/rlm-v2-env.mjs --model gpt-4o-mini
 //   ANTHROPIC_API_KEY=... node poc/rlm-v2-env.mjs --model haiku
+//   DEEPSEEK_API_KEY=...  node poc/rlm-v2-env.mjs --model deepseek   # deepseek-flash, thinkingMode off, costUsd unpriced (no repo rate)
 //   options: --csv agnews.csv  --unit 60  --limits none | maxCalls=64,maxWidth=16,maxRounds=20,maxDepth=1
 // Exit: 0 all green, 1 a check failed, 2 missing key, 3 timeout/ceiling, 4 INVALID (a control passed).
 
@@ -103,6 +104,9 @@ const truthOf = (items) => items.filter((r) => labelOf.get(r.id) === TARGET).len
 const RATES = {
   'gpt-4o-mini': { in: 0.00015, out: 0.0006, cacheReadMult: 0.5 },
   haiku: { in: 0.001, out: 0.005 },
+  // deepseek: NO rate constant anywhere in the repo/docs -> null (never invented). Tokens are still printed; costUsd = null
+  // (unpriced). The Loop's own Sonnet-tier guesstimate warning fires (deduped below to once per distinct message).
+  deepseek: null,
 };
 
 // ── meter + brakes: ONE closure; tools and the model only ever see the wrapped provider ─────────────
@@ -133,7 +137,8 @@ function makeRun({ limits, rates }) {
         else {
           const t = { in: u.inputTokens || 0, out: u.outputTokens || 0, cr: u.cacheReadTokens || 0, cw: u.cacheCreationTokens || 0 };
           S.tokens.in += t.in; S.tokens.out += t.out; S.tokens.cr += t.cr; S.tokens.cw += t.cw;
-          S.cost += (t.in * rates.in + t.out * rates.out + t.cr * rates.in * (rates.cacheReadMult ?? 0.1) + t.cw * rates.in * (rates.cacheWriteMult ?? 1.25)) / 1000;
+          if (!rates) S.unpriced = true;
+          else S.cost += (t.in * rates.in + t.out * rates.out + t.cr * rates.in * (rates.cacheReadMult ?? 0.1) + t.cw * rates.in * (rates.cacheWriteMult ?? 1.25)) / 1000;
           if (role === 'root') { S.rootRounds++; S.rootPeak = Math.max(S.rootPeak, t.in + t.cr + t.cw); }
         }
         if (r && r.text) S.lastText = r.text;
@@ -186,7 +191,7 @@ function buildEnv({ items, provider, run }) {
 
   const subCall = async (system, user) => { // one fresh leaf Loop per piece; HaltError (brake) propagates
     if (1 > L.maxDepth) trip('maxDepth');
-    const out = await new Loop({ provider: wrap(provider, 'sub'), system, throwOnError: false, rates: run.rates }).run([{ role: 'user', content: user }], []);
+    const out = await new Loop({ provider: wrap(provider, 'sub'), system, throwOnError: false, rates: run.rates || undefined }).run([{ role: 'user', content: user }], []);
     if (typeof out.error === 'string' && out.error.startsWith('halt:')) throw new HaltError(`[${out.error}]`, { rule: out.error.slice(5) });
     return out.error ? null : out.text || '';
   };
@@ -270,7 +275,7 @@ function rootSystem(items) {
 async function runEnv({ task, items, provider, limits, rates }) {
   const run = makeRun({ limits, rates }); run.rates = rates;
   const e = buildEnv({ items, provider, run });
-  const loop = new Loop({ provider: run.wrap(provider, 'root'), system: rootSystem(items), throwOnError: false, rates, maxConsecutiveDenials: 3 });
+  const loop = new Loop({ provider: run.wrap(provider, 'root'), system: rootSystem(items), throwOnError: false, rates: rates || undefined, maxConsecutiveDenials: 3 });
   e.setLoop(loop);
   let out; try { out = await loop.run([{ role: 'user', content: task }], e.tools); } catch (err) { out = { error: `throw:${err && err.message}`, text: '' }; }
   const { S } = run;
@@ -313,7 +318,10 @@ function realProvider() {
     return new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY, model: 'gpt-4o-mini' }); }
   if (MODEL === 'haiku') { if (!process.env.ANTHROPIC_API_KEY) { console.error('missing env var: ANTHROPIC_API_KEY'); process.exit(2); }
     return new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY, model: 'claude-haiku-4-5-20251001' }); }
-  console.error(`unknown --model ${MODEL} (gpt-4o-mini|haiku)`); process.exit(1);
+  if (MODEL === 'deepseek') { if (!process.env.DEEPSEEK_API_KEY) { console.error('missing env var: DEEPSEEK_API_KEY'); process.exit(2); }
+    const seen = new Set(); const w = console.warn.bind(console); console.warn = (...a) => { const k = String(a[0]); if (!seen.has(k)) { seen.add(k); w(...a); } };
+    return new OpenAIProvider({ apiKey: process.env.DEEPSEEK_API_KEY, baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', legacyMaxTokens: true, thinkingMode: 'off' }); }
+  console.error(`unknown --model ${MODEL} (gpt-4o-mini|haiku|deepseek)`); process.exit(1);
 }
 
 // Scripted fake (dry + NC2 ONLY). Root = the call that carries tools; steps are a fixed tool-call script.
@@ -408,7 +416,7 @@ if (DRY) {
   const inline = items10.map((r) => `${r.id} => ${r.text}`).join('\n');
   let nc1text = '', nc1err = null;
   try {
-    const o = await new Loop({ provider: run1.wrap(provider, 'root'), system: 'You are a precise news classifier. Examine EACH item individually.', throwOnError: false, rates })
+    const o = await new Loop({ provider: run1.wrap(provider, 'root'), system: 'You are a precise news classifier. Examine EACH item individually.', throwOnError: false, rates: rates || undefined })
       .run([{ role: 'user', content: `ITEMS:\n${inline}\n\n${COUNT_TASK}\nReply with ONLY the comma-separated ids of the SPORTS items, then a final line "COUNT: <n>".` }], []);
     nc1text = o.text || ''; nc1err = o.error;
   } catch (err) { nc1err = String(err && err.message); }
