@@ -114,7 +114,7 @@ function makeRun({ limits, rates }) {
   const unbraked = limits === 'none';
   const L = unbraked ? { maxDepth: 1, maxCalls: Infinity, maxWidth: Infinity, maxRounds: Infinity } : { ...limits };
   const S = { calls: 0, tripped: null, tokens: { in: 0, out: 0, cr: 0, cw: 0 }, cost: 0, unpriced: false, rootPeak: 0, rootRounds: 0,
-    lastVar: null, lastText: null, vars: 0 };
+    lastVar: null, lastText: null, vars: 0, curTool: null, byTool: {}, trace: [], toolCounts: {} };
   const POC_RULES = new Set(['poc-ceiling', 'timeout']);
   const trip = (name) => { S.tripped = name; throw new HaltError(`[brake:${name}]`, { rule: POC_RULES.has(name) ? `poc:${name}` : `brake:${name}` }); };
   const gate = (role, nodeRound) => {
@@ -124,6 +124,7 @@ function makeRun({ limits, rates }) {
     if (S.calls >= L.maxCalls) trip('maxCalls');          // BRAKE:maxCalls (mutation target)
     if (S.calls >= POC_CEILING) trip('poc-ceiling');
     S.calls++;
+    const k = role === 'root' ? 'root-rounds' : (S.curTool || 'untracked'); S.byTool[k] = (S.byTool[k] || 0) + 1;
   };
   const wrap = (inner, role) => {
     let nodeRound = 0;
@@ -253,11 +254,15 @@ function buildEnv({ items, provider, run }) {
       execute: ({ var: v }) => { const x = get(v); return reply(x && x.ids ? x.ids.length : Array.isArray(x) ? x.length : 1); } },
     { name: 'final', description: 'Return the value of a var as the final answer (like FINAL_VAR). Ends the run.',
       parameters: { type: 'object', properties: { var: { type: 'string' } }, required: ['var'] },
-      execute: ({ var: v }) => { const x = get(v); state.final = { value: x, missing: (env.get(v) && S.lastVar && S.lastVar.name === v && S.lastVar.missing) || [] }; loop.stop(); return 'final recorded'; } },
+      execute: ({ var: v }) => { const x = get(v); state.finalInfo = { tool: 'final', var: v, kind: typeOf(x), size: (Array.isArray(x) ? x.map(render).join('\n') : render(x)).length }; state.final = { value: x, missing: (env.get(v) && S.lastVar && S.lastVar.name === v && S.lastVar.missing) || [] }; loop.stop(); return 'final recorded'; } },
     { name: 'final_text', description: 'Return a literal text as the final answer. Ends the run.',
       parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
-      execute: ({ text }) => { state.final = { value: String(text), missing: [] }; loop.stop(); return 'final recorded'; } },
+      execute: ({ text }) => { state.finalInfo = { tool: 'final_text', var: null, kind: 'text', size: String(text).length }; state.final = { value: String(text), missing: [] }; loop.stop(); return 'final recorded'; } },
   ];
+  for (const t of tools) { const ex = t.execute; t.execute = async (a) => { // diagnostics only: names, never content
+    const before = S.lastVar && S.lastVar.name; S.curTool = t.name; S.toolCounts[t.name] = (S.toolCounts[t.name] || 0) + 1;
+    const arg = a && (a.var ?? a.listVar) !== undefined ? String(a.var ?? a.listVar) : '';
+    try { return await ex(a); } finally { const after = S.lastVar && S.lastVar.name; S.trace.push(`${t.name}(${arg}${after && after !== before ? '→' + after : ''})`); S.curTool = null; } }; }
   return { env, tools, byName: Object.fromEntries(tools.map((t) => [t.name, t])), state, knownIds, setLoop: (l) => { loop = l; } };
 }
 
@@ -281,7 +286,7 @@ async function runEnv({ task, items, provider, limits, rates }) {
   const { S } = run;
   const best = (S.lastVar && S.lastVar.value) ?? S.lastText ?? (out && out.text) ?? null;
   const receipts = { calls: S.calls, rootRounds: S.rootRounds, rootPeakInput: S.rootPeak, tokens: { ...S.tokens }, costUsd: S.unpriced ? null : S.cost, vars: S.vars, limits };
-  const base = { ...(run.unbraked && { unbraked: true }), receipts, lastClassify: e.state.lastClassify };
+  const base = { ...(run.unbraked && { unbraked: true }), receipts, lastClassify: e.state.lastClassify, diag: { byTool: { ...S.byTool }, toolCounts: { ...S.toolCounts }, trace: [...S.trace], finalInfo: e.state.finalInfo || null } };
   if (S.tripped) {
     const poc = ['poc-ceiling', 'timeout'].includes(S.tripped);
     return { ...base, incomplete: true, blocker: poc ? 'poc-limit' : 'brake', ...(poc ? { limit: S.tripped } : { brake: S.tripped }), best: best ?? null };
@@ -307,9 +312,21 @@ function scoreCount(r, items) {
   const recall = truth ? tp / truth : 0, precision = set.size ? tp / set.size : 0;
   const agrees = reported === ids.length;
   const ok = recall >= BAR.recall && precision >= BAR.precision && agrees;
-  return { ok, recall, precision, reported, nIds: ids.length, truth, agrees, why: ok ? '' : `recall=${recall.toFixed(2)} precision=${precision.toFixed(2)} reported=${reported} ids=${ids.length}` };
+  const fps = [...set].filter((id) => labelOf.get(id) !== TARGET);
+  return { ok, fps, recall, precision, reported, nIds: ids.length, truth, agrees, why: ok ? '' : `recall=${recall.toFixed(2)} precision=${precision.toFixed(2)} reported=${reported} ids=${ids.length}` };
 }
 const fmt = (s) => `recall=${s.recall.toFixed(2)} precision=${s.precision.toFixed(2)} count=${s.reported} ids=${s.nIds} truth=${s.truth}`;
+const clip = (x, n) => { const t = typeof x === 'string' ? x : JSON.stringify(x); return t === undefined ? 'undefined' : t.length > n ? t.slice(0, n) + '…' : t; };
+function diag(label, r, items, sc, { showFinal = false } = {}) {
+  const d = r.diag, x = r.receipts; if (!d) return;
+  const L = [`  [${label}] calls=${x.calls} rootRounds=${x.rootRounds} rootPeak=${x.rootPeakInput} charged=${JSON.stringify(d.byTool)} invoked=${JSON.stringify(d.toolCounts)}`,
+    `    seq: ${d.trace.join(' ') || '(none)'}`];
+  const f = d.finalInfo; L.push(`    final: ${f ? `${f.tool}${f.var ? ' var=' + f.var : ''} kind=${f.kind} size=${f.size}` : r.viaText ? 'plain-text answer (no final tool)' : 'none'}`);
+  if (r.incomplete) L.push(`    BRAKE/INCOMPLETE: run=${label} blocker=${r.blocker} ${r.brake ? 'brake=' + r.brake : r.limit ? 'limit=' + r.limit : ''} calls=${x.calls} last5=${d.trace.slice(-5).join(' ')}`);
+  if (showFinal || (sc && !sc.ok)) L.push(`    answer: ${clip(r.result !== undefined ? r.result : r.best, 300)}`);
+  if (sc && sc.fps && sc.fps.length) L.push(`    false-positives (${sc.fps.length}, first 10): ` + sc.fps.slice(0, 10).map((id) => `${id}[${LABELS[labelOf.get(id)]}] ${clip((items.find((i) => i.id === id) || {}).text || '', 80)}`).join(' | '));
+  console.log(L.join('\n'));
+}
 const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 // ── provider setup ─────────────────────────────────────────────────────────────────────────────
@@ -364,9 +381,11 @@ if (DRY) {
   // sanity: a perfect (oracle) run is accepted by the (a) checker → the bar CAN go green
   const good = add(await runEnv({ task: COUNT_TASK, items: items10, provider: scriptedProvider(COUNT_SCRIPT, { oracle: true }), limits: { ...DEFAULT_LIMITS, maxCalls: 200 }, rates }));
   const gs = scoreCount(good, items10);
+  diag('dry good', good, items10, gs);
   check('dry-sanity: checker accepts a perfect oracle run', gs.ok && !good.incomplete, good.incomplete ? `incomplete ${good.blocker}` : fmt(gs));
   // (d)
   const d = add(await runEnv({ task: COUNT_TASK, items: items10, provider: scriptedProvider(COUNT_SCRIPT, { oracle: true }), limits: { ...DEFAULT_LIMITS, maxCalls: 5 }, rates }));
+  diag('dry (d)', d, items10, null);
   check('(d) maxCalls:5 -> incomplete+brake', d.incomplete === true && d.blocker === 'brake' && d.brake === 'maxCalls' && d.best !== null && d.receipts.calls <= 5,
     `calls=${d.receipts.calls} blocker=${d.blocker} brake=${d.brake} best=${d.best === null ? 'null' : 'present'}`);
   // (e)
@@ -390,6 +409,7 @@ if (DRY) {
   const r10 = add(await runEnv({ task: COUNT_TASK, items: items10, provider, limits: accLimits, rates }));
   const sa = scoreCount(r10, items10);
   check('(a) count at 10x', sa.ok, r10.incomplete ? `incomplete(${r10.blocker}:${r10.brake || r10.limit || ''})` : fmt(sa));
+  diag('1x', r1, items1, scoreCount(r1, items1)); diag('(a) 10x', r10, items10, sa);
   // (b) mixed
   const pn = pickNeedle(items10, Math.floor(N10 * 0.7)), needleItem = pn.item;
   const needle = norm(needleItem.text).split(' ').slice(0, 4).join(' ');
@@ -397,12 +417,14 @@ if (DRY) {
   const sb = scoreCount(rb, items10);
   const needleOk = !rb.incomplete && norm(typeof rb.result === 'string' ? rb.result : JSON.stringify(rb.result)).includes(needle);
   check('(b) mixed needle+count', needleOk && sb.ok, rb.incomplete ? `incomplete(${rb.blocker})` : `needle(${needle})=${needleOk} ${fmt(sb)}`);
+  diag('(b) mixed', rb, items10, sb, { showFinal: true });
   // (c)
   const p1 = r1.receipts.rootPeakInput, p10 = r10.receipts.rootPeakInput;
   check('(c) root peak input < 4000 at 1x and 10x', p1 > 0 && p10 > 0 && p1 < BAR.rootPeak && p10 < BAR.rootPeak && rb.receipts.rootPeakInput < BAR.rootPeak,
     `peak 1x(${N1} items)=${p1}  10x(${N10} items)=${p10}  mixed=${rb.receipts.rootPeakInput}  rootRounds 1x=${r1.receipts.rootRounds} 10x=${r10.receipts.rootRounds}`);
   // (d)
   const rd = add(await runEnv({ task: COUNT_TASK, items: items10, provider, limits: { ...DEFAULT_LIMITS, maxCalls: 5 }, rates }));
+  diag('(d)', rd, items10, null);
   check('(d) maxCalls:5 -> incomplete+brake', rd.incomplete === true && rd.blocker === 'brake' && rd.brake === 'maxCalls' && rd.best !== null && rd.receipts.calls <= 5,
     `calls=${rd.receipts.calls} blocker=${rd.blocker} brake=${rd.brake} best=${rd.best === null ? 'null' : 'present'}`);
   // (e)
@@ -424,6 +446,8 @@ if (DRY) {
   const m1 = nc1text.match(/COUNT:\s*(\d+)/i);
   add({ receipts: { calls: run1.S.calls, tokens: run1.S.tokens, costUsd: run1.S.unpriced ? null : run1.S.cost } });
   const nc1 = nc1err ? { ok: false, recall: 0, precision: 0, reported: null, nIds: 0, truth: truthOf(items10) } : scoreCount({ result: { ids: ids1, count: m1 ? Number(m1[1]) : ids1.length } }, items10);
+  console.log(`  [NC1] calls=${run1.S.calls} (plain Loop, no tools) inputTokens=${run1.S.tokens.in} outputTokens=${run1.S.tokens.out} idsReturned=${ids1.length} reportedCount=${m1 ? m1[1] : 'none'} answerHead=${clip(nc1text, 120)}`);
+  if (nc1.fps && nc1.fps.length) console.log(`    false-positives (${nc1.fps.length}, first 10): ` + nc1.fps.slice(0, 10).map((id) => `${id}[${LABELS[labelOf.get(id)]}] ${clip((items10.find((i) => i.id === id) || {}).text || '', 80)}`).join(' | '));
   control('NC1 inlined input, plain Loop', nc1, `${nc1err ? 'error=' + nc1err + ' ' : ''}${fmt(nc1)} inputTokens~${run1.S.tokens.in}`);
 }
 
