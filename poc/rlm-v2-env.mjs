@@ -10,6 +10,12 @@
 //   wording verbatim (`<id> => <text>`, "copy each matching item's <id> VERBATIM", window 8, 2 rotation passes,
 //   concurrency 8) with a CODE count over the union of matched ids.
 //
+// 2026-11-11: scorer id-normalization fix after the reps3 run (parse fix, bars unchanged). The inline baselines answered
+//   with bare ids ("26,27,...") which the scorer ignored (scored 0 ids => spurious BASELINE UNAVAILABLE / NC1-big "failed").
+//   ALL scored answers (RLM, inline, NC1-big) now go through one normalizer: rec:N | N | "rec N", with brackets/quotes/
+//   whitespace => canonical id, deduped; ids not in the input are dropped and counted. NC1-big only counts as failed on a
+//   REAL failure (error | context_exceeded | truncated | normalized recall < 0.5). New `--baseline-only` = cheap re-run.
+//
 // TYPED FINAL ("AI points, code decides"): the CALLER sets the answer kind per task (count | ids | text |
 //   composite {needle:text, count:count}). final(var) must cite a var of the matching kind. A mismatch gets ONE nudge
 //   naming the expected kind and the vars that have it; a second miss ends the run {incomplete, blocker:'wrong-final'}.
@@ -51,7 +57,8 @@
 //   OPENAI_API_KEY=...    node poc/rlm-v2-env.mjs --model gpt-4o-mini
 //   ANTHROPIC_API_KEY=... node poc/rlm-v2-env.mjs --model haiku --big 4000
 //   DEEPSEEK_API_KEY=...  node poc/rlm-v2-env.mjs --model deepseek --reps 3   # deepseek-flash, thinkingMode off, unpriced
-//   options: --csv agnews.csv --unit 60 --big 2500 --reps N --limits none | maxCalls=..,maxWidth=..,maxRounds=..,maxDepth=..
+//   DEEPSEEK_API_KEY=...  node poc/rlm-v2-env.mjs --model deepseek --baseline-only --reps 3   # inline 10x + NC1-big + RLM (a) only
+//   options: --baseline-only --csv agnews.csv --unit 60 --big 2500 --reps N --limits none | maxCalls=..,maxWidth=..,maxRounds=..,maxDepth=..
 // Exit: 0 all green, 1 a check failed, 2 missing key, 3 timeout, 4 INVALID (a control passed).
 
 import { Loop } from '../src/loop.js';
@@ -70,6 +77,7 @@ const MODEL = opt('--model', 'gpt-4o-mini');
 const CSV = opt('--csv', process.env.AGNEWS_CSV || 'agnews.csv');
 const UNIT = Number(opt('--unit', 60));
 const BIG = Number(opt('--big', 2500));
+const BASELINE_ONLY = flag('--baseline-only');
 const REPS = DRY ? 1 : Math.max(1, Number(opt('--reps', 1)));
 const DEFAULT_LIMITS = { maxDepth: 1, maxCalls: null, maxWidth: 16, maxRounds: 20 }; // maxCalls null = formula cap only
 const WALL_MS = 25 * 60 * 1000;   // per rep, applies even under limits:'none'
@@ -375,18 +383,26 @@ async function runEnv({ task, kind, items, provider, limits, rates, label = 'run
 }
 
 // ── scoring (code-computed vs dataset labels; NO number is ever parsed from text) ──────────────
-function scoreIds(ids, items) {
-  const truth = truthOf(items); const set = new Set(ids); let tp = 0; for (const id of set) if (labelOf.get(id) === TARGET) tp++;
-  return { recall: truth ? tp / truth : 0, precision: set.size ? tp / set.size : 0, nIds: set.size, truth, fps: [...set].filter((id) => labelOf.get(id) !== TARGET), valid: true };
+// ONE id normalizer for every scored answer: rec:N | N | "rec N", brackets/quotes/whitespace => canonical "rec:N"
+const ID_RE = /^(?:rec:)?(\d+)$/i;
+function normIds(raw) {
+  const toks = Array.isArray(raw) ? raw.map(String) : String(raw).replace(/rec\s*:?\s*(\d+)/gi, 'rec:$1').split(/[\s,;\[\]{}"'`()]+/);
+  return toks.map((t) => t.trim()).filter(Boolean).map((t) => { const m = t.match(ID_RE); return m ? `rec:${Number(m[1])}` : null; }).filter(Boolean);
 }
-const ZERO = (items) => ({ recall: 0, precision: 0, nIds: 0, truth: truthOf(items), fps: [], valid: false });
+function scoreIds(rawIds, items) {
+  const known = new Set(items.map((r) => r.id)); const uniq = [...new Set(normIds(rawIds))];
+  const ids = uniq.filter((id) => known.has(id)); const dropped = uniq.length - ids.length;
+  const truth = truthOf(items); const set = new Set(ids); let tp = 0; for (const id of set) if (labelOf.get(id) === TARGET) tp++;
+  return { recall: truth ? tp / truth : 0, precision: set.size ? tp / set.size : 0, nIds: set.size, truth, fps: [...set].filter((id) => labelOf.get(id) !== TARGET), dropped, valid: true };
+}
+const ZERO = (items) => ({ recall: 0, precision: 0, nIds: 0, truth: truthOf(items), fps: [], dropped: 0, valid: false });
 function scoreRun(r, items, kind) {
   if (r.incomplete) return { ...ZERO(items), why: `incomplete(${r.blocker}${r.brake ? ':' + r.brake : ''})` };
   const ids = kind === 'composite' ? r.result && r.result.count && r.result.count.ids : r.result && r.result.ids;
   return Array.isArray(ids) ? scoreIds(ids, items) : { ...ZERO(items), why: 'no ids in result' };
 }
 const paired = (sc, base) => sc.valid && base.valid && sc.recall >= base.recall - BAR.pair && sc.precision >= base.precision - BAR.pair;
-const fmt = (s) => `recall=${s.recall.toFixed(2)} precision=${s.precision.toFixed(2)} ids=${s.nIds} truth=${s.truth}`;
+const fmt = (s) => `recall=${s.recall.toFixed(2)} precision=${s.precision.toFixed(2)} ids=${s.nIds} truth=${s.truth}${s.dropped ? ` dropped=${s.dropped}` : ''}`;
 const clip = (x, n) => { const t = typeof x === 'string' ? x : JSON.stringify(x); return t === undefined ? 'undefined' : t.length > n ? t.slice(0, n) + '…' : t; };
 const est = (items) => Math.ceil(items.map((r) => `${render(r)}\n`).join('').length / 4);
 function diag(label, r, items, sc, { showFinal = false } = {}) {
@@ -440,15 +456,13 @@ const COUNT_SCRIPT = [['classify', { predicate: PRED, var: 'input' }], ['final',
 // ids; the count is derived from them by code.
 async function inlineRun(provider, rates, items) {
   const run = makeRun({ limits: 'none', rates, n: items.length });
-  const known = new Set(items.map((r) => r.id));
   let text = '', err = null, stop = null;
   try {
     const o = await new Loop({ provider: run.wrap(provider, 'root'), system: 'You are a precise news classifier. Examine EACH item individually.', throwOnError: false, rates: rates || undefined })
       .run([{ role: 'user', content: `ITEMS:\n${items.map(render).join('\n')}\n\n${COUNT_TASK}\nReply with ONLY the comma-separated ids of the SPORTS items.` }], []);
     text = o.text || ''; err = o.error; stop = o.stopReason;
   } catch (e) { err = String(e && e.message); }
-  const ids = [...new Set(text.match(/rec:\d+/g) || [])].filter((id) => known.has(id));
-  const sc = scoreIds(ids, items);
+  const sc = scoreIds(text, items); // normalizer handles rec:N / N / "rec N"; foreign ids dropped and counted
   return { sc, err, stop, text, receipts: { calls: run.S.calls, tokens: run.S.tokens, costUsd: run.S.unpriced ? null : run.S.cost }, S: run.S };
 }
 
@@ -490,6 +504,10 @@ async function dryBattery() {
   diag('dry good', good, items10, gs);
   check('dry-sanity: checker accepts a perfect oracle run (paired)', paired(gs, perfect), good.incomplete ? `incomplete ${good.blocker}` : fmt(gs));
   check('dry: count derived from ids (count === ids.length === label truth)', !good.incomplete && good.result.count === good.result.ids.length && good.result.count === truthOf(items10), `count=${good.result && good.result.count} ids=${good.result && good.result.ids.length} truth=${truthOf(items10)}`);
+  // scorer normalization: same recall for "rec:26, rec:27" / "26,27" / "[rec 26]; 'rec:27'"; foreign ids dropped
+  const sp = items10.filter((r) => labelOf.get(r.id) === TARGET).slice(0, 2).map((r) => r.id), nums = sp.map((x) => x.slice(4));
+  const sA = scoreIds(sp.join(', '), items10), sB = scoreIds(nums.join(','), items10), sC = scoreIds(`[rec ${nums[0]}]; '${sp[1]}'`, items10), sD = scoreIds(`${nums.join(',')}, 999999, rec:888888`, items10);
+  check('dry: scorer normalizes rec:N / N / "rec N" identically and drops foreign ids', sA.recall > 0 && sA.recall === sB.recall && sA.recall === sC.recall && sA.nIds === 2 && sB.nIds === 2 && sC.nIds === 2 && sD.nIds === 2 && sD.dropped === 2, `recall ${sA.recall.toFixed(3)}/${sB.recall.toFixed(3)}/${sC.recall.toFixed(3)} ids ${sA.nIds}/${sB.nIds}/${sC.nIds} foreign dropped=${sD.dropped}`);
   // typed final: a wrong-kind final gets exactly ONE nudge, then wrong-final (even when it types the right number)
   const right = String(truthOf(items10));
   const w2 = add(await runEnv({ label: 'dry wrong x2', task: COUNT_TASK, kind: 'count', items: items10, provider: scriptedProvider([['final_text', { text: right }], ['final_text', { text: right }]], { oracle: true }), limits: LIM, rates }));
@@ -560,7 +578,7 @@ async function liveBattery(provider, rates) {
   // (f) beyond-context
   console.log(`  [BIG] ${BIG} items, ~${est(itemsBig)} est. tokens inline (chars/4); no deepseek-flash context size is stated in the repo/docs`);
   const ncb = add(await inlineRun(provider, rates, itemsBig));
-  const ncFailed = !!ncb.err || ncb.sc.recall < BAR.ncBigRecall;
+  const ncFailed = !!ncb.err || ['context_exceeded', 'max_tokens'].includes(ncb.stop) || ncb.sc.recall < BAR.ncBigRecall; // REAL failure only
   console.log(`  [NC1-big] ${ncb.err ? 'error=' + ncb.err + ' ' : ''}stop=${ncb.stop} inputTokens=${ncb.S.tokens.in} ${fmt(ncb.sc)} answerHead=${clip(ncb.text, 100)}`);
   control('NC1-big inline plain Loop', !ncFailed, `${ncb.err ? 'error=' + ncb.err + ' ' : ''}${fmt(ncb.sc)}`);
   const rbig = add(await runEnv({ label: '(f) big', task: COUNT_TASK, kind: 'count', items: itemsBig, provider, limits: LIM, rates }));
@@ -571,6 +589,23 @@ async function liveBattery(provider, rates) {
   cur.metrics.bigRecall = sf.recall; cur.metrics.bigPrecision = sf.precision; cur.metrics.bigCalls = rbig.receipts.calls;
 }
 
+async function baselineBattery(provider, rates) {
+  const items10 = slice(N10), itemsBig = slice(BIG);
+  const base = add(await inlineRun(provider, rates, items10));
+  console.log(`  [inline 10x baseline] ${base.err ? 'error=' + base.err + ' ' : ''}${fmt(base.sc)} inputTokens=${base.S.tokens.in} stop=${base.stop} answerHead=${clip(base.text, 100)}`);
+  const baseOk = !base.err && base.sc.recall > 0;
+  const r10 = add(await runEnv({ label: '(a) 10x', task: COUNT_TASK, kind: 'count', items: items10, provider, limits: LIM, rates }));
+  const sa = scoreRun(r10, items10, 'count');
+  check('(a) paired count at 10x', baseOk && paired(sa, base.sc), r10.incomplete ? `incomplete(${r10.blocker}:${r10.brake || r10.limit || ''})` : `RLM ${fmt(sa)} | inline ${fmt(base.sc)}${baseOk ? '' : ' | BASELINE UNAVAILABLE'}`);
+  diag('(a) 10x', r10, items10, sa);
+  cur.metrics.recall = sa.recall; cur.metrics.precision = sa.precision; cur.metrics.calls = r10.receipts.calls;
+  console.log(`  [BIG] ${BIG} items, ~${est(itemsBig)} est. tokens inline (chars/4)`);
+  const ncb = add(await inlineRun(provider, rates, itemsBig));
+  const ncFailed = !!ncb.err || ['context_exceeded', 'max_tokens'].includes(ncb.stop) || ncb.sc.recall < BAR.ncBigRecall;
+  console.log(`  [NC1-big] ${ncb.err ? 'error=' + ncb.err + ' ' : ''}stop=${ncb.stop} inputTokens=${ncb.S.tokens.in} ${fmt(ncb.sc)} answerHead=${clip(ncb.text, 100)}`);
+  control('NC1-big inline plain Loop', !ncFailed, `${ncb.err ? 'error=' + ncb.err + ' ' : ''}${fmt(ncb.sc)}`);
+}
+
 // ── main ───────────────────────────────────────────────────────────────────────────────────────
 const reps = [];
 const itemsForBars = slice(Math.min(BIG, ALL.length));
@@ -579,7 +614,7 @@ if (DRY) { armRep(); newRep(); await dryBattery(); reps.push(cur); }
 else {
   const provider = realProvider(); const rates = RATES[MODEL];
   console.log(`LIVE ${MODEL}  reps=${REPS}  unit=${UNIT} (1x=${N1}, 10x=${N10}; truth Sports 10x=${truthOf(slice(N10))})  limits=${JSON.stringify(LIM)}  window=${WINDOW} passes=${PASSES} concurrency=${CONCURRENCY}`);
-  for (let i = 1; i <= REPS; i++) { console.log(`\n===== REP ${i}/${REPS} =====`); armRep(); newRep(); await liveBattery(provider, rates); reps.push(cur); clearTimeout(watchdog); }
+  for (let i = 1; i <= REPS; i++) { console.log(`\n===== REP ${i}/${REPS} =====`); armRep(); newRep(); await (BASELINE_ONLY ? baselineBattery : liveBattery)(provider, rates); reps.push(cur); clearTimeout(watchdog); }
 }
 clearTimeout(watchdog);
 
