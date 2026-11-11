@@ -17,6 +17,7 @@ Running record of design decisions from bareagent's PRD §22 — resolved during
 - **Default brakes stay on with a gate wired:** `limits:{maxDepth,maxCalls,maxWidth,maxRounds}` as a closure the model cannot touch, tighten-only; `limits:'none'` marks `unbraked:true`; money stays with bareguard.
 - **relayfact keeps working one release** via a compat shim onto the extracted `refineWorker`.
 - **Environment is fixed tools, no model-written code executed.**
+- **POC-driven (deepseek-flash, 3 reps, `poc/rlm-v2-env.mjs`):** typed `final` (the caller sets the answer kind, code derives counts, one nudge then `wrong-final`); the call cap comes from a formula computed by code at start, not a guessed default (64 was ~2.5× too small); memoize expensive tools; accuracy is judged PAIRED against inline because AG News label noise caps absolute precision at ~0.95. Root window stayed at 1.5k–2.7k tokens from 60 to 2,500 items. Details: `docs/product/rlm-prd.md` §0.1 "POC findings".
 
 ## unreleased / BA-29 — bad-call facts, `checkArgs`, `reasoningTokens`, shell hints (2026-11-01)
 - **Facts on the return, never actions:** `badCalls` / `cutOff` are on the `Loop.run()` return only (not events, not `onToolResult`); a cut-round call is still never executed, repaired or auto-continued (BA-4/BA-6/BA-13 stand). Key absent when empty so an untouched run's return shape is unchanged.

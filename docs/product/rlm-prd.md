@@ -87,6 +87,23 @@ Status: plan DECIDED, not built. Source: a read-only design review of `main` @ 1
 4. **Build** env tools, port scan with verbatim wording; shipped-vs-POC replay as with rlm-step8; then remove old paths, move adapters, update docs/primitives.json/CHANGELOG in the same commit.
 5. **Compat shim + migration note** for relayfact.
 
+### POC findings (2026-11-11, `poc/rlm-v2-env.mjs`, deepseek-flash, thinking off)
+
+Step 1 shipped on branch `feat/recurse-rebuild` (`daa7285`, no behaviour change, all 136 old recurse tests green). Step 2 ran live 3 times on deepseek-flash (log `.claude/scratch/rlm-v2-reps3.log`, bars pre-registered at `8011230`). What held, 3/3 reps:
+- **Root window stays bounded:** root peak 1.5k–2.7k tokens at 60, 600 and 2,500 items, vs ~35k (600) and ~106k (2,500) tokens inlined. This is the core RLM claim.
+- **Counting:** RLM recall 0.98–0.99, precision 0.94–0.95 at 600 and 2,500 items. No repeated work: classify ran once, 153 calls at 600 items and ~630 at 2,500.
+- **Brakes:** `maxCalls:5` gives `{incomplete, blocker:'brake', best}`; `limits:'none'` gives `unbraked:true`. The constant-"0" control fails every rep.
+
+Findings that change the design:
+1. **Typed final, "AI points, code decides"** (from bareloop doctrine). The caller sets the answer kind (count / ids / text / composite). `final(var)` must cite a var of that kind; one nudge, then `{incomplete, blocker:'wrong-final'}`; for counts CODE derives the number from the ids var. Why: an earlier run had the model finalize the `find` result ("1") instead of the classify count (169). The rule must be in the prompt with one legal example.
+2. **Call cap from a formula, not a guess.** The guessed default `maxCalls:64` is far too small: a 10× classify alone is ~150 calls. Code computes the cap at start from caller params, `ceil((ceil(items/window)*passes + maxRounds) * 1.25) + verify` (45 / 213 / 808 for 60 / 600 / 2,500 items), prints it before the first call, and keeps it tighten-only. It must fund the whole job, including verify.
+3. **Memoize** classify/map/find by exact args plus a hash of the delivered input; a repeat costs 0 calls (bareloop saw ~48% re-reads).
+4. **The precision bar of 0.97 is unreachable on AG News.** Every precision miss is an Olympics story labelled `World`, so the judge is right and the label is wrong. Inline gets the same misses. Accuracy is therefore judged PAIRED (RLM vs inline on the same items, tolerance 0.03), with absolute numbers as info only.
+5. **The inline control is not decisive at these sizes.** deepseek-flash read ~106k inlined tokens and answered. "Inline must break" needs an input truly past the model's context; until then the RLM win shown is the bounded window, not accuracy.
+6. **Harness confound (caught, fixed):** inline answers wrote bare ids ("26,27…"), and the scorer only read `rec:N`, so it scored inline 0 and faked both the (a)/(b) failures and the NC1-big pass. The scorer now normalizes ids; that is a parse fix with no bar change, noted in the POC header.
+
+Still open: the paired re-run after the scorer fix; a second, differently-shaped model before any default is fixed; judge-precision ideas from bareloop (re-judge only the yes set, quote-evidence checked by code), to be measured ON/OFF rather than assumed.
+
 ### What breaks for existing callers
 
 | Today | After |
