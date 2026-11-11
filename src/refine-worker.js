@@ -587,5 +587,6 @@ module.exports = {
   workerPersonaPrefix,
   runArbiter,
   verifyOrBlock,
+  verify,
   BrokenArbiterError,
 };
