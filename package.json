@@ -56,6 +56,10 @@
       "types": "./src/mcp.d.ts",
       "default": "./src/mcp.js"
     },
+    "./recurse-adapters": {
+      "types": "./src/recurse-adapters.d.ts",
+      "default": "./src/recurse-adapters.js"
+    },
     "./bareguard": {
       "types": "./src/bareguard-adapter.d.ts",
       "default": "./src/bareguard-adapter.js"

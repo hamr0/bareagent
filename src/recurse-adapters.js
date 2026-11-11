@@ -25,47 +25,11 @@
 
 const { Loop } = require('./loop');
 const { HaltError } = require('./errors');
+const { classifySystem, SCAN_WINDOW, SCAN_PASSES } = require('./recurse-prompts');
 
-// §9.2.1 LOCKED defaults. WINDOW is the one calibrated number (RECALL knee ≈ 8, per-model — calibrate via the
-// active half-window probe, NOT context size); PASSES=2 (shuffled-boundary union → recall ~0.91, precision
-// ~0.98). KNN_K is litectx's embeddings-nominate cap for the search handle.
-const SCAN_WINDOW = 8;
-const SCAN_PASSES = 2;
+// KNN_K is litectx's embeddings-nominate cap for the search handle (SCAN_WINDOW/SCAN_PASSES/classifySystem live in
+// recurse-prompts.js — shared with the recurse() classify tool).
 const KNN_K = 8;
-
-// Completeness-contract guard (RC-9 applied to retrieval): a goal/contract implying COMPLETENESS must never be
-// answered by a capped `search` (which cannot count). Auto-detection may only UPGRADE to scan (the safe
-// direction), NEVER silently downgrade. Deliberately broad on the "how many / all" family the PRD names.
-const COMPLETENESS_RE =
-  /\b(all|every|each|how many|count|counts|counting|total|number of|list all|exhaustive|complete(?:ly)?)\b/i;
-
-/**
- * Does this text imply a completeness ("all / every / count / how many") ask? Used to upgrade a capped search
- * to a scan (the only complete path). Conservative by design — a false positive only costs a thorough scan.
- * @param {unknown} text
- * @returns {boolean}
- */
-function impliesCompleteness(text) {
-  return typeof text === 'string' && COMPLETENESS_RE.test(text);
-}
-
-/**
- * The §9.2-validated classify system prompt, GENERALIZED from the POC's hardcoded "SPORTS news" predicate to
- * an arbitrary one. The load-bearing wording is verbatim ("Examine EACH item individually", "Output ONLY the
- * IDs", "Comma-separated. If none, output 'none'. No count, no prose.") — the predicate is the only variable.
- * It MUST return ids, not a count: counting is CODE's job (RC-5 / §9.1), so the judge never does arithmetic.
- * @param {string} predicate - The task/goal the items are judged against.
- * @returns {string}
- */
-function classifySystem(predicate) {
-  return (
-    'You are a precise classifier. Examine EACH item individually. Each item is shown on its own line as ' +
-    '`<id> => <text>`. Output ONLY the IDs of the items that match the predicate below — copy each matching ' +
-    'item\'s <id> VERBATIM (the exact characters before " => "; an id may itself contain ":" — keep all of ' +
-    'it). Comma-separated. If none, output "none". No count, no prose.\n\nPREDICATE: ' +
-    predicate
-  );
-}
 
 /**
  * @typedef {object} Slice
@@ -183,17 +147,17 @@ function normalizeCorpus(corpus) {
 /**
  * The `search` handle tool (RC-5 needle path): litectx `recall` — embeddings ON, `fact`/`episode` (the
  * KNN-nominate kinds), capped at `KNN_K`. For FINDING the relevant few; the description tells the worker it
- * CANNOT count (the completeness guard catches a "how many" ask before this tool is ever offered). Returns the
+ * CANNOT count (use recurse()'s built-in `classify` for "how many"). Returns the
  * matched items' bodies as text the worker reads; never the whole corpus.
  * @param {{recall: Function}} litectx
  * @param {{kinds?: string[], n?: number}} [opts]
  * @returns {ToolDef}
  * @category integration
  * @when you want to give a recurse worker a needle-search handle over litectx (embeddings recall for the relevant few) — for FINDING, never counting
- * @fails returns matched bodies only and CANNOT count (the completeness guard blocks a "how many" ask before it is offered); a dead window yields nothing, never a fabricated hit.
+ * @fails returns matched bodies only and CANNOT count (use classify for "how many"); a dead window yields nothing, never a fabricated hit.
  * @example
  *   const tool = buildSearchTool(litectx, { n: 8 });
- *   await recurse(task, ctx, { retrieval: 'search', tools: [tool] });
+ *   await recurse(task, ctx, { tools: [tool] });
  */
 function buildSearchTool(litectx, opts = {}) {
   const kinds = Array.isArray(opts.kinds) && opts.kinds.length ? opts.kinds : ['fact', 'episode'];
@@ -234,7 +198,7 @@ function buildSearchTool(litectx, opts = {}) {
  * @fails only as good as a lexical rule; complete over the slices it is given (no recall cap) but matches nothing outside them.
  * @example
  *   const tool = buildExactTool(corpus);
- *   await recurse(task, ctx, { retrieval: 'exact', tools: [tool] });
+ *   await recurse(task, ctx, { input: corpus, tools: [tool] });
  */
 function buildExactTool(corpus) {
   const slices = normalizeCorpus(corpus);
@@ -354,11 +318,11 @@ const ENUM_PAGE = 200;
  * @param {{kind?: 'fact'|'episode', pageSize?: number}} [opts]
  * @returns {() => Promise<Slice[]>}
  * @category integration
- * @when you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding scan/partition
+ * @when you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding recurse({ input })
  * @fails never ingests a fresh corpus (strictly worse than scanning an in-hand array); returns an async source materialized once and cached.
  * @example
  *   const corpus = litectxCorpus(litectx, { kind: 'fact' });
- *   await recurse(task, ctx, { mode: 'partition', corpus });
+ *   await recurse(task, ctx, { input: corpus, kind: 'count' });
  */
 function litectxCorpus(litectx, opts = {}) {
   const kind = opts.kind === 'episode' ? 'episode' : 'fact'; // enumerate v1 is the memory axis (fact/episode)
@@ -377,18 +341,4 @@ function litectxCorpus(litectx, opts = {}) {
   };
 }
 
-module.exports = {
-  scanCount,
-  judgeWindow,
-  classifySystem,
-  impliesCompleteness,
-  normalizeCorpus,
-  buildSearchTool,
-  buildExactTool,
-  buildScanTool,
-  litectxCorpus,
-  rotate,
-  SCAN_WINDOW,
-  SCAN_PASSES,
-  KNN_K,
-};
+module.exports = { buildSearchTool, buildExactTool, buildScanTool, litectxCorpus, scanCount, judgeWindow, normalizeCorpus, rotate, KNN_K };

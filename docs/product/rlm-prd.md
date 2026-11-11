@@ -24,7 +24,7 @@ Locked decisions (sign-off received):
 
 ## 0.1 v2 rebuild plan (2026-11-11)
 
-Status: plan DECIDED, not built. Source: a read-only design review of `main` @ 1247efe (no live runs; brake defaults are guesses to be measured). Where this section contradicts §§0–8 below, this section wins; the contradicted passages carry a "superseded by §0.1" note.
+Status: plan DECIDED and BUILT (steps 1–5 done, 2026-11-11; replay result below). Source: a read-only design review of `main` @ 1247efe (no live runs; brake defaults are guesses to be measured). Where this section contradicts §§0–8 below, this section wins; the contradicted passages carry a "superseded by §0.1" note.
 
 ### Why rebuild instead of patch
 
@@ -81,11 +81,11 @@ Status: plan DECIDED, not built. Source: a read-only design review of `main` @ 1
 
 ### Step order
 
-1. **Extract `refineWorker`** (`src/refine-worker.js`) from `recurseRefineLeaf` + the BA-15 arbiter code, no behaviour change; recurse's refineLeaf leaf path calls it; whole suite green; relayfact's harness re-run on the branch.
-2. **POC (~15 min, real wire, built to fail):** hand-rolled env Loop with info/peek/chunk/map/classify/union/final over AG News at 10x one window, input never in the root prompt. Pass bars: (a) code-known count at about step-8 numbers (recall >=0.88, precision >=0.97); (b) a needle-plus-count mixed question answered; (c) root peak window under a fixed bound (e.g. 4k tokens) while input grows 1x to 10x; (d) `maxCalls:5` gives `{incomplete, blocker:'brake'}` with non-null `best`; (e) `limits:'none'` sets `unbraked:true`. Negative controls: the same task inlined in a plain Loop must overflow or undercount; a constant `final_text("0")` must fail (a). Run on gpt-4o-mini (where the runaway reproduced) and haiku.
-3. **Build** brakes + `finish()` with mutation-proved tests (disable the brake, confirm red).
-4. **Build** env tools, port scan with verbatim wording; shipped-vs-POC replay as with rlm-step8; then remove old paths, move adapters, update docs/primitives.json/CHANGELOG in the same commit.
-5. **Compat shim + migration note** for relayfact.
+1. **[BUILT] Extract `refineWorker`** (`src/refine-worker.js`) from `recurseRefineLeaf` + the BA-15 arbiter code, no behaviour change; recurse's refineLeaf leaf path calls it; whole suite green; relayfact's harness re-run on the branch.
+2. **[DONE] POC (~15 min, real wire, built to fail):** hand-rolled env Loop with info/peek/chunk/map/classify/union/final over AG News at 10x one window, input never in the root prompt. Pass bars: (a) code-known count at about step-8 numbers (recall >=0.88, precision >=0.97); (b) a needle-plus-count mixed question answered; (c) root peak window under a fixed bound (e.g. 4k tokens) while input grows 1x to 10x; (d) `maxCalls:5` gives `{incomplete, blocker:'brake'}` with non-null `best`; (e) `limits:'none'` sets `unbraked:true`. Negative controls: the same task inlined in a plain Loop must overflow or undercount; a constant `final_text("0")` must fail (a). Run on gpt-4o-mini (where the runaway reproduced) and haiku.
+3. **[BUILT: `src/recurse-brakes.js`, `src/recurse-finish.js`] Build** brakes + `finish()` with mutation-proved tests (disable the brake, confirm red).
+4. **[BUILT: `src/recurse-env.js`, `src/recurse.js`; replay PASSED] Build** env tools, port scan with verbatim wording; shipped-vs-POC replay as with rlm-step8; then remove old paths, move adapters, update docs/primitives.json/CHANGELOG in the same commit.
+5. **[BUILT: shim warns once; migration in CHANGELOG] Compat shim + migration note** for relayfact.
 
 ### POC findings (2026-11-11, `poc/rlm-v2-env.mjs`, deepseek-flash, thinking off)
 
@@ -108,6 +108,8 @@ Findings that change the design:
 - **Beyond-context run, 1 rep, `--big 7600` (the whole AG News test set; 10,000 items not available):** RESULT ALL PASS, every pre-registered bar (a)–(f) 1/1, NC2 failed as required. NC1-big inline plain Loop on 7,600 items (~472k est. tokens by chars/4; provider-reported inputTokens 286,780) returned `stop=end_turn` with NO error, recall 0.19, precision 0.92: a SILENT failure (answered confidently, missed 81%). (f) RLM on 7,600: recall 0.99, precision 0.95, root peak 2,096 tokens, 1,903 calls vs cap 2,400 (classify 1,901, memoHits 0). At 600 items in the same run: RLM recall 0.99 vs inline 0.88.
 - **Caveat:** n=1 for the big run, one model only. A second, differently-shaped model is still required before any default is fixed.
 
+**Shipped-vs-POC replay (2026-11-11, `poc/rlm-v2-shipped-replay.mjs`, drives the SHIPPED `recurse`, same pre-registered bars; deepseek-flash, `--big 7600`; log `.claude/scratch/rlm-v2-shipped-replay.log`):** exit 0, RESULT ALL PASS. (a) paired count at 600: RLM recall 0.99 vs inline 0.91; (b) needle+count pass; (c) root peak 2,262 tokens; (d) `maxCalls:5` gives `{incomplete, blocker:'brake'}` with `best`; (e) `limits:'none'` gives `unbraked:true`; NC2 (constant final) failed as required; NC1-big inline recall 0.12 (failed as required); (f) at 7,600 items RLM recall 0.99, precision 0.96, root peak 2,284, 1,903 calls under the 2,400 formula cap. One model, one rep: the second-model requirement below still stands.
+
 Still open (earlier items; the paired re-run is done, see above): a second, differently-shaped model before any default is fixed; judge-precision ideas from bareloop (re-judge only the yes set, quote-evidence checked by code), to be measured ON/OFF rather than assumed.
 
 ### What breaks for existing callers
@@ -119,7 +121,8 @@ Still open (earlier items; the paired re-run is done, see above): a second, diff
 | `mode` / `count` / `workerBudget` | `limits.maxWidth`, `concurrency` |
 | receipts `retrieval`/`scan`/`partition`/`refineLeaf` fields | new `receipts` with `calls`, `vars`, `limits` |
 | `{result, verdict:{pass:false}}` | `{incomplete, blocker:'verify-failed'}` |
-| exports `buildScanTool`/`buildSearchTool`/`buildExactTool`/`litectxCorpus` | moved to an adapter subpath; primitives.json and the completeness test updated |
+| exports `buildScanTool`/`buildSearchTool`/`buildExactTool`/`litectxCorpus` | moved to `bare-agent/recurse-adapters` (no re-export from the root); primitives.json regenerated |
+| any removed option (`corpus`, `retrieval`, `window`, `passes`, `mode`, `count`, `workerBudget`, `synthesize`), or `refineLeaf` without `maxDepth:0` | throws `ValidationError` with a migration hint (fail loud, not silently ignored) |
 
 About 136 tests: port the keep-list tests (~60, inferred), rewrite the rest.
 
@@ -160,6 +163,8 @@ Long agent runs degrade as the context window fills (context rot/anxiety), and a
 **litectx supplies (consumed, not built here):** the handle tools offered to workers — `recall`, `get`, `impact`, `assemble`, `scoped` — plus the chunk+docstring unit the chunker already produces. **No litectx requirement arises from this PRD**; if one surfaces it gets its own PRD (RLM_PRD.md:144-147).
 
 ## 4. The primitive — contract, topology, and the build delta
+
+> **Superseded by §0.1 (recurse v2).** The Family-A/B shape, `spawn_child`, forced fan-out/partition and the retrieval modes described here were replaced; the measured findings carry over (see the keep-list).
 
 ### 4.1 Contract
 
@@ -262,6 +267,8 @@ Two callers (the "hybrid"): (1) HITL — human approves the `rlm.md` via `Checkp
 
 ## 5. Requirements — each tagged with its owner
 
+> **Superseded by §0.1 (recurse v2).** The Family-A/B shape, `spawn_child`, forced fan-out/partition and the retrieval modes described here were replaced; the measured findings carry over (see the keep-list).
+
 8 of 12 core requirements are satisfied by a shipped primitive; net-new core logic is NB-2 (count) and NB-4 (scrub + A-tool surface), glued by NB-1, with NB-3 the reducer and NB-5 the decomposition prompt. RC-13/NB-6 is optional, outside the core (RLM_PRD.md:413-416).
 
 | ID | Requirement | Owner |
@@ -282,6 +289,8 @@ Two callers (the "hybrid"): (1) HITL — human approves the `rlm.md` via `Checkp
 (RLM_PRD.md:399-411)
 
 ## 6. Guards — enforced via bareguard, not re-implemented
+
+> **Superseded by §0.1 (recurse v2).** The Family-A/B shape, `spawn_child`, forced fan-out/partition and the retrieval modes described here were replaced; the measured findings carry over (see the keep-list).
 
 > **Superseded by §0.1 for structure caps.** Depth/width/call/round counts become default-on in-process brakes (`limits`); bareguard keeps money, tokens and wall-clock. The measured finding that a gate bounds the runaway still holds.
 
@@ -314,6 +323,8 @@ This mirrors the existing Checkpoint-vs-bareguard's-humanChannel complementarity
 Already wired, not new machinery: bareguard's shared audit file (`BAREGUARD_AUDIT_PATH`, threaded by `spawn.js`) records every governance decision; `BAREGUARD_RUN_ID`/`BAREGUARD_PARENT_RUN_ID` thread parent→child lineage so the whole recursion tree reconstructs; `Stream`/`JsonlTransport` carry per-node events; `metrics` rolls up cost/tokens per node. `recurse()` only emits its per-node spans (subgoal, gap report, synthesis, spawn edge) into that substrate. Borrows `/prose`'s receipts shape (content-addressed, keyless replay) and its honest caveat: inspectable/tamper-evident, **not** cryptographically tamper-proof. Lineage is automatic for process-fork `spawnChild`, but the in-process A-tool must thread run-id/audit explicitly (RLM_PRD.md:493-507).
 
 ## 8. Topology — fan-out and recursion are one knob (restated)
+
+> **Superseded by §0.1 (recurse v2).** The Family-A/B shape, `spawn_child`, forced fan-out/partition and the retrieval modes described here were replaced; the measured findings carry over (see the keep-list).
 
 Selection rule, flat-first: a node stays flat while its sub-goals fit one window; a sub-goal that *measurably* overflows → that node recurses, bounded by `maxDepth` (open default 3). Control is Family A (the model drives this), but topology is one knob: `maxDepth=1` forbids nesting (pure flat), and the deterministic Family-B fan-out (`opts.mode:'fanout'`) is the same `runPlan` executor with a code-decided batch — no separate parallel code path (RLM_PRD.md:511-516).
 

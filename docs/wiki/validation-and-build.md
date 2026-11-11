@@ -7,6 +7,8 @@ sources: ["docs/archive/RLM_PRD.md"]
 
 # RLM Validation & Build Sequence
 
+> **Superseded by `docs/product/rlm-prd.md` §0.1 (recurse v2, 2026-11-11).** `mode:'fanout'`/`'partition'`, `count`, `workerBudget`, `retrieval`/`corpus`/`window`/`passes`, `synthesize` strings, the Planner fan-out and the prose `spawn_child` tool described below were REMOVED (they now throw). `recurse()` takes `opts.input` + `opts.kind` over a fixed-tool environment with structural brakes; the measured findings below (scan wording/window/passes, code aggregation, pull over push) survive as the `classify` tool and the typed final. The scan helpers moved to `bare-agent/recurse-adapters`. Kept here as history, not rewritten.
+
 How the RLM primitive's design was validated with live POCs before being built, and the dependency-ordered sequence in which it was actually built. The full original document is archived at `docs/archive/RLM_PRD.md`.
 
 ## Validation approach (POC-first)

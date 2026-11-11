@@ -23,10 +23,10 @@
       "name": "buildExactTool",
       "category": "retrieval",
       "when": "you want an embeddings-free, exact AND-term filter handle over a slice-source — complete over its slices, for precise lexical matches",
-      "import": "import { buildExactTool } from 'bare-agent'",
+      "import": "import { buildExactTool } from 'bare-agent/recurse-adapters'",
       "signature": "buildExactTool(corpus: Slice[]) => ToolDef",
       "fails": "only as good as a lexical rule; complete over the slices it is given (no recall cap) but matches nothing outside them.",
-      "example": "const tool = buildExactTool(corpus);\nawait recurse(task, ctx, { retrieval: 'exact', tools: [tool] });"
+      "example": "const tool = buildExactTool(corpus);\nawait recurse(task, ctx, { input: corpus, tools: [tool] });"
     },
     {
       "name": "buildMetaTools",
@@ -41,7 +41,7 @@
       "name": "buildScanTool",
       "category": "retrieval",
       "when": "you need the complete count/\"all\" path — scan every slice + LLM-judge + code-count — the only retrieval mode that can honestly answer \"how many\"",
-      "import": "import { buildScanTool } from 'bare-agent'",
+      "import": "import { buildScanTool } from 'bare-agent/recurse-adapters'",
       "signature": "buildScanTool(corpus: Slice[] | (() => Promise<Slice[]>), opts: {provider: Provider, window?: number, passes?: number, ctx?: object, onLlmResult?: Function, policy?: Function}) => ToolDef",
       "fails": "a dead window surfaces as `INCOMPLETE — the count is a floor`, never a clean number over a hole; a governance HaltError propagates clean.",
       "example": "const tool = buildScanTool(corpus, { provider, window: 8 });\nawait recurse('how many mention X', ctx, { tools: [tool] });"
@@ -50,10 +50,10 @@
       "name": "buildSearchTool",
       "category": "integration",
       "when": "you want to give a recurse worker a needle-search handle over litectx (embeddings recall for the relevant few) — for FINDING, never counting",
-      "import": "import { buildSearchTool } from 'bare-agent'",
+      "import": "import { buildSearchTool } from 'bare-agent/recurse-adapters'",
       "signature": "buildSearchTool(litectx: {recall: Function}, opts?: {kinds?: string[], n?: number}) => ToolDef",
-      "fails": "returns matched bodies only and CANNOT count (the completeness guard blocks a \"how many\" ask before it is offered); a dead window yields nothing, never a fabricated hit.",
-      "example": "const tool = buildSearchTool(litectx, { n: 8 });\nawait recurse(task, ctx, { retrieval: 'search', tools: [tool] });"
+      "fails": "returns matched bodies only and CANNOT count (use classify for \"how many\"); a dead window yields nothing, never a fabricated hit.",
+      "example": "const tool = buildSearchTool(litectx, { n: 8 });\nawait recurse(task, ctx, { tools: [tool] });"
     },
     {
       "name": "calibrate",
@@ -274,11 +274,11 @@
     {
       "name": "litectxCorpus",
       "category": "integration",
-      "when": "you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding scan/partition",
-      "import": "import { litectxCorpus } from 'bare-agent'",
+      "when": "you want a resident slice-source that paginates a litectx corpus via enumerate — for a corpus ALREADY in litectx, feeding recurse({ input })",
+      "import": "import { litectxCorpus } from 'bare-agent/recurse-adapters'",
       "signature": "litectxCorpus(litectx: {enumerate: Function}, opts?: {kind?: 'fact'|'episode', pageSize?: number}) => () => Promise<Slice[]>",
       "fails": "never ingests a fresh corpus (strictly worse than scanning an in-hand array); returns an async source materialized once and cached.",
-      "example": "const corpus = litectxCorpus(litectx, { kind: 'fact' });\nawait recurse(task, ctx, { mode: 'partition', corpus });"
+      "example": "const corpus = litectxCorpus(litectx, { kind: 'fact' });\nawait recurse(task, ctx, { input: corpus, kind: 'count' });"
     },
     {
       "name": "liteCtxMcpBridgeConfig",
@@ -346,11 +346,11 @@
     {
       "name": "recurse",
       "category": "orchestration",
-      "when": "a task is too big for one model pass and you want it split, fanned out, verified, and merged — with total cost capped by a gate",
+      "when": "a task is about data too big for one prompt (counts, needles, per-chunk questions) and you want it answered from an environment with hard call limits",
       "import": "import { recurse } from 'bare-agent'",
       "signature": "recurse(task: string, ctx?: RecurseCtx, opts?: RecurseOptions) => Promise<RecurseResult>",
-      "fails": "returns `{incomplete, best}` on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.",
-      "example": "const ctx = wireGate(gate);\nconst { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });\nif (incomplete) retryOrEscalate(result);"
+      "fails": "returns `{incomplete, best, blocker}` on a brake, gate halt, dead slot, failed verify, wrong or missing final (never a faked pass); a v1 option throws.",
+      "example": "const { result, incomplete } = await recurse('how many are about sports?', { provider }, { input: items, kind: 'count' });\nif (!incomplete) console.log(result.count);"
     },
     {
       "name": "refine",

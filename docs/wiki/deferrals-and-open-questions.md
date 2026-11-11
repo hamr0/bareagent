@@ -7,6 +7,8 @@ sources: ["docs/archive/RLM_PRD.md"]
 
 # RLM Deferrals & Open Questions
 
+> **Superseded by `docs/product/rlm-prd.md` §0.1 (recurse v2, 2026-11-11).** `mode:'fanout'`/`'partition'`, `count`, `workerBudget`, `retrieval`/`corpus`/`window`/`passes`, `synthesize` strings, the Planner fan-out and the prose `spawn_child` tool described below were REMOVED (they now throw). `recurse()` takes `opts.input` + `opts.kind` over a fixed-tool environment with structural brakes; the measured findings below (scan wording/window/passes, code aggregation, pull over push) survive as the `classify` tool and the typed final. The scan helpers moved to `bare-agent/recurse-adapters`. Kept here as history, not rewritten.
+
 Decision record for `recurse()`/RLM §11: every deliberate deferral (with its named un-defer condition), every POC-ruled-out verdict (with evidence), and every out-of-scope call. Full original archived at `docs/archive/RLM_PRD.md`.
 
 ## In scope for v1

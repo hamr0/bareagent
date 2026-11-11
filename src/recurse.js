@@ -1,22 +1,10 @@
 'use strict';
 
-// RLM_PRD — the `recurse()` primitive (NB-1 glue + NB-4 spawn A-tool / capability-scrub + NB-5 prompt).
-// One standalone import that COMPOSES the primitives bareagent already ships (Loop, assessComplexity,
-// Evaluator, bareguard via ctx.policy) into one decompose→fan-out→verify→synthesize entry point. It is glue:
-// it imports `loop.js`, never the reverse — the same stance as Evaluator/refine/remember (§4.6).
-//
-// Shape (§0, §4.2): "B-shell with an A-tool." A deterministic shell owns control flow; the model is OFFERED
-// a `spawn_child` tool it MAY use to delegate a sub-task to a fresh context window. Default control is
-// Family A (the model decides whether/how to decompose, bounded by depth + bareguard). assessComplexity is a
-// HINT, not a gate: it only routes `simple → single-shot` and flags `critical → force adversarial verify`.
-//
-// The recursion mechanism is the spike-2 default (§4.5, POC-resolved): an IN-PROCESS self-call — `spawn_child`
-// runs `recurse(subtask, {...ctx, depth: depth+1})` with a fresh Loop / fresh message array (true fresh
-// window) — ~0 ms/node vs ≥90 ms/node for a process fork. Termination is bareguard's (the gate), reached via
-// `ctx.depth` threaded into the `policy` check; `opts.maxDepth` is only the topology knob that stops OFFERING
-// the spawn tool (NB-4 tool-shaping), never the safety halt (§6). Forced fan-out (Family B / NB-2) and the
-// code-reduce default (NB-3) are later build steps; the seams (`opts.count`/`mode`, `opts.synthesize`) are
-// present here so they slot in without a rewrite.
+// recurse() v2 (docs/product/rlm-prd.md §0.1) — a real RLM over the Loop: the input lives in an env var map the
+// model inspects through FIXED tools (no model-written code), sub-calls run over pieces from code, results live in
+// vars, and the answer is a var of the caller-declared kind ("AI points, code decides"). Brakes are structural
+// (src/recurse-brakes.js: one shared call counter in a closure the model cannot reach, formula cap) and every path
+// ends in ONE tail (src/recurse-finish.js). Composes AROUND a Loop; `loop.js` never imports it.
 
 /** @typedef {import('../types').Provider} Provider */
 /** @typedef {import('../types').ToolDef} ToolDef */
@@ -24,1052 +12,215 @@
 /** @typedef {{id: string, text: string}} Slice */
 
 const { Loop } = require('./loop');
-const { Planner } = require('./planner');
-const { runPlan } = require('./run-plan');
 const { assessComplexity, isCritical } = require('./complexity');
-const { HaltError } = require('./errors');
-const { DECOMPOSITION_POLICY, capabilityScrub } = require('./recurse-prompts');
-const { synthesize } = require('./recurse-synthesize');
-const {
-  refineWorker,
-  PRE,
-  newNode,
-  withContext,
-  auditSafeCtx,
-  workerPersonaPrefix,
-  verifyOrBlock,
-} = require('./refine-worker');
-const {
-  scanCount,
-  impliesCompleteness,
-  normalizeCorpus,
-  buildSearchTool,
-  buildExactTool,
-  buildScanTool,
-} = require('./recurse-retrieval');
-
-// NB-2 forced-fan-out tier→count map (Family B). CALIBRATED live (poc/rlm-nb2-calibrate.mjs, gpt-4o-mini):
-// the measured coverage knees {2,4,6} == predicted ⌈corpus/worker-budget⌉ for medium/complex/critical. These
-// are OVERRIDABLE DEFAULTS, not discovered constants — the right count is task-specific (which is why
-// `opts.count` overrides this and Family A is the adaptive default). `simple` → 1 (a single forced worker).
-const TIER_COUNT = { simple: 1, medium: 2, complex: 4, critical: 6 };
-// Cap on workers run at once within a fan-out wave (in-process; bareguard caps the family rate too). Overridable.
-const DEFAULT_FANOUT_CONCURRENCY = 4;
-// Data-driven width (NB-2 / §11): default items-per-worker for the PARTITION path. width = ⌈size/budget⌉ — how
-// many parallel scan-workers a measured corpus needs. A calibratable knob (the §9.1 algorithm; corpus-specific),
-// not a discovered constant — overridable via `opts.workerBudget`. 100 items ≈ a worker doing ~25 scan windows.
-const DEFAULT_WORKER_BUDGET = 100;
-
-/**
- * Split an array into EXACTLY `n` contiguous, near-equal chunks (the data-partition for the §11 width path).
- * Deterministic; every chunk non-empty when `n <= arr.length` (the caller caps `n` at the size).
- * @template T @param {T[]} arr @param {number} n @returns {T[][]}
- */
-function partitionInto(arr, n) {
-  /** @type {T[][]} */
-  const chunks = [];
-  let start = 0;
-  for (let i = 0; i < n; i++) {
-    const take = Math.ceil((arr.length - start) / (n - i)); // even spread of the remainder
-    chunks.push(arr.slice(start, start + take));
-    start += take;
-  }
-  return chunks;
-}
-
-/**
- * The opts a delegated child inherits. Strips the parent's TOP-LEVEL SETPOINT — `contract`/`evaluate` grade
- * the WHOLE task's final answer; a child grading its own slice against the whole definition-of-done is wasted
- * (the verdict is never read by the parent) AND misapplied (a slice isn't expected to satisfy the whole DoD).
- * Also strips the forced-fan-out knobs (`count`/`mode`) so a child runs Family A, not another forced wave, and
- * the TOP-LEVEL retrieval knobs (`retrieval`/`corpus`/`window`/`passes`) — those describe how the WHOLE task is
- * answered over the parent's corpus; a child has its own subtask and must not re-scan the parent's full corpus
- * (that would fan a whole-corpus count out under every child). The `critical → force-verify` SAFETY FLOOR is
- * unaffected — it keys on the task text via `isCritical`, not the contract, so a critical child still
- * self-verifies. Handle tools (`opts.tools`), `synthesize`, `maxDepth`, **`persona`**, and **`context`** (BA-9)
- * carry down — the persona is a DURABLE worker stance (a child of a "senior security engineer" is still one)
- * and the context is durable run-state (a child rooted at `/proj` is still rooted at `/proj`), unlike the
- * top-only `contract`/`evaluate` setpoint. They ride through the `...opts` spread (not in the strip list).
- * @param {RecurseOptions} opts
- * @returns {RecurseOptions}
- */
-function forChild(opts) {
-  return {
-    ...opts,
-    count: undefined,
-    mode: undefined,
-    contract: undefined,
-    evaluate: undefined,
-    retrieval: undefined,
-    corpus: undefined,
-    window: undefined,
-    passes: undefined,
-  };
-}
+const { HaltError, ValidationError } = require('./errors');
+const { envSystem, SCAN_WINDOW, SCAN_PASSES } = require('./recurse-prompts');
+const { resolveLimits, makeCounter, countingProvider } = require('./recurse-brakes');
+const { finish } = require('./recurse-finish');
+const { makeEnv, normalizeInput, describeInput, KINDS, hasWork } = require('./recurse-env');
+const { refineWorker, newNode, withContext, auditSafeCtx } = require('./refine-worker');
 
 /**
  * @typedef {object} RecurseCtx
- * The per-run runtime blob — the wiring, threaded down the whole recursion tree (and forwarded to the worker
- * Loop's `policy`/governance via `options.ctx`). Distinct from `opts` (the policy knobs).
- * @property {Provider} [provider] - The model the workers call. Required (here or on `opts.provider`).
- * @property {Function} [policy] - bareguard `policy(tool, args, ctx)` — the gate. Sees `ctx.depth` so it can
- *   enforce `limits.maxDepth`/budget/calls. recurse adds NO second guard layer (§6).
- * @property {Function} [onLlmResult] - Budget hook forwarded to every worker Loop AND the verifier — judge
- *   and worker tokens are all real spend (BA1: never invisible).
- * @property {number} [depth] - The current recursion depth (0 at the top). Incremented on each self-call;
- *   threaded into `policy`. Callers normally omit it (defaults to 0).
- * @property {object} [stream] - Optional event stream forwarded to each worker Loop (receipts substrate). This
- *   is the observability channel for worker activity (relayfact F15/BA-5): recurse intentionally does NOT take
- *   `onToolCall`/`onText` Loop callbacks — instead every worker Loop emits `loop:tool_call` / `loop:tool_result`
- *   (and `loop:text`/`loop:done`) to THIS stream (loop.js), so a consumer observes worker tool calls by reading
- *   the stream, not via per-call callbacks. The full audit trail is stream + the RC-10 receipts tree + (if a
- *   gate is wired) the bareguard audit.
- * @property {{recall: Function}} [litectx] - Optional litectx handle (RC-5, §10 step 7). Backs the `search`
- *   retrieval mode (`recall`). NOT used by `scan` — litectx has no exhaustive enumerate verb today; scan reads
- *   the generic array slice-source `opts.corpus` instead (the litectx-resident scan case waits on the litectx
- *   `enumerate` verb and drops in behind the same socket).
+ * The per-run wiring, threaded down the recursion tree and forwarded to every Loop's governance.
+ * @property {Provider} [provider] - The model. Required (here or on `opts.provider`).
+ * @property {Function} [policy] - bareguard `policy(tool, args, ctx)`; sees `ctx.depth`. Money stays the gate's.
+ * @property {Function} [onLlmResult] - Metering hook forwarded to every Loop AND the verifier (never invisible spend).
+ * @property {number} [depth] - Current recursion depth (0 at the top; callers normally omit it).
+ * @property {object} [stream] - Optional event stream forwarded to the root worker Loop; also gets `recurse:limits`.
  */
 
 /**
  * @typedef {object} RecurseOptions
  * @property {Provider} [provider] - Fallback provider if `ctx.provider` is absent.
- * @property {number} [maxDepth=3] - Open topology ceiling (§1): the depth past which the `spawn_child` tool is
- *   no longer offered (`maxDepth=1` ⇒ flat fan-out, no nesting). NOT the safety halt — that is bareguard's,
- *   and actual depth is always ≤ `limits.maxDepth`.
- * @property {string} [persona] - (Gap 3 / 0.21.0) An optional caller stance PREPENDED to every Family-A worker's
- *   system prompt (e.g. "You are a senior security engineer; …"). It AUGMENTS the built-in decomposition policy +
- *   depth-scrub, never replaces them (that text drives the spawn mechanics), and CARRIES DOWN the whole tree
- *   (preserved by `forChild` — a durable worker stance, unlike the top-only `contract`/`evaluate`). Deliberately
- *   NOT applied to the isolated verifier (would defeat the anti-sycophancy isolation, A1) nor the deterministic
- *   scan judge. Absent/blank ⇒ the worker prompt is byte-identical to pre-0.21 (backward-compatible).
- *   **SECURITY:** this is a PRIVILEGED system-prompt seam — treat `persona` like a system prompt. Do NOT pass
- *   untrusted / end-user-controlled text here; a hostile persona is prepended ahead of the decomposition policy
- *   and can override it (and any safety framing) for every worker in the tree. Caller-trusted input only.
- * @property {string} [context] - (BA-9 / relayfact F19) An optional caller-supplied READ-ONLY working-context
- *   blob (e.g. "project root: /abs/path\nfiles are relative to it") prepended to EVERY worker's task message as
- *   a `Working context:` block, so a sliced child can LOCATE its artifact — the concrete context (absolute
- *   paths / cwd) the Planner strips when it paraphrases the parent goal into child subtasks. CARRIES DOWN the
- *   tree (preserved by `forChild`, like `persona`) and, when forced fan-out plans, is forwarded as the Planner's
- *   `info` so the slices themselves are path-aware. Also shown to the verifier (neutral FACTS, not a stance, so
- *   no anti-sycophancy concern — and an agentic critic needs the path to exercise the artifact). Distinct from
- *   `persona`: persona is a privileged SYSTEM-prompt stance; context is run-state facts on the USER message.
- *   Absent/blank ⇒ byte-identical to pre-BA-9 (backward-compatible). Validated live (`poc/ba9-context-thread.mjs`:
- *   a weak model went 0/3 → 3/3 at locating an unguessable file once the root was threaded).
- *   **SECURITY:** this becomes part of every worker's prompt (and the verifier's) — lower-privilege than
- *   `persona` (the USER message, not the SYSTEM prompt) but still a prompt-injection surface. Intended for
- *   TRUSTED run-state (paths/cwd); do NOT pass untrusted / end-user-controlled text here.
- * @property {ToolDef[]} [tools] - Handle tools offered to EVERY worker (RC-5 pull-default: litectx
- *   `recall`/`get`, wired at build step 7). Workers query on demand; never the whole corpus.
+ * @property {string | Slice[] | (() => Promise<Slice[]>)} [input] - The data the task is about. Lives in the env var
+ *   `input`; the root prompt shows ONLY metadata (type, size, short prefix). A function is awaited once. Malformed or
+ *   duplicate `Slice`s are dropped and counted in `receipts.input.dropped`.
+ * @property {'count'|'ids'|'text'|'composite'} [kind='text'] - The answer kind the CALLER expects. `count`/`ids`: the
+ *   model must cite a classify/union var with `final(var)` and CODE derives `{count, ids}`; `composite`: `final_parts`
+ *   gives `{needle, count:{count, ids}}`; `text`: `final_text`/`final(var)`, or a plain reply. A wrong-kind final gets
+ *   ONE nudge, then `{incomplete, blocker:'wrong-final'}`; no final at all is `blocker:'no-final'`.
+ * @property {{maxDepth?: number, maxCalls?: number, maxWidth?: number, maxRounds?: number} | 'none'} [limits] - Structural
+ *   brakes (default ON, even with a gate). `maxCalls` is TIGHTEN-ONLY against a formula cap computed from the input size;
+ *   `'none'` disables them and every return carries `unbraked:true`. Money/tokens/wall-clock stay with bareguard.
+ * @property {number} [maxDepth] - Shorthand for `limits.maxDepth`.
+ * @property {{in: number, out: number, cacheReadMult?: number, cacheWriteMult?: number}} [rates] - Caller USD-per-1K token rates (same semantics as `Loop({rates})`): when given, `metrics.costUsd` is priced from them (authoritative); otherwise it is a flagged tier guess, or null if any round carries no usage.
+ * @property {number} [concurrency=8] - Max sub-calls in flight per fan-out.
+ * @property {string} [persona] - Caller stance PREPENDED to every env worker's system prompt (carries down; never the
+ *   verifier or the classify judge). PRIVILEGED seam: trusted text only.
+ * @property {string} [context] - Read-only working-context (paths/cwd) put on the USER message of every worker and shown
+ *   to the verifier. Carries down. Trusted run-state only.
+ * @property {ToolDef[]} [tools] - Caller tools appended to the fixed env tools (carry down).
+ * @property {string} [contract] - Definition of done; the isolated verifier grades against it (top node only).
+ * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate] - Override the verifier.
  * @property {{sensor: (result: any, ctx: {task: string, context: string|undefined, contract: string|null}) => (Verdict|Promise<Verdict>), maxIterations?: number, temperatures?: number[], rejectedBuffer?: boolean}} [refineLeaf]
- *   (Opt-in, BA-8 / relayfact F17) Turn a DEFINITE LEAF (a node that is offered no `spawn_child` — `simple`
- *   tier or at `maxDepth`) into a bounded generate→sense→regenerate loop instead of a single pass, so a failed
- *   slice can self-correct. `sensor` is a DETERMINISTIC close (test/compile/lint — NOT a model judge, R-S8) that
- *   returns a `Verdict`; on a non-pass its `critique` (the GAP, not the transcript) is fed FRESH into the next
- *   attempt (D6/A1 anti-anchoring) and, on models that ACCEPT `temperature`, the **retry temperature ESCALATES**
- *   (`temperatures`, default `[0.2,0.7,1.0]`) — the live-validated lever that lets a weak model escape a
- *   repeat-the-same-mistake rut (`poc/ba8-leaf-refine.mjs`: 0/5 → 2-3/5; flat temp recovers 0/5). On a
- *   temperature-fixed model (BA-10) the provider drops the param, `receipts.refineLeaf.temperatures` records
- *   `null`, and the fed-back gap critique carries recovery alone — UNLESS the rejected-attempt buffer engages
- *   (below). `maxIterations` defaults to
- *   `temperatures.length`; the REAL bound is bareguard (each attempt is gate-checked + metered). CARRIES DOWN the
- *   tree (preserved by `forChild`), so it engages at the leaves of a Family-A decomposition. Recovery is PARTIAL
- *   (a stubborn blind spot may persist) — `receipts.refineLeaf.passed` reports honestly. Does NOT apply to a node
- *   that delegates (its children + the tree verify own quality), nor to the scan/fanout/partition dispatch paths.
- *   Absent ⇒ a leaf is a single pass (byte-identical to pre-BA-8). An error-keyed `recall` is the CALLER's tool
- *   (`opts.tools`) keyed off the fed-back critique — bareagent stays litectx-agnostic.
- *   **Sensor integrity (RSI-learnings #1/#5, "audit the close"):** the `sensor` MUST judge the RETURNED result
- *   (tamper-proof — e.g. build/run the returned string in an isolated context, as `poc/ba8-leaf-refine.mjs` does),
- *   NEVER a worker side-effect a worker with edit tools could GAME (writing a passing file then returning junk, or
- *   editing the failing test itself). A gameable close is the reward-hacking surface every RSI system in the field
- *   got bitten by; the loop optimizes against WHATEVER the sensor reads, so keep it outside what the worker can write.
- *   **Broken sensor ≠ failing model (BA-15):** a sensor that THROWS (non-Halt) or returns a MALFORMED verdict
- *   (anything but `{pass: boolean}` or a valid tri-state `status`) is a faulty ARBITER — the loop stops at the
- *   FIRST broken close (never retries against it) and returns a labeled `{incomplete, blocker:'broken-sensor'}`
- *   (+ `receipts.blockerDetail`), with `best` preserving the model's last attempt. A `HaltError` thrown by the
- *   sensor stays a clean governance halt. The sensor's EXECUTION environment is the caller's: run untrusted /
- *   model-generated checks in an isolated child process WITH A TIMEOUT — a sensor that hangs forever hangs the
- *   leaf (no bareguard checkpoint fires between sensor start and return; confirmed by `poc/rlmplans-hung-sensor.mjs`).
- *   **`rejectedBuffer` (BA-14):** a SkillOpt-shaped rejected-attempt buffer — instead of only the LATEST critique,
- *   surface the model's OWN prior failed attempts verbatim ("you wrote these, they failed X — write something
- *   STRUCTURALLY DIFFERENT"). This is DIRECTED diversity (attack the specific repeated mistake), where escalation
- *   is RANDOM diversity; the two are ANTAGONISTIC (`poc/ba14b-temp-with-buffer.mjs`: temperature monotonically
- *   degrades the buffer, 100%→70%→50% across 0.2/0.7/1.0), so when the buffer engages the retry temperature is
- *   HELD at `temperatures[0]` (flat-low), never escalated. `true` = force on (also on temperature-accepting
- *   models); `false` = force off (pure BA-8 escalation); UNSET = ADAPTIVE — engage only once a prior attempt's
- *   temperature was dropped (a temperature-fixed model, BA-10, where escalation is inert and the buffer is the
- *   sole lever — `poc/ba14-rejected-buffer.mjs`: flat-temp 50%→100%). `receipts.refineLeaf.rejectedBuffer`
- *   reports whether any iteration injected it. Bounded by `maxIterations` (the buffer never outgrows it).
- * @property {string} [contract] - Definition of done (A3). When present, the verifier grades against THIS,
- *   not the loose task, and verification always runs.
- * @property {(result: any, ctx: {contract: string|null, task: string}) => (Verdict|Promise<Verdict>)} [evaluate]
- *   Override the verifier (fills `recurse()`'s verify slot, §7.1). Default = an `Evaluator` rubric pass.
- * @property {((args: {task: string, text: string|null, results: any[], children: object[], ctx: RecurseCtx}) => any) | 'concat' | 'merge'} [synthesize]
- *   Override synthesis/reduce (NB-3). A FUNCTION is a deterministic code-reduce over the child `results` — the
- *   §9.1 aggregation path (LLM arithmetic over partials carried ~10–15% error). A STRATEGY string runs the
- *   built-in reducer: `'concat'` (lossless no-LLM join) or `'merge'` (an isolated Loop-driven subjective
- *   merge); a string is ignored when no child ran. Default (unset) = the worker's own final text (Family A:
- *   the parent model already combined the children's results in its closing turn).
- * @property {number} [count] - (Opt-in, NB-2 / Family B) FORCED fan-out: decompose into exactly this many
- *   independent parallel workers via `Planner`→`runPlan`, then reduce. A positive integer here is the count;
- *   it OVERRIDES the tier→count map. Setting it (or `mode:'fanout'`) takes the deterministic-parallelism path
- *   instead of the model-driven Family-A default. For known-parallel tasks where the caller wants guaranteed
- *   fan-out, not the model's adaptive choice.
- * @property {'fanout'|'partition'} [mode] - (Opt-in, NB-2 / Family B) `'fanout'` = forced semantic fan-out
- *   WITHOUT a fixed count — derived from `assessComplexity`'s tier via the calibrated map (medium/complex/
- *   critical → 2/4/6; simple → 1); `opts.count` takes precedence. `'partition'` = the DATA-DRIVEN WIDTH path
- *   (§11): measure `opts.corpus` and partition it into `max(opts.count floor, ⌈size/workerBudget⌉)` parallel
- *   scan-workers (capped by the guards), CODE-reducing the per-chunk counts. Distinct from `'fanout'`: a data
- *   partition, not a `Planner` semantic split.
- * @property {number} [workerBudget] - (`mode:'partition'`) items per worker; width = `⌈corpus.length /
- *   workerBudget⌉` (default 100). A calibratable knob (the §9.1 algorithm), not a discovered constant.
- * @property {number} [concurrency] - (Family B) max workers run at once per wave (default 4). The wave
- *   structure is `runPlan`'s; bareguard still bounds the family rate independently.
- * @property {'scan'|'search'|'exact'|'tools'} [retrieval] - (§10 step 7) the retrieval shape for a task OVER A
- *   CORPUS, routed by question shape (§9.2.1). `'scan'` (the default WHEN `opts.corpus` is present) = process
- *   every slice + LLM-judge + CODE-count — the only COMPLETE path (for "how many / all"). `'search'` = litectx
- *   `recall` handle tool offered to the worker (needle; CANNOT count; requires `ctx.litectx`). `'exact'` = a
- *   deterministic code-side AND-term filter tool over `opts.corpus`. `'tools'` = the PER-QUERY Family-A face:
- *   offer the worker `scan_count` (over `opts.corpus`) + `search_memory` (when `ctx.litectx`) + `exact_match`
- *   (array corpus) ALL AT ONCE, and let it pick the shape PER SUB-QUERY — the routing lives in the tool
- *   descriptions (scan says "use for how many / all / count"; search says "never count"), so a mixed task gets
- *   needle-search AND complete-count without per-sub-query adopter declaration. The completeness guard upgrades a
- *   `'search'` on a "how many / all" ask to `'scan'` (UPGRADE-only, never a silent downgrade); it does NOT fire
- *   for `'tools'` (the complete `scan_count` is always offered there, so a mixed task keeps its search tool).
- *   Absent `corpus` AND `retrieval`, behaviour is unchanged (Family A / single-shot) — fully backward-compatible.
- * @property {Slice[] | (() => Promise<Slice[]>)} [corpus] - (§10 step 7) the generic slice-source scan/partition
- *   reads: an in-hand `{id, text}[]` array, OR an async `() => Promise<Slice[]>` (e.g. `litectxCorpus(litectx,
- *   {kind})` materializing a litectx-resident corpus via `enumerate`). recurse depends on this SHAPE, never on
- *   litectx. Malformed entries are dropped, never miscounted.
- * @property {number} [window] - (scan) items per judge window. Default 8 (§9.2.1 recall knee — the one
- *   calibrated number; per-model).
- * @property {number} [passes] - (scan) shuffled-boundary passes unioned for recall. Default 2 (~0.91 recall).
+ *   Compat shim ONLY, with `maxDepth:0`: forwards to `refineWorker()` and warns once per process. Use `refineWorker`.
  */
 
 /**
  * @typedef {object} RecurseNode
- * One audit/receipts node (RC-10) — the recursion tree reconstructs from these alone: parent→child lineage
- * (`spawned`), each subgoal (`task`), each gap report (`verdict`), cost per node (`tokens`).
+ * One receipts node (RC-10). Besides lineage (`spawned`), it carries the run's own facts, set before the first call:
+ * `limits`, `cap`; and updated as it runs: `rounds`, `rootPeakInput` (max per-round input tokens), `vars`, `memoHits`,
+ * `nudges`, `toolCalls` (counts by tool), `calls` (root only: whole-tree LLM calls), `input` `{type, items, dropped}`.
  * @property {string} task
  * @property {number} depth
  * @property {{level: string, score: number}} complexity
  * @property {boolean} critical
- * @property {RecurseNode[]} spawned - Child nodes (lineage).
+ * @property {RecurseNode[]} spawned
  * @property {Verdict|null} verdict
  * @property {boolean} incomplete
  * @property {boolean} halted
- * @property {string} [blocker] - Set when this node stopped for a specific non-model reason (mirrors
- *   `RecurseResult.blocker`): `'governance-deny'` (BA-11) — its Loop short-circuited a consecutive-policy-deny
- *   spin; `'broken-sensor'` (BA-15) — the caller's `refineLeaf.sensor` threw or returned a malformed verdict;
- *   `'broken-verifier'` (BA-15) — the caller's `opts.evaluate` did (the default Evaluator path is never labeled).
- * @property {string} [blockerDetail] - (BA-15) with a `broken-*` blocker: what the arbiter did (threw with
- *   which message, or which malformed shape it returned) — the actionable half of the label.
- * @property {{blocker: string, blockerDetail?: string, blockerTask?: string}} [blockerFrom] - (BA-15) a
- *   DESCENDANT's blocker, surfaced here so an aggregating node still reports the fault upward. Deliberately
- *   SEPARATE from this node's own `blocker` (which means "THIS node's arbiter/Loop broke"): stamping a
- *   descendant's label onto every ancestor made the receipts tree accuse nodes whose sensor never ran, and
- *   re-labelled a parent `governance-deny` when only one child was denied. `blockerTask` names the culprit.
- * @property {object|null} tokens - The worker Loop's `metrics.tokens`.
- * @property {{iterations: number, passed: boolean, temperatures: (number|null)[], rejectedBuffer: boolean}} [refineLeaf] - (BA-8) when
- *   this leaf ran as a bounded refine loop: how many attempts it took and whether the deterministic sensor finally
- *   passed (false = honest non-recovery, not a faked success). `temperatures` are the EFFECTIVE per-attempt temps
- *   (BA-10): a `null` marks an attempt the model ran at its DEFAULT because it rejected the requested temperature.
- *   `rejectedBuffer` (BA-14): whether any iteration injected the rejected-attempt buffer (prior failed attempts
- *   surfaced verbatim); when it engages the REQUESTED retry temperature is held flat at `temperatures[0]`, never
- *   escalated (ba14b antagonism) — but a temperature-fixed model still drops it, so the EFFECTIVE temp recorded
- *   above is `null`, not `temperatures[0]`.
+ * @property {string} [blocker] - This node stopped for a specific reason (`brake`, `halt`, `wrong-final`, `no-final`, `governance-deny`, `verify-failed`, `broken-verifier`, `broken-sensor`, `error`, `input`).
+ * @property {string} [blockerDetail]
+ * @property {{blocker: string, blockerDetail?: string, blockerTask?: string}} [blockerFrom] - A DESCENDANT's blocker (never stamped as this node's own).
+ * @property {any} [best]
+ * @property {string[]} [missingSlices]
+ * @property {object|null} tokens
  * @property {string|null} model
- * @property {string|null} [retrieval] - (§10 step 7) the retrieval mode this node ran (`scan`/`search`/`exact`),
- *   or null/absent for a plain reasoning node.
- * @property {string} [retrievalUpgraded] - set when the completeness guard upgraded the mode (e.g.
- *   `'search→scan (completeness)'`) — the audit trail for RC-9-applied-to-retrieval.
- * @property {{window: number, passes: number, scanned: number, matched: number}} [scan] - (scan) the scan
- *   shape: window/passes used, slices scanned, ids matched (CODE-counted).
- * @property {{size: number, workerBudget: number, floor: number, dataWidth: number, width: number, matched?: number}} [partition]
- *   - (`mode:'partition'`) the data-driven width audit: corpus size, the budget knob, the count floor, the
- *   data-derived width `⌈size/budget⌉`, the chosen `width = max(floor, dataWidth)`, and matched count.
+ * @property {string|null} [retrieval] - unused in v2 (kept for the refineWorker node shape).
+ * @property {any} [refineLeaf]
+ * @property {any} [limits]
+ * @property {number} [cap]
+ * @property {number} [calls]
+ * @property {number} [rounds]
+ * @property {number} [rootPeakInput]
+ * @property {number} [vars]
+ * @property {number} [memoHits]
+ * @property {number} [nudges]
+ * @property {Record<string, number>} [toolCalls]
+ * @property {{type: string, items: number, dropped: number}} [input]
  */
 
 /**
  * @typedef {object} RecurseResult
- * @property {any} [result] - The synthesized answer (on convergence).
- * @property {Verdict|null} [verdict] - The verifier's gap report (null when verification did not run).
- * @property {boolean} [incomplete] - true on guard exhaustion / a dead worker / an incomplete child (RC-9) —
- *   never a faked pass.
- * @property {any} [best] - The best partial answer when `incomplete` (RC-9).
- * @property {string[]} [missingSlices] - When `incomplete` because a child failed: the sub-task(s) that came
- *   back incomplete (§9 scenario 1) — the anti-survivor-sum signal, not a quiet undercount.
- * @property {string} [blocker] - Present when `incomplete` for a specific, actionable reason. `'governance-deny'`
- *   (BA-11): the worker's Loop short-circuited after N consecutive policy denials rather than burn to the
- *   budget cap — the caller can widen scope / re-gate / escalate instead of reading it as a model failure.
- *   `'broken-sensor'` (BA-15): the caller's `refineLeaf.sensor` threw or returned a malformed verdict — the
- *   ARBITER is faulty, not the model; fix the sensor and re-run (`receipts.blockerDetail` says what it did).
- *   `'broken-verifier'` (BA-15): same fault class at the verify slot — the caller's `opts.evaluate` threw
- *   (non-Halt) or returned a malformed verdict; the default Evaluator path is never labeled (its failures are
- *   provider-class faults). For both `broken-*` blockers `best` preserves the model's last non-empty output
- *   (BA-5) — the arbiter broke, so treat it as best-effort work rather than a graded pass.
- * @property {string} [blockerDetail] - (BA-15) with a `broken-*` blocker: what the arbiter did — the
- *   ACTIONABLE half of the label, surfaced on the result (not only in `receipts`) so a caller branching on
- *   `blocker` can report the cause without walking the receipts tree.
- * @property {string} [blockerTask] - (BA-15) when the blocker was INHERITED from a descendant in a nested run:
- *   which sub-task actually broke. Without it a nested failure reports "a sensor broke" with no way to find
- *   which one.
- * @property {RecurseNode} receipts - The audit node for this call (RC-10).
+ * @property {any} [result] - On success: `{count, ids}` (count/ids), `{needle, count}` (composite) or a string (text).
+ * @property {Verdict|null} [verdict]
+ * @property {boolean} [incomplete] - The ONE "not done" signal: brake, gate halt, dead slot, failed verify, wrong/no final. Never a faked pass.
+ * @property {any} [best] - Last non-empty work when `incomplete` (BA-5).
+ * @property {string[]} [missingSlices] - Pieces that never produced an answer (never survivor-summed).
+ * @property {string} [blocker]
+ * @property {string} [brake] - With `blocker:'brake'`: `maxCalls`/`maxWidth`/`maxRounds`.
+ * @property {string} [blockerDetail]
+ * @property {string} [blockerTask]
+ * @property {boolean} [unbraked] - Present (true) under `limits:'none'`.
+ * @property {{calls: number, tokens: object, costUsd: number|null}} [metrics] - Root only: whole-tree calls/tokens/cost (null if any node is unpriced).
+ * @property {RecurseNode} receipts
  */
 
+/** Internal opts key: a child `recurse` receives its parent's counter VIEW here (tighten-only, shared total). Not public. */
+const SHARED = Symbol('recurse.shared');
+
+// Options removed in v2 → fail LOUD (a silently dead knob would change what the call means).
+const REMOVED = {
+  corpus: 'use opts.input (and kind:"count" with classify)', retrieval: 'use opts.input', window: 'fixed at 8', passes: 'fixed at 2',
+  mode: 'use limits.maxWidth / concurrency', count: 'use limits.maxWidth / concurrency', workerBudget: 'use limits.maxWidth / concurrency',
+  synthesize: 'reductions are code tools (join/union/count)',
+};
+
+let shimWarned = false;
+
+/** The opts a delegated child inherits: persona/context/tools/concurrency carry down; the top-level setpoint, input and brakes do not. */
+const forChild = (/** @type {any} */ opts) => ({ ...opts, input: undefined, kind: 'text', limits: undefined, maxDepth: undefined, contract: undefined, evaluate: undefined });
+
 /**
- * Decompose a task into fresh-context workers, verify against a setpoint, and synthesize one result —
- * assembled from existing primitives, not reimplemented (G1/G6).
- *
- * ⚠️ RESOURCE BOUNDS ARE bareguard's, not recurse()'s — OPEN BY DESIGN (§6, "no second guard layer"), and the
- * one thing to know before running it. `recurse()` adds NO intrinsic total-work cap. The **Family-A default**
- * (model-driven `spawn_child`) lets a node spawn UP TO each Loop's `HARD_ROUND_LIMIT` (100) children PER LEVEL,
- * each recursing to `opts.maxDepth` (default 3) — so node count, and therefore TOKEN + $ SPEND, compounds
- * multiplicatively and is **not capped by recurse itself**. (The forced paths — `mode:'fanout'`/`'partition'` —
- * ARE bounded: a deterministic `count` + a `concurrency` cap. The uncapped path is the model-driven default.)
- * This is real, not theoretical: a live POC (`poc/rlm-defer2-history-overflow.mjs`) showed a weak model
- * over-decomposing into 40–117 calls on a single run. **So: running WITHOUT bareguard — or without ANY
- * token/cost cap — CAN BURN TOKENS / $ unboundedly (up to ~100×depth nodes).** **WIRE bareguard**
- * (`ctx.policy` via `wireGate`) for any non-trivial or untrusted run — it enforces depth/budget/call caps and
- * the pre-wave fan-out checkpoint, turning a runaway into a clean `{incomplete}`. With no gate available, the
- * only local brakes are `opts.maxDepth: 1` (flat — no nesting) and the provider/key's own usage limits.
- *
+ * Answer a task over an input held in an environment, with fixed tools, structural brakes and one honest tail.
+ * Input is never pasted into the prompt; the answer is a var of the declared `kind` (count derived by CODE).
  * @param {string} task - The goal.
- * @param {RecurseCtx} [ctx] - The runtime wiring (provider, policy, depth, …). Threaded down the tree.
- * @param {RecurseOptions} [opts] - The policy knobs.
- * @returns {Promise<RecurseResult>} `{ result, verdict, receipts }` on convergence; `{ incomplete, best,
- *   receipts }` on guard exhaustion. NEVER a fabricated success (RC-9).
- * @throws {Error} no provider supplied (on neither `ctx.provider` nor `opts.provider`).
- * @when a task is too big for one model pass and you want it split, fanned out, verified, and merged — with total cost capped by a gate
- * @fails returns `{incomplete, best}` on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.
+ * @param {RecurseCtx} [ctx] - Runtime wiring (provider, policy, onLlmResult, stream, depth).
+ * @param {RecurseOptions} [opts] - The knobs (`input`, `kind`, `limits`, ...).
+ * @returns {Promise<RecurseResult>} `{result, verdict, receipts, metrics}` or `{incomplete, best, blocker, receipts, metrics}`.
+ * @throws {Error} no task/provider; a removed v1 option; a bad `kind`/`limits`.
+ * @when a task is about data too big for one prompt (counts, needles, per-chunk questions) and you want it answered from an environment with hard call limits
+ * @fails returns `{incomplete, best, blocker}` on a brake, gate halt, dead slot, failed verify, wrong or missing final (never a faked pass); a v1 option throws.
  * @example
- *   const ctx = wireGate(gate);
- *   const { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });
- *   if (incomplete) retryOrEscalate(result);
+ *   const { result, incomplete } = await recurse('how many are about sports?', { provider }, { input: items, kind: 'count' });
+ *   if (!incomplete) console.log(result.count);
  */
 async function recurse(task, ctx = {}, opts = {}) {
-  if (typeof task !== 'string' || task.length === 0) {
-    throw new Error('[recurse] task must be a non-empty string');
-  }
+  if (typeof task !== 'string' || task.length === 0) throw new Error('[recurse] task must be a non-empty string');
   const provider = ctx.provider || opts.provider;
-  if (!provider) {
-    throw new Error('[recurse] requires a provider on ctx.provider (or opts.provider)');
-  }
+  if (!provider) throw new Error('[recurse] requires a provider on ctx.provider (or opts.provider)');
 
-  const depth = Number.isInteger(ctx.depth) ? /** @type {number} */ (ctx.depth) : 0;
-  const maxDepth = Number.isInteger(opts.maxDepth) ? /** @type {number} */ (opts.maxDepth) : 3;
-
-  // The classifier ALWAYS runs — as a hint, not a gate (§4.2). It decides only the two low-regret rails:
-  // `simple → single-shot` (no spawn tool offered; the depth-0 baseline that already beats most, §10F) and
-  // `critical → force adversarial verify` (the non-overridable safety floor, isCritical). It NEVER gates the
-  // high-regret decomposition structure — that stays the model's (Family A).
-  const assessment = assessComplexity(task);
-  const critical = isCritical(task);
-
-  const node = newNode(task, depth, assessment, critical);
-
-
-  // Family B (NB-2) — FORCED fan-out, opt-in. The caller asked for guaranteed deterministic parallelism, so
-  // this path does NOT offer the model the spawn tool; a deterministic count → Planner → runPlan waves →
-  // NB-3 reduce → verify. assessComplexity is still only a hint here (it sets the count when no explicit
-  // `opts.count`); `critical` still forces verify. Branches before the Family-A spawn-tool setup below.
-  // Data-driven width PARTITION (NB-2 / §11) — opt-in, checked BEFORE the fanout branch so `opts.count` acts as
-  // the width FLOOR here (not a fanout trigger). Distinct from Family B's semantic decomposition: it PARTITIONS
-  // a measured corpus into ⌈size/workerBudget⌉ parallel scan-workers (capped by guards), never a Planner split.
-  if (opts.mode === 'partition') {
-    return recursePartition(task, ctx, opts, { provider, depth, critical, node });
-  }
-
-  // PRECEDENCE: an explicit forced fan-out (`mode:'fanout'`/`count`) is the stronger, deterministic intent and
-  // wins over `retrieval:'tools'` — this branch returns BEFORE the retrieval routing below, so a worker-level
-  // per-query tool face is NOT attached on a forced fan-out (each fan-out slice is its own fresh-window recurse
-  // and may route retrieval for ITS subtask). Pair forced fan-out with a per-slice `corpus`, not `retrieval:'tools'`.
-  if (opts.mode === 'fanout' || opts.count != null) {
-    return recurseFanout(task, ctx, opts, { provider, depth, maxDepth, assessment, critical, node });
-  }
-
-  // Retrieval routing (§10 step 7, §9.2.1 task-shape model). A task OVER A CORPUS gets context as a HANDLE
-  // chosen by the question's shape. `scan` is the default WHEN a corpus is present (the only complete path);
-  // `search`/`exact` are opt-in handle TOOLS for a Family-A worker. Absent both, behaviour is unchanged.
-  // A corpus may be an in-hand array OR an async slice-source `() => Promise<Slice[]>` (e.g. `litectxCorpus`
-  // over a litectx-resident corpus). Either form defaults retrieval to scan.
-  const hasCorpus = Array.isArray(opts.corpus) || typeof opts.corpus === 'function';
-  let retrieval = opts.retrieval || (hasCorpus ? 'scan' : null);
-  // Completeness-contract GUARD (RC-9 applied to retrieval): a "how many / all" ask must not be answered by a
-  // capped `search` (which cannot count). UPGRADE-only — never silently downgrade a scan to a search.
-  if (retrieval === 'search' && (impliesCompleteness(task) || impliesCompleteness(opts.contract))) {
-    retrieval = 'scan';
-    node.retrievalUpgraded = 'search→scan (completeness)';
-  }
-  node.retrieval = retrieval;
-
-  // `scan` is a deterministic ORCHESTRATION (code-driven judge-per-window + code-count), not a worker model
-  // call — it branches to its own path. `search`/`exact` fall through to the Family-A worker below with their
-  // handle tool injected (the worker decides per sub-query — the §10 step-7 "offered as tools" shape).
-  if (retrieval === 'scan') {
-    return recurseScan(task, ctx, opts, { provider, depth, critical, node });
-  }
-
-  // Offer the spawn A-tool only below the cap AND only when decomposition is plausibly useful (`simple`
-  // routes to single-shot). At `depth >= maxDepth` the tool is withheld — the NB-4 tool half of the scrub,
-  // and what makes `maxDepth=1` flat (RC-11): top spawns, children cannot (no nesting).
-  const canSpawn = depth < maxDepth && assessment.level !== 'simple';
-
-  // Capability-scrub (NB-4 / RC-12): the worker system prompt is the OPTIONAL caller persona (`opts.persona`) +
-  // the decomposition policy (NB-5) + a depth-conservative suffix that nudges deeper workers toward direct
-  // action. The persona AUGMENTS, never replaces — the decomposition + scrub text is load-bearing for the spawn
-  // mechanics, so a persona that replaced it would break decomposition (POC `rlm-persona-seam.mjs` validated the
-  // prepend: the worker still decomposes AND adopts the persona). Persona CARRIES DOWN the tree (it is preserved
-  // by `forChild`, unlike contract/evaluate) — a durable worker stance, not a top-only setpoint. It is deliberately
-  // NOT applied to the isolated verifier (that would defeat the anti-sycophancy isolation) nor the scan judge.
-  // Tool set is monotone: a child's tools ⊆ its parent's (same handle tools, spawn dropped at the cap).
-  const system = workerPersonaPrefix(opts.persona) + DECOMPOSITION_POLICY + capabilityScrub(depth, maxDepth);
-
-  // Handle tools (RC-5 pull-default) = caller-supplied `opts.tools` + the retrieval handle for `search`/`exact`/
-  // `tools` (offered so the Family-A worker pulls context per sub-query, never the whole corpus). `search` needs
-  // `ctx.litectx`; `exact` is a code-side filter over the corpus. A mode whose backend is absent contributes
-  // no tool (the worker just answers directly) rather than erroring.
-  const retrievalTools = [];
-  if (retrieval === 'search' && ctx.litectx) retrievalTools.push(buildSearchTool(ctx.litectx, {}));
-  if (retrieval === 'exact') retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
-  // `tools` (§10 step-7 follow-on, per-query face) — offer ALL applicable handles at once; the worker routes by
-  // their descriptions per sub-query. `scan_count` is the COMPLETE path (so the completeness guard need not fire
-  // for `tools`); `search_memory`/`exact_match` are the cheap needle/rule paths. Each is offered only when its
-  // backend is present (a corpus for scan/exact, `ctx.litectx` for search), else simply absent.
-  if (retrieval === 'tools') {
-    if (hasCorpus) {
-      retrievalTools.push(buildScanTool(/** @type {Slice[] | (() => Promise<Slice[]>)} */ (opts.corpus), {
-        provider,
-        window: opts.window,
-        passes: opts.passes,
-        ctx: auditSafeCtx(ctx, { depth }), // scan's Loop run ctx reaches the gate — strip provider (F16/BA-1)
-        onLlmResult: ctx.onLlmResult,
-        policy: ctx.policy,
-      }));
+  if (opts.refineLeaf) { // decision 3: one-release compat shim for relayfact's recurse(…, {maxDepth:0, refineLeaf})
+    if (opts.maxDepth === 0 && typeof opts.refineLeaf.sensor === 'function') {
+      if (!shimWarned) { shimWarned = true; console.warn('[bare-agent] recurse(…, {maxDepth:0, refineLeaf}) is deprecated: call refineWorker(task, ctx, opts) instead (shim removed next release).'); }
+      return refineWorker(task, ctx, opts);
     }
-    if (ctx.litectx) retrievalTools.push(buildSearchTool(ctx.litectx, {}));
-    if (Array.isArray(opts.corpus)) retrievalTools.push(buildExactTool(normalizeCorpus(opts.corpus)));
+    throw new ValidationError('recurse: opts.refineLeaf is only supported through the maxDepth:0 compat shim — use refineWorker()');
   }
-  const handleTools = [...(Array.isArray(opts.tools) ? opts.tools : []), ...retrievalTools];
+  for (const k of Object.keys(REMOVED)) if (/** @type {any} */ (opts)[k] !== undefined) throw new ValidationError(`recurse: option "${k}" was removed in v2 — ${/** @type {any} */ (REMOVED)[k]}`);
+  const kind = opts.kind === undefined ? 'text' : opts.kind;
+  if (!KINDS.includes(kind)) throw new ValidationError('recurse: kind must be one of count|ids|text|composite');
 
-  // BA-8 (opt-in): a DEFINITE leaf (no spawn offered — `simple` tier or at `maxDepth`) with a caller sensor runs
-  // as a bounded refine-with-escalation loop instead of a single pass, so a failed slice self-corrects. Gating on
-  // `!canSpawn` keeps it predictable (a node that may delegate is an orchestrator, not a leaf) and means the seam
-  // engages exactly at the leaves of a Family-A tree (it carries down via forChild). A no-op when unset.
-  if (!canSpawn && opts.refineLeaf && typeof opts.refineLeaf.sensor === 'function') {
-    return refineWorker(task, ctx, /** @type {any} */ ({ ...opts, [PRE]: { provider, system, handleTools, depth, critical, node } }));
+  const shared = /** @type {any} */ (opts)[SHARED];
+  const depth = Number.isInteger(ctx.depth) ? /** @type {number} */ (ctx.depth) : 0;
+  const critical = isCritical(task);
+  const node = /** @type {RecurseNode} */ (newNode(task, depth, assessComplexity(task), critical));
+  Object.assign(node, { rounds: 0, rootPeakInput: 0, vars: 0, memoHits: 0, nudges: 0, toolCalls: {} });
+
+  /** @type {any} */ let input = null; let inputErr = null; let counter = shared; let err = null;
+  try {
+    const raw = typeof opts.input === 'function' ? await opts.input() : opts.input;
+    const norm = normalizeInput(raw); input = norm.input;
+    node.input = { type: input == null ? 'none' : Array.isArray(input) ? 'items' : 'string', items: Array.isArray(input) ? input.length : 0, dropped: norm.dropped };
+  } catch (e) {
+    if (e instanceof HaltError) err = e; else inputErr = e; // a source fault is an honest incomplete, never an empty scan
   }
+  if (input == null && kind !== 'text' && !inputErr && !err) throw new ValidationError(`recurse: kind "${kind}" needs opts.input`);
 
-  // NB-3: collect each child's declared RESULT value (copy-on-return: the value, never its transcript) so the
-  // reducer can aggregate them. Step-3's seam handed the receipts only, so a code-reduce could not see what to
-  // combine — this closes that gap and is what Family B (step 5) will reduce over `runPlan` results[].
-  const childResults = [];
-  const tools = canSpawn
-    ? [...handleTools, buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults)]
-    : handleTools;
+  if (!counter) {
+    const verifyCalls = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function' ? 1 : 0;
+    const maxWidthHint = typeof opts.limits === 'object' && opts.limits && opts.limits.maxWidth != null ? opts.limits.maxWidth : 16;
+    // string/absent input has no classify scan; reserve one full-width map (maxWidth sub-calls) via the same formula
+    const items = Array.isArray(input) ? input.length : maxWidthHint * Math.ceil(SCAN_WINDOW / SCAN_PASSES);
+    const limits = opts.limits === 'none' ? 'none' : opts.maxDepth != null ? { ...(opts.limits || {}), maxDepth: opts.maxDepth } : opts.limits;
+    counter = makeCounter(resolveLimits(limits, { items, window: SCAN_WINDOW, passes: SCAN_PASSES, verifyCalls }), { rates: opts.rates });
+  }
+  node.limits = counter.limits; node.cap = counter.limits.maxCalls; // exposed BEFORE the first call (tighten-only)
+  try { if (ctx.stream && typeof ctx.stream.emit === 'function') ctx.stream.emit({ type: 'recurse:limits', data: { depth, cap: node.cap, limits: { ...counter.limits } } }); } catch { /* observability only */ }
 
+  const canSub = counter.canSpawn(depth);
+  const child = (/** @type {string} */ prompt, /** @type {any} */ piece) => recurse(prompt, { ...ctx, depth: depth + 1 },
+    { ...forChild(opts), input: Array.isArray(piece) || typeof piece === 'string' ? piece : isPlain(piece) ? [piece] : JSON.stringify(piece), [SHARED]: counter.child() });
+  const env = makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child });
+
+  const base = countingProvider(provider, counter);
+  const metered = Object.create(base); // per-round input peak of THIS node's own worker (the bounded-window claim)
+  metered.generate = async (/** @type {any[]} */ ...a) => {
+    const r = await /** @type {any} */ (base).generate(...a); node.rounds = (node.rounds || 0) + 1;
+    const u = r && r.usage; if (u) node.rootPeakInput = Math.max(node.rootPeakInput || 0, (u.inputTokens || 0) + (u.cacheReadTokens || 0) + (u.cacheCreationTokens || 0));
+    return r;
+  };
   const loop = new Loop({
-    provider,
-    system,
-    policy: ctx.policy || undefined,
-    onLlmResult: ctx.onLlmResult || undefined,
-    stream: ctx.stream || undefined,
+    provider: metered,
+    system: envSystem({ persona: opts.persona, meta: describeInput(input), kind, canSub, depth, maxDepth: counter.limits.maxDepth }),
+    policy: ctx.policy || undefined, onLlmResult: ctx.onLlmResult || undefined, stream: ctx.stream || undefined,
     throwOnError: false, // a worker fault surfaces as out.error → honest incomplete, never a thrown run
   });
+  env.setLoop(loop);
 
-  // Fresh message array = a true fresh window (RC-2 copy-on-return, IN side): the worker sees ONLY its task,
-  // never a parent transcript. `ctx.depth` is threaded so bareguard's policy can enforce the depth cap (§6).
-  const out = await loop.run(
-    // BA-9: prepend the caller's read-only working-context (paths/cwd) so this worker can locate its artifact.
-    [{ role: 'user', content: withContext(task, opts.context) }],
-    tools,
-    // auditSafeCtx: the run ctx reaches the gate as `_ctx`; strip the key-bearing provider (F16/BA-1). The
-    // worker Loop already has `provider` as a constructor option, so stripping it from the run ctx is invisible
-    // to the worker and only cleans the audited copy.
-    { ctx: auditSafeCtx(ctx, { depth }) },
-  );
+  let value; let blocker;
+  if (!err && !inputErr) {
+    // Fresh message array = a true fresh window; the input is NOT in it. auditSafeCtx: the gate records ctx verbatim as `_ctx` (F16/BA-1).
+    const out = await loop.run([{ role: 'user', content: withContext(task, opts.context) }], [...env.tools, ...(Array.isArray(opts.tools) ? opts.tools : [])], { ctx: auditSafeCtx(ctx, { depth }) });
+    node.tokens = out.metrics ? out.metrics.tokens : null;
+    node.model = out.model || provider.model || null;
+    if (!hasWork(node.best) && hasWork(out.text)) node.best = out.text; // BA-5
+    const e = typeof out.error === 'string' ? out.error : null;
+    if (e && e.startsWith('halt:')) err = new HaltError(`[${e}]`, { rule: e.slice(5) });
+    else if (env.state.wrong) blocker = { blocker: 'wrong-final', detail: env.state.wrong };
+    else if (env.state.final) value = env.state.final.value;
+    else if (e && e.startsWith('denied:')) blocker = { blocker: 'governance-deny' }; // BA-11: a deny spin is a governance block, not a model failure
+    else if (e) blocker = { blocker: 'error', error: e };
+    else if (kind === 'text' && hasWork(out.text)) value = out.text;
+  } else if (inputErr) blocker = { blocker: 'input', detail: `input source failed (${inputErr && inputErr.name ? inputErr.name : typeof inputErr})` };
 
-  node.tokens = out.metrics ? out.metrics.tokens : null;
-  node.model = provider.model || null;
-
-  // Guard exhaustion during generation → honest non-convergence (RC-9 / §9 scenario 3). The Loop already
-  // converted the HaltError to a clean `halt:<rule>` return (BA2) — recurse just honors it.
-  if (typeof out.error === 'string' && out.error.startsWith('halt:')) {
-    node.halted = true;
-    node.incomplete = true;
-    return { incomplete: true, best: out.text || null, receipts: node };
-  }
-  // BA-11: a deny-spin short-circuit. The Loop stopped the worker after N consecutive governance denials
-  // (a governance deny is not a recoverable tool error — retrying variants would burn to the budget cap;
-  // probe-16: 16 calls, sensor never reached → incomplete). Surface it as a clean, LABELED incomplete so a
-  // caller can tell a governance block apart from a model failure and act (widen scope, re-gate, escalate).
-  if (typeof out.error === 'string' && out.error.startsWith('denied:')) {
-    node.incomplete = true;
-    node.blocker = 'governance-deny';
-    return { incomplete: true, best: out.text || null, blocker: 'governance-deny', receipts: node };
-  }
-  if (out.error) {
-    node.incomplete = true;
-    return { incomplete: true, best: out.text || null, receipts: node };
-  }
-
-  // Synthesis / reduce (NB-3, build step 4) + verify (RC-7), under one HaltError guard: a governance cap that
-  // trips mid-synthesis or mid-verify is a clean exit returning the partial `best` (RC-6), never a thrown run.
-  let result = out.text;
-  try {
-    // Default (Family A) = the worker's own final text — the parent model already combined the children's
-    // returned results in its closing turn. `opts.synthesize` OVERRIDES that (§9.1): a FUNCTION is a
-    // deterministic code-reduce over the child `results` (the aggregation path — LLM arithmetic is the weak
-    // link); a STRATEGY string ('concat'|'merge') runs the built-in reducer. Either form is a REDUCE over
-    // children, so it only fires when this node actually spawned some — a leaf (incl. a single-shot worker, or
-    // a deep child with no grandchildren) has nothing to reduce, so its own direct answer stands. This is also
-    // why threading `synthesize` down the tree is correct: each level reduces ITS children, leaves don't.
-    if (childResults.length > 0 && opts.synthesize != null) {
-      if (typeof opts.synthesize === 'function') {
-        result = await opts.synthesize({ task, text: out.text, results: childResults, children: node.spawned, ctx });
-      } else if (typeof opts.synthesize === 'string') {
-        result = await synthesize(task, childResults, {
-          strategy: /** @type {any} */ (opts.synthesize),
-          provider,
-          contract: typeof opts.contract === 'string' ? opts.contract : null,
-          onLlmResult: ctx.onLlmResult,
-          policy: ctx.policy,
-          text: out.text,
-          children: node.spawned,
-          ctx,
-        });
-      }
-    }
-
-    // Honest completeness (RC-9 / §9 negative scenario 1): if ANY child came back incomplete, THIS node is
-    // incomplete — never a silent survivor-sum over partial data (the §9.1 undercount: 99 vs 151, no signal).
-    // Mirrors spike-2's `incomplete: parts.some(p => p.incomplete)`, which the shipped glue had dropped. The
-    // reduce still runs first, so `best` carries the partial answer; we just refuse to call it a clean success.
-    // Propagates up the tree: a dead grandchild → incomplete child → incomplete parent. (A dead *worker at this
-    // level* is already handled above via `out.error`; this covers a dead *child* surfacing through the reduce.)
-    const missingSlices = node.spawned.filter(c => c.incomplete).map(c => c.task);
-    if (missingSlices.length > 0) {
-      node.incomplete = true;
-      // BA-15: carry a child's blocker up, so a nested broken sensor still names itself at the top.
-      return incompleteWithBlocker(node, result, { missingSlices });
-    }
-
-    // Verify: a SEPARATE-context judge, never the generator grading itself. Runs when a contract is given, the
-    // caller supplied a verifier, OR the task is critical (the forced-verify safety rail).
-    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
-    if (wantVerify) {
-      // `return await` (not a bare `return`) is load-bearing here — see verifyOrBlock's JSDoc.
-      return await verifyOrBlock(task, result, ctx, opts, node);
-    }
-
-    return { result, verdict: null, receipts: node };
-  } catch (err) {
-    if (err instanceof HaltError) {
-      node.halted = true;
-      node.incomplete = true;
-      // BA-15: a halt AFTER the children ran (e.g. mid-synthesize) must still name a child's broken sensor —
-      // otherwise the caller reads a governance problem where their own arbiter crashed.
-      return incompleteWithBlocker(node, result);
-    }
-    throw err;
-  }
+  // The verifier is a SEPARATE isolated context but its calls count against the SAME brake (cap funds verify).
+  const res = await finish(node, value, err, { ctx: { ...ctx, provider: countingProvider(provider, counter) }, opts, counter, blocker });
+  if (counter.isRoot) node.calls = counter.metrics().calls;
+  return res;
 }
 
-/**
- * BA-15 — surface a CHILD's blocker at the PARENT. A nested tree aggregates a dead child into
- * `{incomplete, missingSlices}`; without this the child's `broken-sensor` (or `governance-deny`) label is
- * dropped at the first parent, so a top-level caller branching on `result.blocker` sees nothing and debugs
- * the model instead of its own sensor — the exact laundering BA-15 exists to close, reintroduced one level up.
- * `broken-sensor` wins over `governance-deny`: it names a fault in the CALLER's own code, which is both more
- * actionable and cheaper to fix than a gate decision.
- *
- * `blockerTask` names WHICH descendant broke. Without it a nested run reports "a sensor broke" with no way to
- * find which one — half a fix. (It is also why the label is NOT stamped onto the parent's own `blocker`; see
- * {@link incompleteWithBlocker}.)
- *
- * `'broken-verifier'` is deliberately NOT matched here: `forChild` strips `evaluate`, so a child never runs a
- * caller verifier and no child node can carry that label. Matching it would be unreachable code asserting a
- * capability that does not exist.
- * @param {RecurseNode[]} spawned - this node's child receipts.
- * @returns {{blocker: string, blockerDetail?: string, blockerTask?: string}|null}
- */
-function inheritedBlocker(spawned) {
-  const pick = spawned.find(c => c.incomplete && c.blocker === 'broken-sensor')
-    || spawned.find(c => c.incomplete && c.blocker);
-  if (!pick || !pick.blocker) return null;
-  return {
-    blocker: pick.blocker,
-    ...(pick.blockerDetail && { blockerDetail: pick.blockerDetail }),
-    ...(pick.task && { blockerTask: pick.task }),
-  };
-}
-
-/**
- * BA-15 — the ONE shared "this node is incomplete because a descendant was" return. Used by every aggregating
- * path (worker / partition / fanout) on BOTH its `missingSlices` branch AND its `HaltError` catch: the halt
- * branches originally skipped the inherit entirely, so a gate tripping AFTER a broken-sensor child (e.g. mid-
- * synthesize) dropped the label and the caller read a governance problem where their own sensor had crashed.
- *
- * The inherited label rides the RETURNED result (the caller-facing API — that surfacing is the whole point)
- * but is recorded on the node as `blockerFrom`, NOT by overwriting `node.blocker`. `node.blocker` means "THIS
- * node's own arbiter/Loop broke"; stamping a descendant's label onto every ancestor made the receipts tree
- * accuse nodes whose sensor never ran, and re-labelled a parent `governance-deny` when only one child was
- * denied — pointing the operator at the wrong node to re-gate.
- * @param {RecurseNode} node
- * @param {any} best
- * @param {{missingSlices?: string[]}} [extra] - extra fields for the non-halt aggregation branch.
- * @returns {RecurseResult}
- */
-function incompleteWithBlocker(node, best, extra = {}) {
-  const inherited = inheritedBlocker(node.spawned);
-  if (inherited) node.blockerFrom = inherited;
-  return /** @type {RecurseResult} */ ({ incomplete: true, best, ...extra, ...(inherited || {}), receipts: node });
-}
-/**
- * SCAN (§10 step 7 / §9.2.1) — the default retrieval mode for a "how many / all" task over a corpus. A
- * deterministic ORCHESTRATION, not a worker model call: every slice is processed, an isolated Loop LLM-judges
- * each window, and the matching ids are unioned + CODE-counted (the aggregation is CODE, never a model
- * Finish/count — RC-5 / §9.1 flaw #2, the path that does not silently undercount). The result is structured
- * (`{count, matchedIds}`), never a model-stated number. RC-9: a dead window → `{incomplete, missingSlices}`,
- * never folded into the count as a zero; a governance HaltError mid-scan → clean incomplete.
- *
- * The corpus is the generic array slice-source `opts.corpus`. Absent it, scan has nothing to read — litectx's
- * resident-corpus enumerate path is deferred (docs/archive/prd.md) — so we return an
- * honest incomplete, never a fabricated zero.
- * @param {string} task
- * @param {RecurseCtx} ctx
- * @param {RecurseOptions} opts
- * @param {{provider: Provider, depth: number, critical: boolean, node: RecurseNode}} state
- * @returns {Promise<RecurseResult>}
- */
-async function recurseScan(task, ctx, opts, state) {
-  const { provider, critical, node } = state;
-  node.model = provider.model || null;
-
-  // Resolve the slice-source: an in-hand array, or an async `() => Promise<Slice[]>` (e.g. `litectxCorpus`
-  // materializing a litectx-resident corpus via enumerate). A source fault is an honest incomplete, not a
-  // fabricated empty scan; a governance HaltError during materialization is a clean halt.
-  let corpus;
-  try {
-    const raw = typeof opts.corpus === 'function' ? await opts.corpus() : opts.corpus;
-    corpus = normalizeCorpus(raw);
-  } catch (err) {
-    if (err instanceof HaltError) {
-      node.halted = true;
-      node.incomplete = true;
-      return { incomplete: true, best: null, receipts: node };
-    }
-    node.incomplete = true;
-    return { incomplete: true, best: null, missingSlices: [`scan corpus source failed: ${err.message}`], receipts: node };
-  }
-  if (corpus.length === 0) {
-    node.incomplete = true;
-    return {
-      incomplete: true,
-      best: null,
-      missingSlices: ['scan requires a non-empty corpus (array or an async slice-source like litectxCorpus)'],
-      receipts: node,
-    };
-  }
-
-  // BA-5: hoisted so a halt thrown BELOW the scan (e.g. from the verify slot) still returns the finished,
-  // code-counted result as `best` instead of destroying it — re-running a scan re-pays every window judge call.
-  /** @type {{count: number, matchedIds: string[]}|null} */
-  let scanResult = null;
-  try {
-    const scan = await scanCount(task, corpus, {
-      provider,
-      window: opts.window,
-      passes: opts.passes,
-      ctx: auditSafeCtx(ctx, { depth: state.depth }), // scan's Loop run ctx reaches the gate — strip provider (F16/BA-1)
-      onLlmResult: ctx.onLlmResult,
-      policy: ctx.policy,
-    });
-    node.scan = { window: scan.window, passes: scan.passes, scanned: scan.scanned, matched: scan.count };
-    // Structured, CODE-counted result — the count is authoritative; matchedIds carry the evidence (RC-10).
-    const result = { count: scan.count, matchedIds: scan.matchedIds };
-    scanResult = result;
-
-    // RC-9: a dead window means we did NOT see every slice → the count is a floor, not the answer. Report it
-    // incomplete with the partial as `best`, never a clean pass over a hole.
-    if (scan.missingSlices.length > 0) {
-      node.incomplete = true;
-      return { incomplete: true, best: result, missingSlices: scan.missingSlices, receipts: node };
-    }
-
-    // Verify (RC-7): forced for critical, or when a contract/override is supplied. The judge grades the
-    // structured count against the goal/contract (an isolated grader, never the scanner itself).
-    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
-    if (wantVerify) {
-      // `return await` (not a bare `return`) is load-bearing here — see verifyOrBlock's JSDoc.
-      return await verifyOrBlock(task, result, ctx, opts, node);
-    }
-    return { result, verdict: null, receipts: node };
-  } catch (err) {
-    if (err instanceof HaltError) {
-      node.halted = true;
-      node.incomplete = true;
-      // BA-5, PARTIAL by construction: a halt from the VERIFY slot lands here with the scan already finished,
-      // so the counted result is returned instead of null (it previously survived only in receipts, forcing a
-      // full re-scan). A halt DURING `scanCount` — the likelier case, since a token cap trips after many window
-      // judge calls — still yields `null`: `scanCount` throws without surfacing the windows it did judge, so
-      // there is nothing here to preserve. Fixing that needs `scanCount` to return its partial union on halt
-      // (a retrieval-side change, not this seam's); tracked as a known limit rather than papered over here.
-      return { incomplete: true, best: scanResult, receipts: node };
-    }
-    throw err;
-  }
-}
-
-/**
- * DATA-DRIVEN WIDTH PARTITION (NB-2 / §11) — the *width* dial that stacks above the fixed/semantic count floor.
- * Distinct from Family B's `recurseFanout` (a `Planner` SEMANTIC decomposition): this MEASURES a real corpus and
- * PARTITIONS it into `width = max(floor, ⌈size / workerBudget⌉)` contiguous chunks (capped by the guards and by
- * the size), each scanned by a fresh-window `recurse({retrieval:'scan'})` worker, then CODE-reduced (union the
- * matched ids → count; the §9.1 aggregation, never a model count). `opts.count` is the width FLOOR (never
- * lowered); the data may RAISE it. Like `recurseFanout`: a pre-wave `ctx.policy('recurse_partition', …)`
- * checkpoint runs once `width` is known (a budget HaltError → clean incomplete before any worker spends); RC-9
- * holds (a dead/incomplete chunk → `{incomplete, missingSlices}`, never a survivor-sum).
- *
- * The corpus is the generic slice-source (`opts.corpus` array or async fn, e.g. `litectxCorpus`) — materialized
- * once in the parent (cheap: data in an array), then each worker's LLM context sees only its chunk's windows.
- * @param {string} task
- * @param {RecurseCtx} ctx
- * @param {RecurseOptions} opts
- * @param {{provider: Provider, depth: number, critical: boolean, node: RecurseNode}} state
- * @returns {Promise<RecurseResult>}
- */
-async function recursePartition(task, ctx, opts, state) {
-  const { provider, depth, critical, node } = state;
-  node.model = provider.model || null;
-
-  // 1) Materialize the slice-source (array or async fn). A fault is an honest incomplete; a Halt is clean.
-  let corpus;
-  try {
-    const raw = typeof opts.corpus === 'function' ? await opts.corpus() : opts.corpus;
-    corpus = normalizeCorpus(raw);
-  } catch (err) {
-    if (err instanceof HaltError) { node.halted = true; node.incomplete = true; return { incomplete: true, best: null, receipts: node }; }
-    node.incomplete = true;
-    return { incomplete: true, best: null, missingSlices: [`partition corpus source failed: ${err.message}`], receipts: node };
-  }
-  if (corpus.length === 0) {
-    node.incomplete = true;
-    return { incomplete: true, best: null, missingSlices: ['partition requires a non-empty corpus (array or async slice-source)'], receipts: node };
-  }
-
-  // 2) Width = max(floor, ⌈size / workerBudget⌉), never below the floor, capped at the corpus size (no empty
-  //    workers). `opts.count` is the floor; the data raises it. The guards (the checkpoint below) are the ceiling.
-  const size = corpus.length;
-  const floor = Number.isInteger(opts.count) && /** @type {number} */ (opts.count) > 0 ? /** @type {number} */ (opts.count) : 1;
-  const workerBudget = Number.isInteger(opts.workerBudget) && /** @type {number} */ (opts.workerBudget) > 0 ? /** @type {number} */ (opts.workerBudget) : DEFAULT_WORKER_BUDGET;
-  const dataWidth = Math.ceil(size / workerBudget);
-  const width = Math.min(Math.max(floor, dataWidth), size);
-  const concurrency = Number.isInteger(opts.concurrency) && /** @type {number} */ (opts.concurrency) > 0 ? /** @type {number} */ (opts.concurrency) : DEFAULT_FANOUT_CONCURRENCY;
-  node.partition = { size, workerBudget, floor, dataWidth, width };
-  // NB: `node.retrieval` stays null here (its default) — the partition orchestrator is its OWN dispatch path, not
-  // the Family-A scan dispatch; its audit record is `node.partition`. The per-chunk WORKERS run scan and record it
-  // on THEIR nodes (`receipts.spawned`). The node-literal null default is what makes this consistently defined
-  // (never `undefined`) across every dispatch path.
-
-  const childResults = [];
-  /** @type {{count: number, matchedIds: string[]}|null} */
-  let partitionResult = null;
-  try {
-    // 2b) Pre-wave checkpoint — width (the cost) is now known. A governance HaltError halts BEFORE any worker
-    //     spends (bounds the burst to zero); a plain deny is advisory (allowlist-safe), same contract as fanout.
-    if (typeof ctx.policy === 'function') {
-      try {
-        await ctx.policy('recurse_partition', { width, size, depth }, auditSafeCtx(ctx, { depth }));
-      } catch (err) {
-        if (err instanceof HaltError) throw err;
-      }
-    }
-
-    // 3) Partition into `width` chunks; each chunk → a fresh-window scan worker. The chunk rides on the step so
-    //    `runPlan` (waves + concurrency cap) can route it (executeFn gets only the step); results align by index.
-    const chunks = partitionInto(corpus, width);
-    const childOpts = { ...forChild(opts), retrieval: /** @type {'scan'} */ ('scan'), window: opts.window, passes: opts.passes };
-    const steps = chunks.map((chunk, i) => ({ id: `p${i}`, action: `partition ${i} (${chunk.length} items)`, dependsOn: [], chunk }));
-    const results = await runPlan(
-      steps,
-      (step) => recurse(task, { ...ctx, depth: depth + 1 }, { ...childOpts, corpus: /** @type {any} */ (step).chunk }),
-      { concurrency },
-    );
-
-    // 4) CODE-reduce: union the matched ids across chunks (chunks are disjoint, so union size == Σ counts, and
-    //    union is robust to any overlap). RC-9: a dead/incomplete chunk is a MISSING slice, never survivor-summed.
-    /** @type {Set<string>} */
-    const matched = new Set();
-    /** @type {string[]} */
-    const missingSlices = [];
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      const label = steps[i] ? steps[i].action : `partition ${i}`;
-      if (r.status !== 'done' || !r.result) {
-        node.spawned.push(makeDeadNode(label, depth + 1));
-        missingSlices.push(label);
-        continue;
-      }
-      const child = /** @type {RecurseResult} */ (r.result);
-      node.spawned.push(child.receipts);
-      const val = child.incomplete ? child.best : child.result;
-      if (val && Array.isArray(val.matchedIds)) for (const id of val.matchedIds) matched.add(id);
-      childResults.push(val);
-      if (child.incomplete) missingSlices.push(label);
-    }
-    const result = { count: matched.size, matchedIds: [...matched] };
-    partitionResult = result; // BA-5: a halt below this (e.g. verify) returns the full result, not a count-only rebuild
-    node.partition.matched = matched.size;
-
-    if (missingSlices.length > 0) {
-      node.incomplete = true;
-      // BA-15: carry a child's blocker up (see inheritedBlocker).
-      return incompleteWithBlocker(node, result, { missingSlices });
-    }
-    const wantVerify = critical || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
-    if (wantVerify) {
-      // `return await` (not a bare `return`) is load-bearing here — see verifyOrBlock's JSDoc.
-      return await verifyOrBlock(task, result, ctx, opts, node);
-    }
-    return { result, verdict: null, receipts: node };
-  } catch (err) {
-    if (err instanceof HaltError) {
-      node.halted = true;
-      node.incomplete = true;
-      // Prefer the finished result (a halt from the verify slot lands here with it already computed); else
-      // rebuild a best-effort count from whatever slices did return (BA-5, never a bare null).
-      const best = partitionResult
-        || (childResults.length ? { count: new Set(childResults.flatMap((v) => (v && Array.isArray(v.matchedIds) ? v.matchedIds : []))).size } : null);
-      // BA-15: a halt must not swallow a child's broken-sensor label (see incompleteWithBlocker).
-      return incompleteWithBlocker(node, best);
-    }
-    throw err;
-  }
-}
-
-/**
- * Family B (NB-2) — the forced-fan-out path. Deterministic count → `Planner` (the NB-2 `count` seam forces
- * exactly N independent parallel steps) → `runPlan` (wave parallelism, concurrency cap) → NB-3 reduce →
- * verify. Each step runs as a fresh-window `recurse()` child (so copy-on-return / honest-incomplete / the
- * capability-scrub all come for free, and a child MAY itself decompose under Family A); forced fan-out is NOT
- * re-applied to children (their `count`/`mode` are stripped). Reduce default is `'concat'` (lossless) since
- * there is no parent closing turn to combine the slices the way Family A's does. RC-9 holds: any dead/halted/
- * incomplete slice → `{incomplete, missingSlices}`, never a survivor-sum. A governance HaltError (planner,
- * a child, the reduce, or verify) is a clean `incomplete` exit, never a thrown run.
- * @param {string} task
- * @param {RecurseCtx} ctx
- * @param {RecurseOptions} opts
- * @param {{provider: Provider, depth: number, maxDepth: number, assessment: {level: string, score: number}, critical: boolean, node: RecurseNode}} state
- * @returns {Promise<RecurseResult>}
- */
-async function recurseFanout(task, ctx, opts, state) {
-  const { provider, depth, assessment, critical, node } = state; // maxDepth rides in opts → children
-  node.model = provider.model || null; // the orchestration is code; per-worker tokens live in node.spawned[]
-
-  // Count: an explicit positive-integer `opts.count` wins; otherwise the calibrated tier→count map. Floor at 1
-  // (a 0/NaN/negative `count` is meaningless for "guaranteed parallelism" — fall back to the tier default).
-  const explicit = Number.isInteger(opts.count) && /** @type {number} */ (opts.count) > 0 ? opts.count : null;
-  const count = explicit != null ? /** @type {number} */ (explicit) : (TIER_COUNT[assessment.level] || 1);
-  const concurrency = Number.isInteger(opts.concurrency) && /** @type {number} */ (opts.concurrency) > 0
-    ? opts.concurrency : DEFAULT_FANOUT_CONCURRENCY;
-
-  const childResults = [];
-  const contract = typeof opts.contract === 'string' ? opts.contract : null;
-  // BA-5: declared OUTSIDE the try so a halt from the verify slot (which lands in the catch below, with the
-  // reduce already computed and PAID FOR) returns the finished reduce instead of a lossy re-join of the raw
-  // child strings — a different TYPE from the documented reduce output, and an 'merge' strategy's LLM call
-  // thrown away. Mirrors `scanResult`/`partitionResult` on the sibling paths.
-  let result;
-
-  try {
-    // 1) Decompose into exactly `count` independent parallel steps (the NB-2 Planner seam). A non-Halt planner
-    //    failure (e.g. unparseable plan) is an honest incomplete — we cannot fan out, so we do not pretend to.
-    //    The plan call forwards its usage to the gate (`onLlmResult`) so decomposition spend is metered, not
-    //    invisible — and it is the CHEAP call that RESOLVES the unknown fan-out cost into a known width.
-    const planner = new Planner({ provider, onLlmResult: /** @type {any} */ (ctx.onLlmResult) || undefined });
-    let steps;
-    try {
-      // BA-9: forward the working-context as the Planner's `info` so the slices it writes are path-aware (a
-      // child still also receives `opts.context` directly via `forChild` — this just improves the split).
-      const planContext = typeof opts.context === 'string' && opts.context.trim() ? { count, info: opts.context } : { count };
-      steps = await planner.plan(task, planContext);
-    } catch (err) {
-      if (err instanceof HaltError) throw err;
-      node.incomplete = true;
-      return { incomplete: true, best: null, missingSlices: [task], receipts: node };
-    }
-
-    // 1b) Pre-wave gate checkpoint (the cost-commitment point). Decomposition just turned an UNKNOWN cost into
-    //    a KNOWN width — so before committing the worker wave, give the gate a chance to act on it. A governance
-    //    HaltError (e.g. bareguard's budget cap, or a near-threshold HITL pause surfaced as a halt) propagates
-    //    to the outer catch → clean incomplete, BEFORE any worker spends — this is what bounds the concurrent
-    //    burst (N workers can't each overshoot between post-round meters if the wave never launches). A plain
-    //    deny is advisory only: it must NOT break an allowlist policy that doesn't know this internal
-    //    descriptor — the load-bearing budget signal is the HaltError, on bareguard's existing contract.
-    if (typeof ctx.policy === 'function') {
-      try {
-        await ctx.policy('recurse_fanout', { count: steps.length, depth }, auditSafeCtx(ctx, { depth }));
-      } catch (err) {
-        if (err instanceof HaltError) throw err;
-        // non-halt policy error/deny → advisory; proceed (per-worker policy still gates each child below)
-      }
-    }
-
-    // 2) Fan out: each step is a fresh-window recurse() child. Forced fan-out is NOT re-applied to children, and
-    //    the top-level contract/verifier is the TOP's job — `forChild` strips both (the slices run Family A, or
-    //    single-shot; `maxDepth` is preserved so a genuinely oversized slice may still self-decompose).
-    const childOpts = forChild(opts);
-    const results = await runPlan(
-      steps,
-      (step) => recurse(step.action, { ...ctx, depth: depth + 1 }, childOpts),
-      { concurrency },
-    );
-
-    // 3) Collect copy-on-return values + lineage, in plan order. A failed step (executeFn threw) or a child
-    //    that came back incomplete/halted is a MISSING slice — recorded, never survivor-summed (RC-9).
-    /** @type {string[]} */
-    const missingSlices = [];
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      const slice = steps[i] ? steps[i].action : `slice ${i}`;
-      if (r.status !== 'done' || !r.result) {
-        node.spawned.push(makeDeadNode(slice, depth + 1));
-        childResults.push('');
-        missingSlices.push(slice);
-        continue;
-      }
-      const child = /** @type {RecurseResult} */ (r.result);
-      node.spawned.push(child.receipts);
-      const value = child.incomplete
-        ? (child.best == null ? '' : child.best)
-        : (child.result == null ? '' : child.result);
-      childResults.push(value);
-      if (child.incomplete) missingSlices.push(slice);
-    }
-
-    // 4) NB-3 reduce over the slice results. Unlike Family A there is no parent closing turn, so we ALWAYS
-    //    reduce: a `synthesize` FUNCTION is the deterministic code-reduce (§9.1); a string runs the built-in
-    //    reducer; unset defaults to lossless `'concat'`. (`childResults` always has `count` entries.)
-    if (typeof opts.synthesize === 'function') {
-      result = await opts.synthesize({ task, text: null, results: childResults, children: node.spawned, ctx });
-    } else {
-      const strategy = typeof opts.synthesize === 'string' ? opts.synthesize : 'concat';
-      result = await synthesize(task, childResults, {
-        strategy: /** @type {any} */ (strategy),
-        provider,
-        contract,
-        onLlmResult: ctx.onLlmResult,
-        policy: ctx.policy,
-        text: null,
-        children: node.spawned,
-        ctx,
-      });
-    }
-
-    // 5) Honest completeness (RC-9): any missing slice → incomplete, with the partial reduce as `best`.
-    if (missingSlices.length > 0) {
-      node.incomplete = true;
-      // BA-15: carry a child's blocker up (see inheritedBlocker).
-      return incompleteWithBlocker(node, result, { missingSlices });
-    }
-
-    // 6) Verify (RC-7): forced for critical, or when a contract/override is supplied.
-    const wantVerify = critical || contract != null || typeof opts.evaluate === 'function';
-    if (wantVerify) {
-      // `return await` (not a bare `return`) is load-bearing here — see verifyOrBlock's JSDoc.
-      return await verifyOrBlock(task, result, ctx, opts, node);
-    }
-    return { result, verdict: null, receipts: node };
-  } catch (err) {
-    if (err instanceof HaltError) {
-      node.halted = true;
-      node.incomplete = true;
-      // BA-5: prefer the FINISHED reduce when the halt landed after it (the verify slot); only fall back to a
-      // lossless join of the raw slices when the halt tripped before/during the reduce itself. Never a bare null.
-      const rejoined = childResults.length ? childResults.filter(v => v !== '').join('\n\n') : null;
-      const best = result !== undefined ? result : (rejoined || null);
-      // BA-15: a halt must not swallow a child's broken-sensor label (see incompleteWithBlocker).
-      return incompleteWithBlocker(node, best);
-    }
-    throw err;
-  }
-}
-
-/**
- * A receipts node for a slice that never produced a result (the worker threw / runPlan marked it failed) — so
- * the audit tree still shows the lineage and the dead branch, rather than a silent gap.
- * @param {string} task
- * @param {number} depth
- * @returns {RecurseNode}
- */
-function makeDeadNode(task, depth) {
-  const a = assessComplexity(task);
-  return {
-    task, depth,
-    complexity: { level: a.level, score: a.score },
-    critical: isCritical(task),
-    spawned: [], verdict: null, incomplete: true, halted: false, tokens: null, model: null,
-  };
-}
-
-/**
- * NB-4 — the `spawn_child` A-tool. The in-process self-call (§4.5 candidate (a), POC-resolved as default):
- * `execute` runs a full `recurse(subtask, {...ctx, depth: depth+1})`, so a delegated sub-task gets its own
- * fresh Loop / fresh window and may itself decompose, bounded by the same `maxDepth` + bareguard. Copy-on-
- * return (RC-2): only the child's declared RESULT string crosses back into the parent transcript — never the
- * child's scratch/transcript (the child receipts node is filed under `node.spawned` for audit, separate from
- * the transcript). A child `HaltError` is intentionally NOT caught here: it throws out of `execute`, the
- * Loop re-throws it (loop.js), and the parent's run halts cleanly — propagating the guard trip up the tree.
- * @param {RecurseCtx} ctx
- * @param {RecurseOptions} opts
- * @param {number} depth - The PARENT's depth; the child runs at `depth + 1`.
- * @param {number} maxDepth
- * @param {RecurseNode} node - The parent's receipts node; children append to `node.spawned`.
- * @param {any[]} childResults - Sink for each child's declared RESULT value (NB-3 reduce input).
- * @returns {ToolDef}
- */
-function buildSpawnTool(ctx, opts, depth, maxDepth, node, childResults) {
-  return {
-    name: 'spawn_child',
-    description:
-      'Delegate a sub-task to a fresh worker with its own clean context window. Use ONLY when a sub-task is ' +
-      'too large or too independent to handle directly in this pass. The worker returns ONLY its result — ' +
-      'not its working notes. Do the small/glue parts yourself and combine the results into your final answer.',
-    parameters: {
-      type: 'object',
-      properties: {
-        subtask: {
-          type: 'string',
-          description: 'A self-contained sub-task, with all the context the fresh worker needs to do it (it cannot see this conversation).',
-        },
-      },
-      required: ['subtask'],
-    },
-    /** @param {{subtask?: string}} args */
-    execute: async (args) => {
-      const subtask = typeof args?.subtask === 'string' ? args.subtask : '';
-      if (!subtask) return '[error] spawn_child requires a non-empty subtask string';
-      // A delegated child grades only ITS slice; the parent's contract/verifier is the top's job (see forChild).
-      const child = await recurse(subtask, { ...ctx, depth: depth + 1 }, forChild(opts));
-      node.spawned.push(child.receipts); // audit lineage (RC-10) — NOT the parent transcript
-      // Only the declared result crosses the boundary (RC-2). An incomplete child is reported honestly, not
-      // silently dropped or faked. The same declared value is collected for the NB-3 reducer.
-      const value = child.incomplete ? (child.best == null ? '' : child.best) : (child.result == null ? '' : child.result);
-      childResults.push(value);
-      // BA-15: a child blocked by a BROKEN ARBITER must not read to the parent model as a generic failure.
-      // Collapsed into a bare `[incomplete]`, the parent cannot tell "the model failed" from "the judge is
-      // broken", so it re-spawns the identical subtask against the identical broken sensor — re-running a
-      // full leaf attempt each time, up to the Loop's round limit. That is BA-15's own spend-burn ("retrying
-      // against a broken arbiter carries zero feedback") reintroduced one level up, so the tool result says
-      // so explicitly and tells the model not to retry.
-      if (child.incomplete && child.blocker === 'broken-sensor') {
-        const where = child.blockerTask ? ` (in sub-task: ${child.blockerTask})` : '';
-        return `[blocked: broken-sensor] The CHECK that judges this subtask is itself broken${where} — ${child.blockerDetail || 'no detail available'}. Retrying will hit the same broken check: do NOT re-delegate this subtask; report it as blocked. Partial output: ${String(value)}`.trim();
-      }
-      if (child.incomplete) return `[incomplete] ${String(value)}`.trim();
-      return String(value);
-    },
-  };
-}
+const isPlain = (/** @type {any} */ x) => !!x && typeof x === 'object' && typeof x.id === 'string' && typeof x.text === 'string';
 
 module.exports = { recurse };

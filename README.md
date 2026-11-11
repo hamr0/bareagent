@@ -37,7 +37,7 @@ An LLM call is slow, deliberate thinking (System 2). Jev, from TypeSafe, is the 
 
 ## Break big tasks down — RLM
 
-`recurse` brings Recursive Language Models (RLM) to your code in one call: split a hard task into smaller ones, run each in a fresh context window, check the result, and stitch it back together. The model decides when to split (or you force a fixed count), and over a large set of documents it picks the path by question shape — scan everything for "how many", search for a needle. Totals are counted by code, and a dead worker comes back `incomplete`, never a faked pass. Cost is open by design: run it under a budget cap (bareguard) or set `maxDepth: 1`.
+`recurse` brings Recursive Language Models (RLM) to your code in one call: the data stays out of the prompt, in a variable the model inspects through a small fixed set of tools, so a task over far more data than fits in context still runs with a small, bounded window. Counts and totals are derived by code from what the model points at (never a number it typed), and a dead worker, a tripped limit or a failed check comes back `incomplete`, never a faked pass. Hard limits on the number of calls are on by default, sized by code from the input. On the full 7,600-item AG News set, past the model's context, it counted with 0.99 recall while the same task inlined in one prompt answered confidently and missed 88%. Money caps stay with the budget gate (bareguard).
 
 ## What's inside
 
@@ -48,7 +48,7 @@ Every piece works alone — take what you need, ignore the rest. No required dep
 | Act | Loop | think → act → observe until done, any provider, opt-in policy/assemble/trim seams |
 | Act | Planner + runPlan | break a goal into a step DAG, run steps in parallel waves |
 | Act | assessComplexity | rate a goal from its text alone, no LLM — gates whether to plan |
-| Act | recurse | RLM in one call — decompose → fan-out → verify → synthesize (see above) |
+| Act | recurse | RLM in one call — input in an environment, fixed tools, typed answer, hard call limits (see above) |
 | Act | Memory | persist and recall across sessions — JSON, SQLite, or litectx in a one-line swap |
 | Act | StateMachine | task lifecycle: pending → running → done / failed / waiting / cancelled |
 | Act | Scheduler | cron or relative triggers, survives restarts |

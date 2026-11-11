@@ -274,7 +274,7 @@ pure content — its diff changes only when primitives change. Suite-wide conven
       "import": "import { recurse } from 'bare-agent'",
       "signature": "recurse(task: string, ctx: object, opts?: object) => Promise<{result, verdict, receipts} | {incomplete, best, receipts}>",
       "fails": "returns {incomplete, best} on guard exhaustion or a dead worker (never a faked pass); a gate HaltError exits clean. Cost is open by design — run under a budget gate.",
-      "example": "const ctx = wireGate(gate);\nconst { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, corpus });\nif (incomplete) retryOrEscalate(result);"
+      "example": "const ctx = wireGate(gate);\nconst { result, incomplete } = await recurse('audit 400 logs', ctx, { provider, input: logs });\nif (incomplete) retryOrEscalate(result);"
     }
   ]
 }

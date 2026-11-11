@@ -12,6 +12,8 @@ const { verify, BrokenArbiterError } = require('./refine-worker');
  * @property {any} [ctx] - per-run ctx (provider/onLlmResult/policy) handed to the verifier.
  * @property {any} [opts] - recurse options (`evaluate`, `contract`, `context`) read by the verify slot.
  * @property {import('./recurse-brakes').Counter} [counter] - root counter => `metrics`; `unbraked` flag source.
+ * @property {{blocker: string, [k: string]: any}} [blocker] - a path-detected non-halt stop (`wrong-final`,
+ *   `governance-deny`, `error`, ...): returned as an incomplete carrying these fields; `best` keeps the last work.
  */
 
 /** Non-empty work: a non-blank string, or any non-null non-string. */
@@ -47,7 +49,7 @@ function inheritedBlocker(spawned) {
  * @returns {Promise<any>}
  */
 async function finish(node, value, err, run = {}) {
-  const { ctx = {}, opts = {}, counter } = run;
+  const { ctx = {}, opts = {}, counter, blocker } = run;
   const best = hasWork(value) ? value : hasWork(node.best) ? node.best : null;
   const inherited = inheritedBlocker(node.spawned);
   if (inherited) node.blockerFrom = inherited;
@@ -76,6 +78,10 @@ async function finish(node, value, err, run = {}) {
   if (err !== undefined && err !== null) {
     if (err instanceof HaltError) return incomplete(haltFields(err));
     throw err;
+  }
+  if (blocker && typeof blocker.blocker === 'string') {
+    node.blocker = blocker.blocker;
+    return incomplete({ ...blocker });
   }
   if (Array.isArray(node.missingSlices) && node.missingSlices.length) {
     return incomplete({ missingSlices: node.missingSlices }); // RC-9: never survivor-sum a dead piece

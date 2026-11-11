@@ -13,7 +13,7 @@ function inferCategory(file) {
   const b = basename(file, '.js');
   if (b === 'loop') return 'loop';
   if (/^transport-/.test(b)) return 'transports';
-  if (b === 'recurse-retrieval') return 'retrieval';
+  if (b === 'recurse-adapters') return 'retrieval';
   if (/^recurse/.test(b) || b === 'planner' || b === 'run-plan') return 'orchestration';
   if (['evaluator', 'refine', 'remember'].includes(b) || /^judge/.test(b)) return 'evaluation';
   if (b === 'complexity') return 'routing';

@@ -177,3 +177,14 @@ describe('finish: unbraked flag + root metrics', () => {
     assert.equal(r.metrics.costUsd, null);
   });
 });
+
+describe('finish: path-detected blocker (run.blocker)', () => {
+  it('returns an incomplete carrying the blocker fields, best = last work; a HaltError still wins; no verify runs', async () => {
+    const p = evalProvider(SAT);
+    const r = await finish(node(PLAIN, { best: 'last work' }), undefined, undefined, { ctx: { provider: p }, opts: ok, blocker: { blocker: 'wrong-final', detail: 'x' } });
+    assert.equal(r.incomplete, true); assert.equal(r.blocker, 'wrong-final'); assert.equal(r.detail, 'x'); assert.equal(r.best, 'last work');
+    assert.equal(r.receipts.blocker, 'wrong-final'); assert.equal(p.calls, 0);
+    const h = await finish(node(), undefined, new HaltError('x', { rule: 'budget' }), { blocker: { blocker: 'wrong-final' } });
+    assert.equal(h.blocker, 'halt');
+  });
+});
