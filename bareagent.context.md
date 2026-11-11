@@ -13,7 +13,7 @@ bareagent is a lightweight agent orchestration library (small core, zero require
 npm install bare-agent
 ```
 
-Eight entry points:
+Nine entry points:
 - `require('bare-agent')` — Loop, Planner, **assessComplexity** (pure-code no-LLM pre-planner → `{level, score, needsPlanning, signals}`), StateMachine, Scheduler, Checkpoint, Memory, Stream, Retry, runPlan, CircuitBreaker, wireGate, defaultActionTranslator, **toUnits, fromUnits, unitAssembler** (the `assemble` context-units adapter, v0.13+), **unitTrimmer, harvestKey** (the destructive `trim` seam adapter — RT-2 harvest-before-evict, needs a consumer on litectx ≥ 0.16.0), BareAgentError, ProviderError, ToolError, TimeoutError, ValidationError, CircuitOpenError, **HaltError**
 - `require('bare-agent/errors')` — same error classes via a stable subpath (v0.10.1+) for adopters who want to import only the error surface
 - `require('bare-agent/providers')` — OpenAI, Anthropic, Ollama, CLIPipe, Fallback (the canonical short names; `*Provider` aliases — `OpenAIProvider`, `AnthropicProvider`, etc. — are also exported and match the class names, so either destructure works, v0.12.1+)
@@ -22,6 +22,7 @@ Eight entry points:
 - `require('bare-agent/tools')` — createBrowsingTools, createMobileTools, createShellTools, resolveToolPath, createSpawnTool, createDeferTool, spawnChild, readDeferQueue, liteCtxMcpBridgeConfig
 - `require('bare-agent/mcp')` — createMCPBridge (returns `tools` + `metaTools`), discoverServers, buildMetaTools, listServerTools
 - `require('bare-agent/bareguard')` — wireGate (one-line bareguard Gate integration), defaultActionTranslator
+- `require('bare-agent/recurse-adapters')` — buildScanTool, buildSearchTool, buildExactTool, litectxCorpus (ordinary tools / an `input` source for `recurse`; moved off the root export in the recurse v2 rebuild)
 
 **TypeScript:** bareagent is pure JS + JSDoc but ships `.d.ts` declarations (generated from that JSDoc, v0.11+). Every entry point above resolves types automatically — `import { Loop } from 'bare-agent'` and `import { OpenAI } from 'bare-agent/providers'` give full autocomplete and type-checking, including required-option enforcement (e.g. `new Loop({})` is a type error: `provider` is required). No `@types/bare-agent` needed. Shared shapes (`Provider`, `Message`, `ToolDef`, `ToolCall`, `Usage`, `GenerateResult`, `Store`) are exported from the package's `types/`. The repo itself runs `tsc --checkJs` in CI on every push/PR so the JSDoc and the code can't drift.
 
