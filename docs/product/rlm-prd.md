@@ -102,7 +102,13 @@ Findings that change the design:
 5. **The inline control is not decisive at these sizes.** deepseek-flash read ~106k inlined tokens and answered. "Inline must break" needs an input truly past the model's context; until then the RLM win shown is the bounded window, not accuracy.
 6. **Harness confound (caught, fixed):** inline answers wrote bare ids ("26,27…"), and the scorer only read `rec:N`, so it scored inline 0 and faked both the (a)/(b) failures and the NC1-big pass. The scorer now normalizes ids; that is a parse fix with no bar change, noted in the POC header.
 
-Still open: the paired re-run after the scorer fix; a second, differently-shaped model before any default is fixed; judge-precision ideas from bareloop (re-judge only the yes set, quote-evidence checked by code), to be measured ON/OFF rather than assumed.
+**Update 2026-11-11 (after the scorer fix; logs `.claude/scratch/rlm-v2-baseline.log`, `.claude/scratch/rlm-v2-big7600.log`):**
+- **Paired count at 600 items, baseline-only, 3 reps:** PASS 3/3. RLM recall 0.99 vs inline 0.88–0.90; precision both ~0.93–0.95 (ceiling = AG News label noise). RLM 153 calls vs formula cap 213; root peak ~2,080 tokens vs ~35k inline.
+- **NC1-big at 2,500 items (~157k est. tokens) was INVALID 3/3:** inline still answered (recall 0.84–0.86, precision 0.92–0.93). It degraded but did not break; the control was too small.
+- **Beyond-context run, 1 rep, `--big 7600` (the whole AG News test set; 10,000 items not available):** RESULT ALL PASS, every pre-registered bar (a)–(f) 1/1, NC2 failed as required. NC1-big inline plain Loop on 7,600 items (~472k est. tokens by chars/4; provider-reported inputTokens 286,780) returned `stop=end_turn` with NO error, recall 0.19, precision 0.92: a SILENT failure (answered confidently, missed 81%). (f) RLM on 7,600: recall 0.99, precision 0.95, root peak 2,096 tokens, 1,903 calls vs cap 2,400 (classify 1,901, memoHits 0). At 600 items in the same run: RLM recall 0.99 vs inline 0.88.
+- **Caveat:** n=1 for the big run, one model only. A second, differently-shaped model is still required before any default is fixed.
+
+Still open (earlier items; the paired re-run is done, see above): a second, differently-shaped model before any default is fixed; judge-precision ideas from bareloop (re-judge only the yes set, quote-evidence checked by code), to be measured ON/OFF rather than assumed.
 
 ### What breaks for existing callers
 
