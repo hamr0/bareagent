@@ -2,12 +2,11 @@
 
 // recurse() v2 — the ENVIRONMENT (docs/product/rlm-prd.md §0.1, decision 4: fixed tools, no model-written code).
 // The input lives in a var map the model never sees whole; every tool returns a TRUNCATED preview and stores the
-// full value under a new var name. Counting/union/derivation is CODE. Ported from the validated POC
+// full value under a new var name. Counting/derivation is CODE. Ported from the validated POC
 // (poc/rlm-v2-env.mjs): typed final, memo, classify (shipped scan wording, window 8, 2 deterministic passes).
 
 /** @typedef {import('../types').ToolDef} ToolDef */
 
-const { createHash } = require('node:crypto');
 const { Loop } = require('./loop');
 const { HaltError } = require('./errors');
 const { countingProvider } = require('./recurse-brakes');
@@ -77,7 +76,7 @@ function describeInput(/** @type {string|any[]|null} */ input) {
  * @returns {{tools: ToolDef[], state: {final: any, wrong: string|null}, setLoop: (l: any) => void}}
  */
 function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child }) {
-  const vars = new Map(); const kinds = new Map(); const hashes = new Map(); const memo = new Map(); const missingOf = new Map();
+  const vars = new Map(); const kinds = new Map(); const memo = new Map(); const missingOf = new Map();
   const conc = Number.isInteger(opts.concurrency) && opts.concurrency > 0 ? opts.concurrency : DEFAULT_CONCURRENCY;
   const known = new Set(Array.isArray(input) ? input.map((r) => r.id) : []);
   const canSub = counter.canSpawn(depth);
@@ -93,12 +92,12 @@ function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child
   };
   const get = (/** @type {string} */ name) => { if (!vars.has(name)) throw new Error(`unknown var "${name}" (vars: ${[...vars.keys()].join(', ')})`); return vars.get(name); };
   const reply = (/** @type {any} */ value, /** @type {string} */ k, /** @type {{best?: boolean, missing?: string[]}} */ x = {}) => { const name = store(value, k, x); return `var=${name} kind=${k} type=${typeOf(value)}${x.missing && x.missing.length ? ` MISSING ${JSON.stringify(x.missing)} (incomplete)` : ''}\n${preview(value, name)}`; };
-  const hashOf = (/** @type {string} */ name) => { if (!hashes.has(name)) hashes.set(name, createHash('sha1').update(JSON.stringify(get(name))).digest('hex')); return hashes.get(name); };
-  // Memoize by exact args + hash of the delivered input var; a repeat costs ZERO LLM calls.
-  const memoized = async (/** @type {string} */ tool, /** @type {any} */ args, /** @type {string[]} */ names, /** @type {() => Promise<string>} */ fn) => {
-    const key = `${tool}|${JSON.stringify(args)}|${names.map(hashOf).join(',')}`;
+  // Memoize by tool + exact args (vars are write-once, so a var name pins its value); a repeat costs ZERO LLM calls.
+  // A result with missing slices is NOT memoized: re-running the same call must retry the dead window.
+  const memoized = async (/** @type {string} */ tool, /** @type {any} */ args, /** @type {() => Promise<string>} */ fn) => {
+    const key = `${tool}|${JSON.stringify(args)}`;
     if (memo.has(key)) { const v = memo.get(key); node.memoHits++; return `already computed → var ${v} (memo hit, 0 LLM calls)\n${preview(vars.get(v), v)}`; }
-    const out = await fn(); memo.set(key, last); return out;
+    const out = await fn(); if (!missingOf.has(last)) memo.set(key, last); return out;
   };
 
   /** One fresh-window leaf Loop; a gate/brake halt is re-thrown as a HaltError, a worker fault returns null (dead). */
@@ -155,7 +154,7 @@ function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child
         execute: async ({ var: v, terms }) => {
           if (!Array.isArray(terms) || !terms.length) throw new Error('find needs a non-empty terms array');
           const x = get(v); const items = flatItems(x);
-          return memoized('find', { var: v, terms }, [v], async () => {
+          return memoized('find', { var: v, terms }, async () => {
             const ids = typeof x === 'string' ? [] : findIds(items, terms); const m = new Set(ids);
             const hit = typeof x === 'string' ? x.split('\n').filter((l) => terms.every((t) => l.toLowerCase().includes(String(t).toLowerCase()))) : items.filter((r) => m.has(r.id));
             const name = store(hit, typeof x === 'string' ? 'text' : 'items');
@@ -176,14 +175,14 @@ function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child
           execute: async ({ prompt, listVar }) => {
             const x = get(listVar); if (!Array.isArray(x)) throw new Error('map needs a list var');
             counter.checkWidth(x.length); // brake:maxWidth — refused past the cap, the model cannot raise it
-            return memoized('map', { prompt, listVar }, [listVar], async () => {
+            return memoized('map', { prompt, listVar }, async () => {
               const answers = await pool(conc, x.map((piece) => () => sub(prompt, piece)));
               const missing = answers.map((a, i) => (a === null ? `map slot ${i}` : null)).filter((m) => m !== null);
               return reply(answers, 'answers', { missing: /** @type {string[]} */ (missing) }); }); } },
         { name: 'classify', description: 'COUNT/FIND all items matching a predicate over a list var (the input, or chunks). Scans EVERY item with an LLM judge and counts in CODE; returns a var of kind count/ids {count, ids}. Use for "how many"/"all" questions; never count yourself.', parameters: obj({ predicate: S, var: S }, ['predicate', 'var']),
           execute: async ({ predicate, var: v }) => {
             const list = flatItems(get(v)).filter(isItem); if (!list.length) throw new Error('classify needs a list var of items');
-            return memoized('classify', { predicate, var: v }, [v], async () => {
+            return memoized('classify', { predicate, var: v }, async () => {
               const wins = [];
               for (let p = 0; p < SCAN_PASSES; p++) { const off = p ? Math.floor(SCAN_WINDOW / 2) : 0; // deterministic rotation, no RNG
                 for (let i = -off; i < list.length; i += SCAN_WINDOW) { const w = list.slice(Math.max(0, i), i + SCAN_WINDOW); if (w.length) wins.push(w); } }
@@ -201,24 +200,19 @@ function makeEnv({ input, kind, node, counter, depth, ctx, opts, provider, child
     tools.push(
       { name: 'join', description: 'Join a list var of answers/texts into ONE text var (code, newline-separated).', parameters: obj({ listVar: S }, ['listVar']),
         execute: ({ listVar }) => { const x = get(listVar); if (!Array.isArray(x)) throw new Error('join needs a list var'); return reply(x.map(asText).join('\n'), 'text', { best: true, missing: missingOf.get(listVar) }); } },
-      { name: 'union', description: 'Union the ids found across a list var (each element a classify/map answer containing ids). Returns a var of kind count/ids {count, ids}.', parameters: obj({ listVar: S }, ['listVar']),
-        execute: ({ listVar }) => {
-          const x = get(listVar); if (!Array.isArray(x)) throw new Error('union needs a list var'); const ids = new Set();
-          for (const e of x) { const toks = e && e.ids ? e.ids : String(e ?? '').split(/[\s,]+/); for (const t of toks) if (known.has(t)) ids.add(t); }
-          return reply({ count: ids.size, ids: [...ids] }, 'ids', { missing: missingOf.get(listVar) }); } },
       { name: 'count', description: 'Code count of a var: {count,ids} -> ids.length, list -> length. (Informational: a bare number cannot be the final answer.)', parameters: obj({ var: S }, ['var']),
         execute: ({ var: v }) => { const x = get(v); return reply(x && x.ids ? x.ids.length : Array.isArray(x) ? x.length : 1, 'number'); } },
     );
   }
   if (kind === 'composite') {
-    tools.push({ name: 'final_parts', description: 'Final answer for a needle+count question: needle = the exact text of the item; count = the NAME of a var of kind count (classify/union result). Code derives the number from that var. Ends the run.', parameters: obj({ needle: S, count: S }, ['needle', 'count']),
+    tools.push({ name: 'final_parts', description: 'Final answer for a needle+count question: needle = the exact text of the item; count = the NAME of a var of kind count (classify result). Code derives the number from that var. Ends the run.', parameters: obj({ needle: S, count: S }, ['needle', 'count']),
       execute: ({ needle, count }) => {
         if (typeof needle !== 'string' || !needle.trim()) return reject('needle text is empty');
         if (!vars.has(count) || kinds.get(count) !== 'ids') return reject(`count var "${count}" is not a count/ids var`);
         return accept({ needle, count: idsPayload(count) }, missingOf.get(count)); } });
   } else {
     tools.push(
-      { name: 'final', description: 'Final answer: cite a var of the matching kind (for a count question: the classify/union var — code derives the number). Ends the run.', parameters: obj({ var: S }, ['var']),
+      { name: 'final', description: 'Final answer: cite a var of the matching kind (for a count question: the classify var — code derives the number). Ends the run.', parameters: obj({ var: S }, ['var']),
         execute: ({ var: v }) => {
           if (!vars.has(v)) return reject(`unknown var "${v}"`);
           const k = kinds.get(v);

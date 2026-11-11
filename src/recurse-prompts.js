@@ -76,8 +76,8 @@ const SUB_SYSTEM = 'You answer one question about one piece of data. Be brief an
 
 /** The typed-final rule + ONE legal example per answer kind ("AI points, code decides"). */
 const TYPED_FINAL = {
-  count: 'ANSWER KIND: count. End with final("<var>") citing the var returned by classify/union (e.g. classify(...) returned var=v2, so call final("v2")). CODE derives the number from that var\'s ids — NEVER type a number; final_text is refused.',
-  ids: 'ANSWER KIND: ids. End with final("<var>") citing the var returned by classify/union (e.g. final("v2")).',
+  count: 'ANSWER KIND: count. End with final("<var>") citing the var returned by classify (e.g. classify(...) returned var=v2, so call final("v2")). CODE derives the number from that var\'s ids — NEVER type a number; final_text is refused.',
+  ids: 'ANSWER KIND: ids. End with final("<var>") citing the var returned by classify (e.g. final("v2")).',
   composite: 'ANSWER KIND: needle text + count. End with final_parts(needle="<exact text of the item>", count="<var of kind count>"), e.g. final_parts(needle="Some exact headline", count="v3"). CODE derives the number from the count var — NEVER type a number.',
   text: 'ANSWER KIND: text. End with final_text("<your answer>"), or cite a text var with final("<var>").',
 };
@@ -89,7 +89,7 @@ const TYPED_FINAL = {
  */
 function envScope(depth, maxDepth) {
   if (depth >= maxDepth) {
-    return `\nDEPTH ${depth} of ${maxDepth} — this is the deepest level. You CANNOT delegate: ask, map and classify are not available. Work directly with info/peek/find/chunk/join/union/count; if the task cannot be answered faithfully, say so rather than guessing.`;
+    return `\nDEPTH ${depth} of ${maxDepth} — this is the deepest level. You CANNOT delegate: ask, map and classify are not available. Work directly with info/peek/find/chunk/join/count; if the task cannot be answered faithfully, say so rather than guessing.`;
   }
   if (depth > 0) return `\nDEPTH ${depth} of ${maxDepth} — you are inside a delegated sub-task. PREFER DIRECT ACTION; only delegate further when a part is genuinely too large for one pass.`;
   return '';

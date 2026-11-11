@@ -88,7 +88,8 @@ async function finish(node, value, err, run = {}) {
   }
   if (value === undefined || value === null) { node.blocker = 'no-final'; return incomplete({ blocker: 'no-final' }); }
 
-  const wantVerify = isCritical(node.task) || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
+  // The isCritical floor guards the TOP task only: a child's task is a model-written ask/map prompt, never the caller's.
+  const wantVerify = ((!counter || counter.isRoot) && isCritical(node.task)) || typeof opts.contract === 'string' || typeof opts.evaluate === 'function';
   if (!wantVerify) return success(node, value, null, counter);
 
   try {

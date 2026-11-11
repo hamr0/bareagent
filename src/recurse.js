@@ -37,7 +37,7 @@ const { refineWorker, newNode, withContext, auditSafeCtx } = require('./refine-w
  *   `input`; the root prompt shows ONLY metadata (type, size, short prefix). A function is awaited once. Malformed or
  *   duplicate `Slice`s are dropped and counted in `receipts.input.dropped`.
  * @property {'count'|'ids'|'text'|'composite'} [kind='text'] - The answer kind the CALLER expects. `count`/`ids`: the
- *   model must cite a classify/union var with `final(var)` and CODE derives `{count, ids}`; `composite`: `final_parts`
+ *   model must cite a classify var with `final(var)` and CODE derives `{count, ids}`; `composite`: `final_parts`
  *   gives `{needle, count:{count, ids}}`; `text`: `final_text`/`final(var)`, or a plain reply. A wrong-kind final gets
  *   ONE nudge, then `{incomplete, blocker:'wrong-final'}`; no final at all is `blocker:'no-final'`.
  * @property {{maxDepth?: number, maxCalls?: number, maxWidth?: number, maxRounds?: number} | 'none'} [limits] - Structural
@@ -114,7 +114,7 @@ const SHARED = Symbol('recurse.shared');
 const REMOVED = {
   corpus: 'use opts.input (and kind:"count" with classify)', retrieval: 'use opts.input', window: 'fixed at 8', passes: 'fixed at 2',
   mode: 'use limits.maxWidth / concurrency', count: 'use limits.maxWidth / concurrency', workerBudget: 'use limits.maxWidth / concurrency',
-  synthesize: 'reductions are code tools (join/union/count)',
+  synthesize: 'reductions are code tools (join/count)',
 };
 
 let shimWarned = false;

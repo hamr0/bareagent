@@ -661,3 +661,30 @@ describe('recurse v2 — compat shim for relayfact (decision 3)', () => {
     assert.equal(never.receipts.refineLeaf.passed, false); assert.equal(never.incomplete, undefined, 'honest non-recovery rides the refineWorker result shape, unchanged');
   });
 });
+
+describe('recurse v2 — ledger fixes (union removed, root-only critical floor, no memo of incomplete)', () => {
+  const ids10 = Array.from({ length: 10 }, (_, i) => ({ id: String(i + 1), text: `item ${i + 1}` }));
+  it('no `union` tool is offered and no tool description or system prompt mentions it', async () => {
+    const sp = scripted(agent({ script: [['final', { var: 'input' }]], text: 'x' }));
+    await recurse(SIMPLE_TASK, { provider: sp.provider }, { input: ids10, kind: 'count', limits: { maxDepth: 1 } });
+    for (const c of sp.calls) {
+      assert.ok(!c.tools.includes('union'), 'union not offered');
+      assert.ok(!/union/i.test(JSON.stringify(c.toolDefs.map((t) => ({ n: t.name, d: t.description, p: t.parameters })))), 'no tool description mentions union');
+      assert.ok(!/union/i.test(String(c.system || '')), 'system prompt does not mention union');
+    }
+    assert.ok(sp.calls.length > 0);
+  });
+  it('the isCritical floor fires at the ROOT only: a critical-sounding child ask runs no verify; a critical root still does', async () => {
+    const mk = (root) => scripted(agent({ script: [['ask', { prompt: 'investigate the security breach in production', var: 'input' }], ['final', { var: 'v1' }]], child: () => ({ text: 'CHILD' }) }));
+    const a = mk(); const out = await recurse(SIMPLE_TASK, { provider: a.provider }, { input: 'some text', limits: { maxDepth: 2 } });
+    assert.equal(out.result, 'CHILD'); assert.equal(a.calls.filter((c) => c.user.startsWith('GOAL:')).length, 0);
+    const b = mk(); const crit = await recurse(CRITICAL_TASK, { provider: b.provider }, { input: 'some text', limits: { maxDepth: 2 } });
+    assert.equal(b.calls.filter((c) => c.user.startsWith('GOAL:')).length, 1, 'only the root verifies'); assert.equal(crit.verdict.pass, true);
+  });
+  it('a classify that lost a window is NOT memoized: the identical re-run re-calls the provider and recovers', async () => {
+    const sp = scripted(agent({ script: [['classify', { predicate: PRED, var: 'input' }], ['classify', { predicate: PRED, var: 'input' }], ['final', { var: 'v2' }]], leaf: judge({ deadAt: 2 }) }));
+    const out = await recurse('how many?', { provider: sp.provider }, { input: corpusOf(20), kind: 'count' });
+    assert.equal(leafCalls(sp).length, 12, 'the retry re-ran all 6 windows'); assert.equal(out.receipts.memoHits, 0);
+    assert.equal(out.result.count, 10); assert.equal(out.incomplete, undefined);
+  });
+});
